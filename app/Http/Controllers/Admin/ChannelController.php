@@ -122,7 +122,7 @@ class ChannelController extends Controller
         $channel = Channel::create([
             'name' => $validated['name'],
             'slug' => \Str::slug($validated['name']),
-            'channel_number' => $validated['channel_number'] ?? null,
+            'channel_number' => $validated['channel_number'] ?? ((int) Channel::max('channel_number') + 1),
             'description' => $validated['description'] ?? null,
             'logo_url' => $validated['logo_url'] ?? null,
             'genre' => $validated['genre'] ?? null,
@@ -221,6 +221,10 @@ class ChannelController extends Controller
             $validated['slug'] = \Str::slug($validated['name']);
         }
 
+        if (array_key_exists('channel_number', $validated) && $validated['channel_number'] === null) {
+            $validated['channel_number'] = $channel->channel_number;
+        }
+
         $channel->update($validated);
 
         return redirect()->route('admin.channels.index')
@@ -279,6 +283,8 @@ class ChannelController extends Controller
         $names = $nameMatches[1] ?? [];
         $urls = $urlMatches[1] ?? [];
 
+        $nextChannelNumber = (int) Channel::max('channel_number') + 1;
+
         foreach ($urls as $i => $url) {
             $url = trim($url);
             if (empty($url)) continue;
@@ -317,6 +323,7 @@ class ChannelController extends Controller
             $channel = Channel::create([
                 'name' => $name,
                 'slug' => \Str::slug($name),
+                'channel_number' => $nextChannelNumber++,
                 'stream_url' => $url,
                 'stream_type' => $streamType,
                 'language' => $validated['default_language'] ?? null,
