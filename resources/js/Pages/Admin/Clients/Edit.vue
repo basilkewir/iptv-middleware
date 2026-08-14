@@ -61,7 +61,11 @@
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-2">Expiry Date</label>
-              <input v-model="form.expiry_date" type="date" class="input-field" />
+              <input v-model="form.expiry_date" type="date" class="input-field" :disabled="form.never_expire" />
+            </div>
+            <div class="flex items-center gap-3">
+              <input type="checkbox" id="never_expire" v-model="form.never_expire" class="w-4 h-4 rounded bg-gray-600 text-purple-600" />
+              <label for="never_expire" class="text-sm font-medium text-gray-300 cursor-pointer">Never Expire</label>
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-2">Max Connections</label>
@@ -125,7 +129,7 @@ const props = defineProps({
   resellers: { type: Array, default: () => [] },
 })
 
-const activeSubscription = props.client.subscriptions?.find(s => s.status === 'active' && new Date(s.end_date) >= new Date())
+const activeSubscription = props.client.subscriptions?.find(s => s.status === 'active' && (s.end_date === null || new Date(s.end_date) >= new Date()))
 
 const form = useForm({
   username: props.client.username || '',
@@ -136,6 +140,7 @@ const form = useForm({
   reseller_id: props.client.reseller_id || '',
   package_id: activeSubscription?.subscription_package_id || '',
   expiry_date: activeSubscription?.end_date ? activeSubscription.end_date.split('T')[0] : '',
+  never_expire: activeSubscription ? activeSubscription.end_date === null : false,
   max_connections: props.client.max_connections || '',
   mac_address: props.client.mac_address || '',
   ip_restriction: props.client.ip_restriction || '',

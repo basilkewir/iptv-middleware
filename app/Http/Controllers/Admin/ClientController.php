@@ -93,7 +93,7 @@ class ClientController extends Controller
         if ($collection) {
             $collection->map(function ($client) {
                 $activeSub = $client->subscriptions->first(function ($sub) {
-                    return $sub->status === 'active' && $sub->end_date >= now();
+                    return $sub->status === 'active' && ($sub->end_date === null || $sub->end_date >= now());
                 });
                 $client->setAttribute('subscription_status', $activeSub ? 'active' : ($client->is_active ? 'expired' : 'suspended'));
                 $client->setAttribute('subscription_end_date', $activeSub?->end_date);
@@ -329,6 +329,7 @@ class ClientController extends Controller
             'bouquet_ids.*' => 'exists:bouquets,id',
             'package_id' => 'nullable|exists:subscription_packages,id',
             'expiry_date' => 'nullable|date',
+            'never_expire' => 'nullable|boolean',
         ]);
 
         $client->update(collect($validated)->only([
@@ -340,16 +341,23 @@ class ClientController extends Controller
             $client->bouquets()->sync($validated['bouquet_ids']);
         }
 
+        $neverExpire = $request->boolean('never_expire');
+
         // Handle package change
-        if (!empty($validated['package_id']) && !empty($validated['expiry_date'])) {
+        if (!empty($validated['package_id'])) {
             $client->subscriptions()->where('status', 'active')->update(['status' => 'cancelled']);
             $client->subscriptions()->create([
                 'subscription_package_id' => $validated['package_id'],
                 'status' => 'active',
                 'start_date' => now(),
-                'end_date' => $validated['expiry_date'],
+                'end_date' => $neverExpire ? null : ($validated['expiry_date'] ?? null),
                 'auto_renew' => false,
             ]);
+        } elseif ($neverExpire) {
+            $subscription = $client->subscriptions()->where('status', 'active')->first();
+            if ($subscription) {
+                $subscription->update(['end_date' => null]);
+            }
         } elseif (!empty($validated['expiry_date'])) {
             $subscription = $client->subscriptions()->where('status', 'active')->first();
             if ($subscription) {

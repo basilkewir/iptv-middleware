@@ -219,7 +219,7 @@ const bulkAction = (action) => {
 }
 
 const formatDate = (date) => {
-  if (!date) return 'N/A'
+  if (!date) return 'Never'
   return new Date(date).toLocaleDateString()
 }
 </script>

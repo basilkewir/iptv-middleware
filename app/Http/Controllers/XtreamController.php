@@ -325,7 +325,64 @@ class XtreamController extends Controller
 
         $channel = Channel::where('id', $channelId)->where('is_active', true)->firstOrFail();
 
-        return redirect($channel->stream_url);
+        // Serve via local HLS — never expose or redirect to the upstream source URL
+        $hlsPath = storage_path("app/streams/hls/{$channelId}/playlist.m3u8");
+
+        if (! file_exists($hlsPath)) {
+            // Start the FFmpeg ingest if not already running
+            $this->ensureHlsStream($channelId, $channel->stream_url);
+        }
+
+        return redirect("/hls/{$channelId}/playlist.m3u8");
+    }
+
+    /**
+     * Ensure an HLS ingest process is running for the given channel.
+     * Detects a live ffmpeg process by the channel's output path so the
+     * same channel is never ingested twice (used by both on-demand playback
+     * and the channels:ingest-all command that runs all channels at once).
+     */
+    public function ensureHlsStream(int $channelId, string $sourceUrl): void
+    {
+        $outputDir = storage_path("app/streams/hls/{$channelId}");
+
+        // If an ffmpeg ingest for this channel is already running, do nothing.
+        // Read /proc/<pid>/cmdline directly (it is never width-truncated, unlike
+        // `ps`), and match in PHP so the checker itself can never match.
+        $needle = "streams/hls/{$channelId}/playlist.m3u8";
+        $running = 0;
+        foreach (glob('/proc/[0-9]*/cmdline') as $cmdlinePath) {
+            $cmdline = @file_get_contents($cmdlinePath);
+            if ($cmdline === false || $cmdline === '') {
+                continue;
+            }
+            if (str_contains($cmdline, 'ffmpeg') && str_contains($cmdline, $needle)) {
+                $running++;
+            }
+        }
+        if ($running > 0) {
+            return;
+        }
+
+        if (! is_dir($outputDir)) {
+            mkdir($outputDir, 0755, true);
+        }
+
+        $cmd = sprintf(
+            'ffmpeg -re -i %s -c:v copy -c:a copy -f hls '
+            . '-hls_time 6 -hls_list_size 10 -hls_flags delete_segments '
+            . '-hls_segment_filename %s/segment_%%03d.ts '
+            . '%s/playlist.m3u8 > /dev/null 2>&1 & echo $!',
+            escapeshellarg($sourceUrl),
+            escapeshellarg($outputDir),
+            escapeshellarg($outputDir)
+        );
+
+        $pid = trim(shell_exec($cmd));
+
+        if ($pid) {
+            cache()->put("ffmpeg:channel:{$channelId}", $pid, 86400);
+        }
     }
 
     // Stream a VOD

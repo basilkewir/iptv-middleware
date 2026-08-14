@@ -83,7 +83,9 @@ class User extends Authenticatable
     {
         return $this->subscriptions()
             ->where('status', 'active')
-            ->where('end_date', '>=', now())
+            ->where(function ($q) {
+                $q->whereNull('end_date')->orWhere('end_date', '>=', now());
+            })
             ->first();
     }
 
@@ -142,7 +144,9 @@ class User extends Authenticatable
     {
         return $this->subscriptions()
             ->where('status', 'active')
-            ->where('end_date', '>=', now())
+            ->where(function ($q) {
+                $q->whereNull('end_date')->orWhere('end_date', '>=', now());
+            })
             ->exists();
     }
 }

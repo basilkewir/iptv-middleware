@@ -26,6 +26,13 @@ class Kernel extends ConsoleKernel
         $schedule->command('servers:monitor')
             ->everyFiveMinutes()
             ->withoutOverlapping();
+
+        // Keep every active channel playing locally (local-network HLS) and
+        // respawn any ingest that has died. Idempotent: channels already
+        // running are skipped.
+        $schedule->command('channels:ingest-all')
+            ->everyMinute()
+            ->withoutOverlapping();
     }
 
     protected function commands(): void
