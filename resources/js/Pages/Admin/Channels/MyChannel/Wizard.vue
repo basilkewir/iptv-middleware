@@ -87,6 +87,8 @@ const form = useForm({
   channel_type: 'admin',
   is_my_channel: true,
   playlist_type: props.channel?.playlist_type || 'continuous',
+  broadcast_status: props.channel?.broadcast_status || 'offline',
+  license_type: props.channel?.license_type || 'free',
 
   logo_url: props.channel?.logo_url || '',
   banner_url: props.channel?.banner_url || '',
