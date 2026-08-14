@@ -37,6 +37,7 @@
           <span v-if="broadcast?.duration" class="text-sm text-gray-400">
             Duration: {{ formatDuration(broadcast?.duration) }}
           </span>
+          <span v-if="broadcastError" class="text-red-400 text-sm font-medium">{{ broadcastError }}</span>
         </div>
         <div class="flex gap-2">
           <button v-if="channel?.broadcast_status !== 'live'"
@@ -156,6 +157,7 @@ const activeTab = ref('overview')
 const broadcast = ref(null)
 const startingBroadcast = ref(false)
 const stoppingBroadcast = ref(false)
+const broadcastError = ref('')
 
 const tabs = [
   { id: 'overview', label: 'Overview' },
@@ -200,10 +202,18 @@ const fetchBroadcastStatus = async () => {
 
 const startBroadcast = async () => {
   startingBroadcast.value = true
+  broadcastError.value = ''
   try {
-    await apiFetch(route('admin.channels.my-channel.broadcast.start', props.channel.channel_slug), { method: 'POST' })
+    const res = await apiFetch(route('admin.channels.my-channel.broadcast.start', props.channel.channel_slug), { method: 'POST' })
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}))
+      broadcastError.value = json.error || json.message || 'Failed to start broadcast'
+      return
+    }
     await fetchBroadcastStatus()
     router.reload()
+  } catch (e) {
+    broadcastError.value = e?.message || 'Failed to start broadcast'
   } finally {
     startingBroadcast.value = false
   }
@@ -211,10 +221,18 @@ const startBroadcast = async () => {
 
 const stopBroadcast = async () => {
   stoppingBroadcast.value = true
+  broadcastError.value = ''
   try {
-    await apiFetch(route('admin.channels.my-channel.broadcast.stop', props.channel.channel_slug), { method: 'POST' })
+    const res = await apiFetch(route('admin.channels.my-channel.broadcast.stop', props.channel.channel_slug), { method: 'POST' })
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}))
+      broadcastError.value = json.error || json.message || 'Failed to stop broadcast'
+      return
+    }
     await fetchBroadcastStatus()
     router.reload()
+  } catch (e) {
+    broadcastError.value = e?.message || 'Failed to stop broadcast'
   } finally {
     stoppingBroadcast.value = false
   }

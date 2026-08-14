@@ -177,8 +177,8 @@ const uploadBrandingImage = async (file, field) => {
   formData.append('image', file)
   formData.append('field', field)
 
-  const token = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-  const xsrfToken = token ? decodeURIComponent(token.split('=')[1]) : ''
+  const raw = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
+  const xsrfToken = raw ? decodeURIComponent(raw.substring('XSRF-TOKEN='.length)) : ''
 
   const res = await fetch(route('admin.channels.my-channel.upload-image'), {
     method: 'POST',
@@ -209,8 +209,8 @@ const handleFileUpload = async (e) => {
   formData.append('description', '')
 
   try {
-    const token = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-    const xsrfToken = token ? decodeURIComponent(token.split('=')[1]) : ''
+    const raw = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
+    const xsrfToken = raw ? decodeURIComponent(raw.substring('XSRF-TOKEN='.length)) : ''
     const channelId = props.channel?.channel_slug || props.channel?.id || ''
 
     const res = await fetch(route('admin.channels.my-channel.content.upload', channelId), {

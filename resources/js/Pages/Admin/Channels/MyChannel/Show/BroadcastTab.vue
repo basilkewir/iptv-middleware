@@ -28,6 +28,7 @@
         </button>
       </div>
     </div>
+    <div v-if="broadcastError" class="mt-2 text-red-400 text-sm font-medium">{{ broadcastError }}</div>
 
     <!-- Main playout layout -->
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
@@ -211,6 +212,7 @@ const props = defineProps({
 })
 
 const { apiFetch } = useApiFetch()
+const broadcastError = ref('')
 const settings = ref(null)
 const playlist = ref([])
 const starting = ref(false)
@@ -386,10 +388,18 @@ const fetchBroadcast = async () => {
 
 const startBroadcast = async () => {
   starting.value = true
+  broadcastError.value = ''
   try {
-    await apiFetch(route('admin.channels.my-channel.broadcast.start', props.channel.channel_slug), { method: 'POST' })
+    const res = await apiFetch(route('admin.channels.my-channel.broadcast.start', props.channel.channel_slug), { method: 'POST' })
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}))
+      broadcastError.value = json.error || json.message || 'Failed to start broadcast'
+      return
+    }
     await fetchBroadcast()
     router.reload({ only: ['channel'] })
+  } catch (e) {
+    broadcastError.value = e?.message || 'Failed to start broadcast'
   } finally {
     starting.value = false
   }
@@ -397,15 +407,23 @@ const startBroadcast = async () => {
 
 const stopBroadcast = async () => {
   stopping.value = true
+  broadcastError.value = ''
   try {
-    await apiFetch(route('admin.channels.my-channel.broadcast.stop', props.channel.channel_slug), { method: 'POST' })
+    const res = await apiFetch(route('admin.channels.my-channel.broadcast.stop', props.channel.channel_slug), { method: 'POST' })
+    if (!res.ok) {
+      const json = await res.json().catch(() => ({}))
+      broadcastError.value = json.error || json.message || 'Failed to stop broadcast'
+      return
+    }
     broadcast.value = null
     liveStartTime.value = null
     liveTimer.value = ''
-    router.reload({ only: ['channel'] })
+  } catch (e) {
+    broadcastError.value = e?.message || 'Failed to stop broadcast'
   } finally {
     stopping.value = false
   }
+}
 }
 
 watch(isLive, (live) => {

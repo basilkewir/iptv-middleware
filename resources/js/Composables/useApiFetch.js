@@ -1,7 +1,7 @@
 export function useApiFetch() {
     const getXsrf = () => {
-        const token = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-        return token ? decodeURIComponent(token.split('=')[1]) : ''
+        const raw = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
+        return raw ? decodeURIComponent(raw.substring('XSRF-TOKEN='.length)) : ''
     }
 
     const apiFetch = (url, options = {}) => {

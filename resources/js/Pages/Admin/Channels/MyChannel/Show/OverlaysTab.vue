@@ -323,7 +323,7 @@ let resizeObserver = null
 // Stream URL for this channel
 const streamUrl = computed(() => {
   const slug = props.channel?.channel_slug
-  return `http://localhost:25460/hls/admin-channel-${slug}/index.m3u8`
+  return `${window.location.origin}/hls/admin-channel-${slug}/index.m3u8`
 })
 
 // Logo overlay CSS position based on X/Y percentages (matches FFmpeg top-left anchor)
