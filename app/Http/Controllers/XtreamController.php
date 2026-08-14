@@ -338,30 +338,20 @@ class XtreamController extends Controller
 
     /**
      * Ensure an HLS ingest process is running for the given channel.
-     * Detects a live ffmpeg process by the channel's output path so the
-     * same channel is never ingested twice (used by both on-demand playback
-     * and the channels:ingest-all command that runs all channels at once).
+     * Tracks the ingest by a per-channel PID file so each channel is ingested
+     * exactly once and dead ingests can be respawned without scanning every
+     * process (used by both on-demand playback and channels:ingest-all).
      */
     public function ensureHlsStream(int $channelId, string $sourceUrl): void
     {
         $outputDir = storage_path("app/streams/hls/{$channelId}");
+        $pidFile = $outputDir . '/ingest.pid';
 
-        // If an ffmpeg ingest for this channel is already running, do nothing.
-        // Read /proc/<pid>/cmdline directly (it is never width-truncated, unlike
-        // `ps`), and match in PHP so the checker itself can never match.
-        $needle = "streams/hls/{$channelId}/playlist.m3u8";
-        $running = 0;
-        foreach (glob('/proc/[0-9]*/cmdline') as $cmdlinePath) {
-            $cmdline = @file_get_contents($cmdlinePath);
-            if ($cmdline === false || $cmdline === '') {
-                continue;
+        if (is_file($pidFile)) {
+            $pid = (int) trim((string) file_get_contents($pidFile));
+            if ($pid > 0 && $this->ffmpegAlive($pid, $channelId)) {
+                return;
             }
-            if (str_contains($cmdline, 'ffmpeg') && str_contains($cmdline, $needle)) {
-                $running++;
-            }
-        }
-        if ($running > 0) {
-            return;
         }
 
         if (! is_dir($outputDir)) {
@@ -378,11 +368,28 @@ class XtreamController extends Controller
             escapeshellarg($outputDir)
         );
 
-        $pid = trim(shell_exec($cmd));
+        $pid = trim((string) shell_exec($cmd));
 
-        if ($pid) {
+        if ($pid !== '') {
+            file_put_contents($pidFile, $pid);
             cache()->put("ffmpeg:channel:{$channelId}", $pid, 86400);
         }
+    }
+
+    private function ffmpegAlive(int $pid, int $channelId): bool
+    {
+        if (! posix_kill($pid, 0)) {
+            return false;
+        }
+
+        $cmdline = @file_get_contents("/proc/{$pid}/cmdline");
+
+        if ($cmdline === false || $cmdline === '') {
+            return false;
+        }
+
+        return str_contains($cmdline, 'ffmpeg')
+            && str_contains($cmdline, "streams/hls/{$channelId}/playlist.m3u8");
     }
 
     // Stream a VOD
