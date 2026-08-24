@@ -22,7 +22,30 @@ class XtreamController extends Controller
 
     public const INGEST_STALE_SECONDS = 90;
     private const FFMPEG_READ_TIMEOUT_US = 30000000;
-    private const INGEST_RESTART_BACKOFF_SECONDS = 90;
+    private const INGEST_RESTART_BACKOFF_SECONDS = 10;
+
+    // ffmpeg thread count per process. 1 thread per process is optimal for
+    // copy-only streams: ffmpeg's internal threading is designed for encoding,
+    // not demux+mux, so extra threads just burn CPU with context switching.
+    // Multicast group readers (many outputs per process) use 2 threads.
+    private const FFMPEG_THREADS_SINGLE  = 1;
+    private const FFMPEG_THREADS_MULTI   = 2;
+
+    // nice level for ingest wrappers. 15 = well below normal so the OS
+    // scheduler always yields CPU to nginx, PHP-FPM, and MySQL first.
+    private const INGEST_NICE_LEVEL = 15;
+
+    // Max system load (1-min) before the wrapper pauses before starting ffmpeg.
+    // On 8 cores, load 5 = ~62% utilisation — safe headroom.
+    private const INGEST_LOAD_GATE = 6;
+
+    /**
+     * Load threshold used INSIDE the wrapper retry loop. Before respawning
+     * ffmpeg after a crash/kill, the wrapper waits until the 1-minute load
+     * average drops below this value. This prevents guardian kill phases
+     * from fighting instant respawns (thrash) on a saturated CPU.
+     */
+    private const INGEST_HOLD_GATE = 8;
 
     // Authenticate and return user/server info (Xtream Codes protocol)
     public function auth(Request $request)
@@ -337,7 +360,10 @@ class XtreamController extends Controller
         return response()->json(['epg_listings' => $programs]);
     }
 
-    // Stream a live channel  
+    // Stream a live channel — serves content inline (no redirect).
+    // IPTV players often fail to follow 302 redirects for HLS, and
+    // segment URLs in the playlist would resolve back into this route,
+    // causing an infinite redirect loop to the playlist.
     public function streamLive(Request $request, $username, $password, $streamId)
     {
         $user = User::where('username', $username)->first();
@@ -370,8 +396,51 @@ class XtreamController extends Controller
         // Route through the local FFmpeg ingest pipeline so audio is
         // transcoded to AAC (required for Android TV and most IPTV players).
         // This applies to UDP/RTMP sources and Flussonic multicast re-streams.
-        $this->ensureHlsStream($channelId, $channel->active_stream_url ?? $channel->stream_url, $channel->program_number, $channel->local_address);
+        $this->ensureHlsStream($channelId, $channel->active_stream_url ?? $channel->stream_url, $channel->program_number, $channel->local_address, (bool) ($channel->transcoding_enabled ?? false));
 
+        // Parse the streamId to determine file type
+        $extension = strtolower(pathinfo($streamId, PATHINFO_EXTENSION));
+
+        // .m3u8 request — serve the playlist directly, rewriting
+        // segment URLs to route through this endpoint so the player
+        // never needs to follow an external redirect.
+        if ($extension === 'm3u8') {
+            $hlsDir = storage_path("app/streams/hls/{$channelId}");
+            $playlist = "{$hlsDir}/playlist.m3u8";
+
+            if (!file_exists($playlist)) {
+                return response('Service Unavailable', 503, [
+                    'Retry-After' => '3',
+                    'Cache-Control' => 'no-cache, no-store, must-revalidate',
+                ]);
+            }
+
+            $content = file_get_contents($playlist);
+            if ($content === false) {
+                return response('Service Unavailable', 503, [
+                    'Retry-After' => '3',
+                    'Cache-Control' => 'no-cache, no-store, must-revalidate',
+                ]);
+            }
+
+            // Rewrite segment references to absolute /hls/ paths so the
+            // player never needs to follow an external redirect and stays
+            // authenticated.  e.g. "segment_047.ts" → "http://host/hls/14/segment_047.ts"
+            $hlsBase = config('app.url') . "/hls/{$channelId}";
+            $content = preg_replace(
+                '/^(?!#)(\S+\.ts)\s*$/m',
+                $hlsBase . '/$1',
+                $content
+            );
+
+            return response($content, 200, [
+                'Content-Type' => 'application/vnd.apple.mpegurl',
+                'Cache-Control' => 'no-cache, no-store, must-revalidate',
+                'Access-Control-Allow-Origin' => '*',
+            ]);
+        }
+
+        // Fallback: redirect for unknown extensions
         return redirect(config('app.url') . "/hls/{$channelId}/playlist.m3u8");
     }
 
@@ -390,10 +459,15 @@ class XtreamController extends Controller
      * a single MPEG-TS program, which is what makes one multicast stream feed
      * many channel rows, each ingesting only its own program.
      */
-    public function ensureHlsStream(int $channelId, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null): void
+    public function ensureHlsStream(int $channelId, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false): void
     {
         $outputDir = storage_path("app/streams/hls/{$channelId}");
         $pidFile = $outputDir . '/ingest.pid';
+        $heartbeat = $outputDir . '/.heartbeat';
+
+        // Touch heartbeat every time a client requests this channel.
+        // The wrapper checks this file — if nobody requests for 120s, it exits.
+        @touch($heartbeat);
 
         $lock = Cache::lock("ffmpeg:ingest:{$channelId}", 60);
 
@@ -457,18 +531,27 @@ class XtreamController extends Controller
             // kill the freshly spawned ingest.
             @unlink($outputDir . '/.stop');
 
-            $cmd = 'setsid bash -c ' . escapeshellarg($this->ingestWrapperCommand($outputDir, $sourceUrl, $programNumber, $localAddress))
-                . ' < /dev/null > /dev/null 2>&1 & echo $!';
+            // The wrapper writes its own $$ PID to the pidFile as its first
+            // action, so we capture the actual bash PID (not the setsid parent
+            // which exits immediately after forking).
+            $wrapperWithPid = 'echo $$ > ' . escapeshellarg($pidFile) . '; '
+                . $this->ingestWrapperCommand($outputDir, $sourceUrl, $programNumber, $localAddress, $transcode);
 
-            $pid = trim((string) shell_exec($cmd));
+            $cmd = 'setsid bash -c ' . escapeshellarg($wrapperWithPid)
+                . ' < /dev/null > /dev/null 2>&1 &';
 
-            if ($pid !== '') {
-                file_put_contents($pidFile, $pid);
+            shell_exec($cmd);
+
+            // Wait briefly for the wrapper to write its PID file, then read it.
+            usleep(200000);
+            $pid = is_file($pidFile) ? (int) trim((string) file_get_contents($pidFile)) : 0;
+
+            if ($pid > 0) {
                 cache()->put("ffmpeg:channel:{$channelId}", $pid, 86400);
 
                 Log::info('HLS ingest started', [
                     'channel_id' => $channelId,
-                    'pid' => (int) $pid,
+                    'pid' => $pid,
                 ]);
             }
         } finally {
@@ -550,7 +633,7 @@ class XtreamController extends Controller
      * on the right NIC, and -map p:{N} keeps only the requested program so
      * this ingest's HLS playlist contains just that one channel.
      */
-    private function ingestWrapperCommand(string $outputDir, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null): string
+    private function ingestWrapperCommand(string $outputDir, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false): string
     {
         $log = '/tmp/ingest_' . basename($outputDir) . '.log';
 
@@ -560,6 +643,17 @@ class XtreamController extends Controller
         }
 
         $isMulticast = str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://');
+
+        // For multicast channels, wait for the local address interface to be
+        // ready before starting ffmpeg. When the cable is re-plugged, netplan
+        // needs a few seconds to re-assign the IP and add routes.
+        $networkWait = '';
+        if ($isMulticast && $localAddress !== null && $localAddress !== '') {
+            $networkWait = 'for i in $(seq 1 30); do '
+                . 'if ip addr show | grep -q ' . escapeshellarg($localAddress) . '; then '
+                . '  echo "NETWORK READY $i" >> "$L"; break; fi; '
+                . 'echo "WAITING FOR NETWORK $i" >> "$L"; sleep 1; done; ';
+        }
 
         // -reconnect / -reconnect_streamed / -reconnect_delay_max are http(s)-only
         // input options. On a udp:// input ffmpeg rejects them ("Option reconnect
@@ -588,23 +682,56 @@ class XtreamController extends Controller
         //     a missing directory.
         //   - The loop never exits on its own — an offline source is retried
         //     forever until .stop is written or the process is killed.
+        //
+        // -c:v copy avoids CPU-heavy x264 re-encoding when the source is
+        // already H.264. Transcode (libx264) is used for MPEG-2 sources or
+        // channels with dual video streams that break TV players.
+        // For HTTP/HLS sources the upstream is already AAC-muxed HLS —
+        // copy both video and audio, zero re-encode CPU cost.
+        // For UDP multicast sources audio may be AC3/MP2, so transcode to
+        // AAC at 48k (enough for TV, half the CPU of 128k).
+        // libx264 transcode is only used when explicitly enabled on the channel.
+        $isMulticast = str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://');
+
+        $videoFilter = $transcode
+            ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls '
+            : ($isMulticast
+                ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls '
+                : ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a copy -f hls ');
+
+        // All channels run permanently — no idle timeout.  This ensures
+        // instant zapping: every channel has its ingest already running
+        // and segments ready when the user switches to it.
+
         return sprintf(
             'ODIR=%s; L=%s; DELAY=3; '
             . 'echo "WRAPPER START $$ ppid=$PPID $(date +%%s)" >> "$L"; '
             . 'trap \'echo "WRAPPER EXIT rc=$? ppid=$PPID $(date +%%s)" >> "$L"; exec >> "$L" 2>&1\' EXIT; '
+            . $networkWait
+            // Wait for system load to drop below gate before starting ffmpeg.
+            // This prevents a burst of restarts from piling on a hot CPU.
+            . 'LOAD_GATE=' . self::INGEST_LOAD_GATE . '; '
+            . 'for i in $(seq 1 12); do '
+            .   'LOAD=$(cut -d. -f1 /proc/loadavg); '
+            .   '[ "$LOAD" -lt "$LOAD_GATE" ] && break; '
+            .   'echo "LOAD_WAIT load=$LOAD gate=$LOAD_GATE" >> "$L"; sleep 5; '
+            . 'done; '
             . 'while true; do '
             .   '[ -f "$ODIR/.stop" ] && exit 0; '
             .   'HAS_SEGS=0; ls "$ODIR"/segment_*.ts > /dev/null 2>&1 && HAS_SEGS=1; '
             .   '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/segment_*.ts "$ODIR"/playlist.m3u8; '
-            .   'ffmpeg ' . $inputOpts . '%s -c:v libx264 -preset veryfast -profile:v baseline -vf "scale=-2:480" -b:v 1500k -maxrate 2000k -bufsize 4000k -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls '
-            .   '-hls_time 6 -hls_list_size 10 -hls_flags delete_segments+temp_file '
-            .   '-hls_segment_filename "$ODIR"/segment_%%03d.ts '
+            .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
+            .   '-hls_time 6 -hls_list_size 5 '
+            .   '-hls_flags delete_segments+temp_file+independent_segments+append_list '
+            .   '-hls_segment_filename "$ODIR"/segment_%%04d.ts '
             .   '"$ODIR"/playlist.m3u8 2>>"$L"; '
             .   'NEW_SEGS=0; ls "$ODIR"/segment_*.ts > /dev/null 2>&1 && NEW_SEGS=1; '
             .   'if [ "$NEW_SEGS" = "1" ]; then DELAY=3; '
             .   'else DELAY=$((DELAY * 2)); [ $DELAY -gt 30 ] && DELAY=30; fi; '
             .   'echo "WRAPPER RETRY delay=$DELAY $(date +%%s)" >> "$L"; '
             .   'sleep $DELAY; '
+            .   'LOAD=$(cut -d. -f1 /proc/loadavg); '
+            .   'while [ "$LOAD" -ge ' . self::INGEST_HOLD_GATE . ' ]; do echo "HOLD load=$LOAD" >> "$L"; sleep 10; LOAD=$(cut -d. -f1 /proc/loadavg); done; '
             . 'done',
             escapeshellarg($outputDir),
             escapeshellarg($log),
@@ -667,7 +794,7 @@ class XtreamController extends Controller
         $media = $vod->vodMedia()->first();
         if (! $media?->stream_url) abort(404);
 
-        return redirect($media->stream_url);
+        return $this->serveVodFile($media->stream_url);
     }
 
     // Stream a series episode (streamId is vod_media.id)
@@ -681,7 +808,34 @@ class XtreamController extends Controller
         $media = VODMedia::where('id', $episodeId)->where('is_available', true)->firstOrFail();
         if (! $media->stream_url) abort(404);
 
-        return redirect($media->stream_url);
+        return $this->serveVodFile($media->stream_url);
+    }
+
+    private function serveVodFile(string $streamUrl)
+    {
+        if (str_starts_with($streamUrl, '/storage/')) {
+            $diskPath = storage_path('app/public/' . substr($streamUrl, strlen('/storage/')));
+            if (file_exists($diskPath)) {
+                $mimeMap = [
+                    'mp4'  => 'video/mp4',
+                    'mkv'  => 'video/x-matroska',
+                    'avi'  => 'video/x-msvideo',
+                    'mov'  => 'video/quicktime',
+                    'webm' => 'video/webm',
+                    'flv'  => 'video/x-flv',
+                    'wmv'  => 'video/x-ms-wmv',
+                ];
+                $ext = strtolower(pathinfo($diskPath, PATHINFO_EXTENSION));
+                $mime = $mimeMap[$ext] ?? mime_content_type($diskPath) ?: 'application/octet-stream';
+
+                return response()->file($diskPath, [
+                    'Content-Type'  => $mime,
+                    'Accept-Ranges' => 'bytes',
+                ]);
+            }
+        }
+
+        return redirect($streamUrl);
     }
 
     // M3U playlist

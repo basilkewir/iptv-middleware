@@ -797,9 +797,9 @@ const handleDrop = (e) => {
   uploadFile.value = e.dataTransfer.files[0]
 }
 
-  const submit = () => {
+  const submit = async () => {
   const allEpisodes = Object.values(episodesBySeason).flat()
-  form.episodes_data = allEpisodes.map(ep => ({
+  const episodesData = allEpisodes.map(ep => ({
     season_number: ep.season_number,
     episode_number: ep.episode_number,
     episode_title: ep.title || '',
@@ -812,17 +812,59 @@ const handleDrop = (e) => {
   const vodId = Number(props.vod?.id)
   if (!vodId) return
 
+  const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
+  const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+
   if (sourceMode.value === 'upload' && uploadFile.value) {
-    // Browser can't send PUT with multipart — use POST + _method spoofing
-    form.transform(data => ({ ...data, _method: 'PUT', file: uploadFile.value, episodes_data: JSON.stringify(data.episodes_data) }))
-      .post(`/admin/vod/${vodId}`, {
-        forceFormData: true,
-        onStart: () => { uploadProgress.value = 1 },
-        onProgress: (progress) => { uploadProgress.value = progress.percentage },
-        onFinish: () => { uploadProgress.value = 0; form.transform(data => data) },
+    const fd = new FormData()
+    fd.append('_method', 'PUT')
+    fd.append('file', uploadFile.value)
+    fd.append('title', form.title)
+    fd.append('type', form.type)
+    if (form.description) fd.append('description', form.description)
+    if (form.year) fd.append('year', form.year)
+    if (form.duration) fd.append('duration', form.duration)
+    if (form.rating != null && form.rating !== '') fd.append('rating', form.rating)
+    if (form.director) fd.append('director', form.director)
+    if (form.poster_url) fd.append('poster_url', form.poster_url)
+    if (form.backdrop_url) fd.append('backdrop_url', form.backdrop_url)
+    if (form.trailer_url) fd.append('trailer_url', form.trailer_url)
+    if (form.tmdb_id) fd.append('tmdb_id', form.tmdb_id)
+    if (form.imdb_id) fd.append('imdb_id', form.imdb_id)
+    if (form.genre && form.genre.length) form.genre.forEach(g => fd.append('genre[]', g))
+    if (form.cast && form.cast.length) form.cast.forEach(c => fd.append('cast[]', c))
+    form.category_ids.forEach(id => fd.append('category_ids[]', id))
+    form.bouquet_ids.forEach(id => fd.append('bouquet_ids[]', id))
+    fd.append('is_active', form.is_active ? '1' : '0')
+    fd.append('is_featured', form.is_featured ? '1' : '0')
+    fd.append('episodes_data', JSON.stringify(episodesData))
+
+    try {
+      uploadProgress.value = 1
+      form.processing = true
+      const res = await fetch(`/admin/vod/${vodId}`, {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'text/html, application/xhtml+xml', 'X-XSRF-TOKEN': token },
+        credentials: 'same-origin',
+        body: fd,
       })
+      uploadProgress.value = 100
+      if (res.redirected || res.ok) {
+        window.location.href = res.url || route('admin.vod.show', vodId)
+      } else {
+        const text = await res.text()
+        episodeError.value = `Upload failed (${res.status}). ${text.substring(0, 200)}`
+        uploadProgress.value = 0
+        form.processing = false
+      }
+    } catch (e) {
+      episodeError.value = 'Upload failed: ' + e.message
+      uploadProgress.value = 0
+      form.processing = false
+    }
   } else {
-    form.put(`/admin/vod/${vodId}`)
+    form.transform(data => ({ ...data, episodes_data: episodesData }))
+      .put(`/admin/vod/${vodId}`)
   }
 }
 </script>

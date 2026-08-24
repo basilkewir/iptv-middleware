@@ -174,8 +174,10 @@ class HLSStreamer implements HLSStreamerInterface
         $segmentTime = $this->segmentDuration;
 
         return sprintf(
-            'ffmpeg -i %s -c:v libx264 -c:a aac -f hls ' .
-            '-hls_time %d -hls_list_size %d -hls_flags delete_segments ' .
+            'ffmpeg -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i %s ' .
+            '-c:v libx264 -c:a aac -f hls ' .
+            '-hls_time %d -hls_list_size %d ' .
+            '-hls_flags delete_segments+append_list ' .
             '-hls_segment_filename %s/segment_%%03d.ts ' .
             '%s/playlist.m3u8 2>&1',
             escapeshellarg($input),

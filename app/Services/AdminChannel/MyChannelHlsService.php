@@ -329,7 +329,7 @@ CONCAT="{$concatPath}"
 
 exec "\$FFMPEG" -y -hide_banner -loglevel warning \\
     -stream_loop -1 -f concat -safe 0 -re -i "\$CONCAT" \\
-    {$inputLines}-c:v libx264 -preset veryfast -tune zerolatency -crf 23 \\
+    {$inputLines}-c:v libx264 -preset ultrafast -tune zerolatency -crf 28 -threads 2 \\
     -maxrate {$bitrate}k -bufsize {$bitrate}k -r {$fps} -g {$gop} -pix_fmt yuv420p \\
     -filter_complex "{$filterComplex}" \\
     -map '[vout]' -map 0:a? \\

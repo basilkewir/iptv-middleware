@@ -21,7 +21,7 @@ class RTMPStreamer implements RTMPStreamerInterface
     public function __construct()
     {
         $this->rtmpHost = config('streaming.rtmp.host', '127.0.0.1');
-        $this->rtmpPort = config('streaming.rtmp.port', 1935);
+        $this->rtmpPort = (int) config('streaming.rtmp.port', 1935);
         $this->rtmpSecret = config('streaming.rtmp.secret', '');
     }
 

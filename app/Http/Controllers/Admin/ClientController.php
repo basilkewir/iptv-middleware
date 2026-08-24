@@ -270,11 +270,7 @@ class ClientController extends Controller
             return response()->json(['data' => $client]);
         }
 
-        // Get server local IP address for stream URLs
-        $serverIp = $this->getLocalIp();
-        $serverPort = $request->getPort();
-        $serverScheme = $request->getScheme();
-        $serverBaseUrl = "{$serverScheme}://{$serverIp}:{$serverPort}";
+        $serverBaseUrl = config('app.url');
 
         return Inertia::render('Admin/Clients/Show', [
             'client' => $client,

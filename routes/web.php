@@ -145,6 +145,9 @@ Route::middleware(['auth:web', \App\Http\Middleware\AdminMiddleware::class])
         Route::post('/clients/bulk-action', [\App\Http\Controllers\Admin\ClientController::class, 'bulkAction'])->name('clients.bulkAction');
 
         // ─── Admin Channels ───────────────────────────────────────────────
+        Route::get('/channels/order', fn () => Inertia::render('Admin/Channels/Order'))->name('admin.channels.order');
+        Route::get('/channels/all/list', [\App\Http\Controllers\Admin\ChannelController::class, 'allChannels'])->name('admin.channels.all');
+        Route::put('/channels/reorder', [\App\Http\Controllers\Admin\ChannelController::class, 'reorder'])->name('admin.channels.reorder');
         Route::get('/channels/admin', [AdminChannelController::class, 'index'])->name('admin.channels.index');
         Route::get('/channels/admin/create', [AdminChannelController::class, 'create'])->name('admin.channels.create');
         Route::post('/channels/admin', [AdminChannelController::class, 'store'])->name('admin.channels.store');
@@ -232,6 +235,11 @@ Route::middleware(['auth:web', \App\Http\Middleware\AdminMiddleware::class])
         Route::delete('/channels/{channel}', [ChannelController::class, 'destroy'])->name('channels.destroy');
         Route::post('/channels/{channel}/toggle-status', [ChannelController::class, 'toggleStatus'])->name('channels.toggle-status');
         Route::post('/channels/{channel}/test-stream', [ChannelController::class, 'testStream'])->name('channels.test-stream');
+        Route::post('/channels/{channel}/check-source', [ChannelController::class, 'checkSource'])->name('channels.check-source');
+        Route::post('/channels/{channel}/refresh-source', [ChannelController::class, 'refreshSource'])->name('channels.refresh-source');
+        Route::post('/channels/{channel}/stop-source', [ChannelController::class, 'stopSource'])->name('channels.stop-source');
+        Route::post('/channels/{channel}/switch-source', [ChannelController::class, 'switchSource'])->name('channels.switch-source');
+        Route::get('/channels/source-statuses', [ChannelController::class, 'sourceStatuses'])->name('channels.source-statuses');
         Route::post('/channels/upload-logo', [ChannelController::class, 'uploadLogo'])->name('channels.upload-logo');
 
         // ─── Categories ──────────────────────────────────────────────────
@@ -586,3 +594,5 @@ Route::get('/series/{username}/{password}/{streamId}', [\App\Http\Controllers\Xt
 
 // ─── Catch-all ─────────────────────────────────────────────────────────────────
 Route::get('/{any}', fn () => redirect()->route('login'))->where('any', '.*');
+
+        Route::get("/channels/admin/{channel}/sweep", [AdminChannelController::class, "scanMulticast"])->name("admin.channels.scan-multicast");

@@ -92,8 +92,22 @@
             <div class="grid grid-cols-2 gap-4">
               <div class="col-span-2">
                 <label class="block text-sm font-medium text-gray-300 mb-2">Stream URL *</label>
-                <input v-model="form.stream_url" type="url" class="input-field" placeholder="http://..." />
+                <input v-model="form.stream_url" type="text" class="input-field" placeholder="https://... or udp://@239.0.0.1:32768" />
                 <p v-if="form.errors.stream_url" class="text-red-400 text-sm mt-1">{{ form.errors.stream_url }}</p>
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">Program Number</label>
+                <input v-model.number="form.program_number" type="number" min="1" class="input-field" placeholder="TS program (multi-channel multicast)" />
+                <p class="text-xs text-gray-500 mt-1">Leave empty for single-channel sources.</p>
+              <button @click="scanMulticast" class="mt-2 px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white text-sm rounded-lg transition inline-flex items-center gap-1">
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M8 14a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2z"/></svg>
+                Scan
+              </button>
+</div>
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">Local Interface</label>
+                <input v-model="form.local_address" type="text" class="input-field" placeholder="NIC IP for multicast join, e.g. 192.168.1.50" />
+                <p class="text-xs text-gray-500 mt-1">Only used for udp:// multicast sources.</p>
               </div>
               <div>
                 <label class="block text-sm font-medium text-gray-300 mb-2">Stream Type</label>
@@ -373,6 +387,37 @@
           </div>
         </div>
       </Modal>
+
+      <!-- Scan Multicast Modal -->
+      <Modal :show="showScanModal" @close="showScanModal = false" max-width="md">
+        <div class="p-6">
+          <h3 class="text-lg font-semibold text-white mb-4">Scan Multicast Stream</h3>
+          <div v-if="scanLoading" class="text-center">
+            <div class="animate-spin text-indigo-500 mb-4"></div>
+            <p>Scanning stream...</p>
+          </div>
+          <div v-else="scanLoading" class="space-y-4">
+            <p class="text-sm text-gray-400">Stream URL: {{ channel?.stream_url }}</p>
+            <p v-if="scanError" class="text-red-400 text-sm">{{ scanError }}</p>
+            <div v-if="programs.length > 0" class="bg-gray-700 rounded-lg p-4 max-h-80 overflow-y-auto">
+              <p class="text-xs text-gray-500 mb-2">Detected Programs:</p>
+              <div class="space-y-1">
+                <label v-for="prog in programs" :key="prog.program_id" class="flex items-center gap-2 text-gray-300 cursor-pointer text-sm">
+                  <input type="radio" :value="prog.program_id" v-model="selectedProgram" class="w-4 h-4 rounded bg-gray-700 border-gray-500 text-indigo-600 focus:ring-indigo-500" />
+                  <span>{{ prog.program_id }} {{ prog.name || '' }}</span>
+                </label>
+              </div>
+            </div>
+            <p v-else="!scanError" class="text-yellow-400 text-sm">No programs detected (single-channel source or scan timeout).</p>
+          </div>
+          <div class="mt-6 flex justify-end">
+            <button @click="showScanModal = false" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm transition">Close</button>
+            <button @click="importProgram" :disabled="!selectedProgram" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm transition ml-2">
+              Select Program {{ selectedProgram }}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   </AdminLayout>
 </template>
@@ -403,6 +448,8 @@ const form = useForm({
   language: props.channel?.language || '',
   stream_url: props.channel?.stream_url || '',
   stream_type: props.channel?.stream_type || 'hls',
+  program_number: props.channel?.program_number ?? null,
+  local_address: props.channel?.local_address || '',
   backup_url_1: props.channel?.backup_url_1 || '',
   backup_url_2: props.channel?.backup_url_2 || '',
   quality: props.channel?.quality || '1080p',
@@ -457,5 +504,45 @@ const testStream = async () => {
   } finally {
     testing.value = false
   }
+}
+
+const showScanModal = ref(false)
+const scanLoading = ref(false)
+const scanError = ref('')
+const programs = ref([])
+const selectedProgram = ref(null)
+
+const scanMulticast = () => {
+  if (!form.stream_url) return
+  showScanModal.value = true
+  scanLoading.value = true
+  scanError.value = ''
+  programs.value = []
+  selectedProgram.value = null
+
+  router.post(route('admin.channels.scan-multicast', { url: form.stream_url }), {}, {
+    preserveState: true,
+    onSuccess: (page) => {
+      showScanModal.value = true
+      scanLoading.value = false
+      const data = page.props?.data || {}
+      programs.value = data.programs || []
+      if (programs.value.length > 0) {
+        selectedProgram.value = programs.value[0].program_id
+      }
+    },
+    onError: (errors) => {
+      showScanModal.value = true
+      scanLoading.value = false
+      scanError.value = 'Scan failed. Check the URL and try again.'
+      programs.value = []
+    },
+  })
+}
+
+const importProgram = () => {
+  if (selectedProgram === null) return
+  form.program_number = selectedProgram
+  showScanModal.value = false
 }
 </script>

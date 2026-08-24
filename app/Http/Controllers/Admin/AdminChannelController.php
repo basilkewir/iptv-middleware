@@ -323,6 +323,65 @@ class AdminChannelController extends Controller
         return response()->json($testResult);
     }
 
+    public function scanMulticast(Request $request): JsonResponse
+    {
+        $url = $request->input('url');
+
+        if (empty($url)) {
+            return response()->json([
+                'success' => false,
+                'data' => ['programs' => []],
+            ]);
+        }
+
+        // Run ffprobe to detect programs in the multi-program TS
+        $timeout = 20;
+        $command = sprintf(
+            'timeout %d ffprobe -v error -show_streams -show_format -of json -analyzeduration 10M -probesize 1M -user_agent "IPTV-Middleware-Scanner" %s 2>&1; echo "EXIT:$?"',
+            $timeout,
+            escapeshellarg($url)
+        );
+
+        $output = shell_exec($command . ' 2>&1');
+
+        // Extract exit code
+        $exitCode = 1;
+        if (preg_match('/EXIT:(\d+)\s*$/', $output, $m)) {
+            $exitCode = (int) $m[1];
+            $output = preg_replace('/EXIT:\d+\s*$/', '', $output);
+        }
+
+        $data = json_decode(trim($output), true);
+
+        $programs = [];
+
+        if ($exitCode === 0 && $data && (isset($data['streams']) || isset($data['format']))) {
+            // Extract program IDs from the streams
+            if (isset($data['programs'])) {
+                foreach ($data['programs'] as $prog) {
+                    $programs[] = [
+                        'program_id' => $prog['program_id'] ?? null,
+                        'name' => $prog['name'] ?? 'Program ' . $prog['program_id'],
+                    ];
+                }
+            } else {
+                // Fallback: assign program IDs based on stream order
+                $streamCount = isset($data['streams']) ? count($data['streams']) : 0;
+                for ($i = 0; $i < $streamCount; $i++) {
+                    $programs[] = [
+                        'program_id' => $i + 1,
+                        'name' => 'Program ' . ($i + 1),
+                    ];
+                }
+            }
+        }
+
+        return response()->json([
+            'success' => $exitCode === 0,
+            'data' => ['programs' => $programs],
+        ]);
+    }
+
     public function bulkDelete(Request $request): JsonResponse
     {
         $ids = $request->input('ids', []);

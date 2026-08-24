@@ -8,6 +8,7 @@
         :src="channel.stream_url"
         :channel="channel"
         class="w-full h-full"
+        style="position:absolute;inset:0;"
         @timeupdate="onTimeUpdate"
         @ended="onEnded"
       />

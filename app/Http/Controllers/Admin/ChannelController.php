@@ -7,10 +7,13 @@ use App\Models\Channel;
 use App\Models\ContentCategory;
 use App\Models\EPGSource;
 use App\Models\SubscriptionPackage;
+use App\Models\AdminChannel\AdminChannel;
+use App\Services\StreamingService\SourceHealthCheckService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\StreamedResponse;
+use Illuminate\Support\Facades\DB;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -18,7 +21,7 @@ class ChannelController extends Controller
 {
     public function index(Request $request): Response|JsonResponse
     {
-        $query = Channel::with(['categories', 'epgSource']);
+        $query = Channel::with(['categories', 'epgSource', 'bouquets']);
 
         if ($search = $request->input('search')) {
             $query->where(function ($q) use ($search) {
@@ -93,6 +96,8 @@ class ChannelController extends Controller
             'language' => 'nullable|string|max:10',
             'stream_url' => 'required|string',
             'stream_type' => 'nullable|in:m3u8,rtmp,rtsp,udp,hls,dash',
+            'program_number' => 'nullable|integer|min:1',
+            'local_address' => 'nullable|string|max:45',
             'backup_url_1' => 'nullable|string',
             'backup_url_2' => 'nullable|string',
             'quality' => 'nullable|string',
@@ -129,7 +134,11 @@ class ChannelController extends Controller
             'country' => $validated['country'] ?? null,
             'language' => $validated['language'] ?? null,
             'stream_url' => $validated['stream_url'],
+            'active_stream_url' => $validated['stream_url'],
+            'active_source_index' => 0,
             'stream_type' => $validated['stream_type'] ?? 'hls',
+            'program_number' => $validated['program_number'] ?? null,
+            'local_address' => $validated['local_address'] ?? null,
             'backup_url_1' => $validated['backup_url_1'] ?? null,
             'backup_url_2' => $validated['backup_url_2'] ?? null,
             'quality' => $validated['quality'] ?? '1080p',
@@ -176,6 +185,8 @@ class ChannelController extends Controller
             'language' => 'nullable|string|max:10',
             'stream_url' => 'sometimes|string',
             'stream_type' => 'sometimes|in:m3u8,rtmp,rtsp,udp,hls,dash',
+            'program_number' => 'sometimes|nullable|integer|min:1',
+            'local_address' => 'sometimes|nullable|string|max:45',
             'backup_url_1' => 'nullable|string',
             'backup_url_2' => 'nullable|string',
             'quality' => 'nullable|string',
@@ -225,6 +236,11 @@ class ChannelController extends Controller
             $validated['channel_number'] = $channel->channel_number;
         }
 
+        // When primary stream_url changes and we're still on it, update active_stream_url too
+        if (isset($validated['stream_url']) && $channel->active_source_index === 0) {
+            $validated['active_stream_url'] = $validated['stream_url'];
+        }
+
         $channel->update($validated);
 
         return redirect()->route('admin.channels.index')
@@ -252,6 +268,69 @@ class ChannelController extends Controller
             'message' => 'Channel status updated successfully.',
             'data' => ['is_active' => $channel->is_active],
         ]);
+    }
+
+    /**
+     * Return all channels (regular + admin) merged and sorted by channel_number.
+     */
+    public function allChannels(): JsonResponse
+    {
+        $regular = Channel::where('is_active', true)
+            ->get()
+            ->map(fn ($ch) => [
+                'id'             => $ch->id,
+                'type'           => 'channel',
+                'name'           => $ch->name,
+                'channel_number' => $ch->channel_number,
+                'stream_url'     => $ch->stream_url,
+                'logo_url'       => $ch->logo_url ?? '',
+                'is_active'      => $ch->is_active,
+            ]);
+
+        $admin = AdminChannel::where('is_active', true)
+            ->get()
+            ->map(fn ($ac) => [
+                'id'             => $ac->id,
+                'type'           => 'admin_channel',
+                'name'           => $ac->channel_name,
+                'channel_number' => $ac->channel_number ? (int) $ac->channel_number : null,
+                'stream_url'     => $ac->stream_url,
+                'logo_url'       => $ac->logo_url ?? '',
+                'is_active'      => $ac->is_active,
+            ]);
+
+        $merged = $regular->concat($admin)
+            ->sortBy('channel_number', SORT_NATURAL)
+            ->values();
+
+        return response()->json($merged);
+    }
+
+    /**
+     * Bulk-update channel_number for an ordered list of channels.
+     * Accepts: { items: [{ id: 1, type: 'channel' }, { id: 2, type: 'admin_channel' }] }
+     * Assigns sequential numbers starting from 1.
+     */
+    public function reorder(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'items'   => 'required|array',
+            'items.*.id'   => 'required|integer',
+            'items.*.type' => 'required|in:channel,admin_channel',
+        ]);
+
+        DB::transaction(function () use ($validated) {
+            foreach ($validated['items'] as $index => $item) {
+                $number = $index + 1;
+                if ($item['type'] === 'channel') {
+                    Channel::where('id', $item['id'])->update(['channel_number' => $number]);
+                } else {
+                    AdminChannel::where('id', $item['id'])->update(['channel_number' => (string) $number]);
+                }
+            }
+        });
+
+        return response()->json(['message' => 'Channel order updated successfully.']);
     }
 
     public function bulkImport(Request $request): RedirectResponse
@@ -318,6 +397,7 @@ class ChannelController extends Controller
             $streamType = 'hls';
             if (str_contains($url, 'rtmp://')) $streamType = 'rtmp';
             elseif (str_contains($url, 'rtsp://')) $streamType = 'rtsp';
+            elseif (str_contains($url, 'udp://') || str_contains($url, 'rtp://')) $streamType = 'udp';
             elseif (str_contains($url, '.mpd')) $streamType = 'dash';
 
             $channel = Channel::create([
@@ -347,6 +427,71 @@ class ChannelController extends Controller
 
         return redirect()->route('admin.channels.index')
             ->with('success', "Import completed. {$imported} channels imported, {$skipped} skipped.");
+    }
+
+    public function scanMulticast(Request $request): JsonResponse
+    {
+        $url = $request->input('url');
+
+        if (empty($url)) {
+            return response()->json([
+                'success' => false,
+                'data' => ['programs' => []],
+            ]);
+        }
+
+        // Run ffprobe to detect programs in the multi-program TS
+        $timeout = 20;
+        $command = sprintf(
+            'timeout %d ffprobe -v error -show_streams -show_format -of json -analyzeduration 10M -probesize 1M -user_agent "IPTV-Middleware-Scanner" %s 2>&1; echo "EXIT:$?"',
+            $timeout,
+            escapeshellarg($url)
+        );
+
+        $output = shell_exec($command . ' 2>&1');
+
+        // Extract exit code
+        $exitCode = 1;
+        if (preg_match('/EXIT:(\d+)\s*$/', $output, $m)) {
+            $exitCode = (int) $m[1];
+            $output = preg_replace('/EXIT:\d+\s*$/', '', $output);
+        }
+
+        $data = json_decode(trim($output), true);
+
+        $programs = [];
+
+        if ($exitCode === 0 && $data && (isset($data['streams']) || isset($data['format']))) {
+            // Extract program IDs from the streams
+            // In a multi-program TS, program_id is found in the program_map_PID or stream indexing
+            // We'll extract program IDs from the program_info or use stream indices
+
+            // Get program map info if available
+            if (isset($data['programs'])) {
+                foreach ($data['programs'] as $prog) {
+                    $programs[] = [
+                        'program_id' => $prog['program_id'] ?? null,
+                        'name' => $prog['name'] ?? 'Program ' . $prog['program_id'],
+                    ];
+                }
+            } else {
+                // Fallback: assign program IDs based on stream order
+                // In practice, multi-program TS have program numbers in PAT/PMT
+                // For now, use the stream indices as rough program IDs
+                $streamCount = isset($data['streams']) ? count($data['streams']) : 0;
+                for ($i = 0; $i < $streamCount; $i++) {
+                    $programs[] = [
+                        'program_id' => $i + 1,
+                        'name' => 'Program ' . ($i + 1),
+                    ];
+                }
+            }
+        }
+
+        return response()->json([
+            'success' => $exitCode === 0,
+            'data' => ['programs' => $programs],
+        ]);
     }
 
     public function testStream(Request $request, Channel $channel): JsonResponse
@@ -730,8 +875,113 @@ class ChannelController extends Controller
         if (str_contains($urlLower, '.mpd') || str_contains($urlLower, 'mpd')) return 'dash';
         if (str_contains($urlLower, 'rtmp://')) return 'rtmp';
         if (str_contains($urlLower, 'rtsp://')) return 'rtsp';
-        if (str_contains($urlLower, 'udp://')) return 'udp';
+        if (str_contains($urlLower, 'udp://') || str_contains($urlLower, 'rtp://')) return 'udp';
 
         return 'hls';
+    }
+
+    /**
+     * Return source status for all channels on the current page (lightweight JSON for polling).
+     */
+    public function sourceStatuses(Request $request): JsonResponse
+    {
+        $ids = $request->input('ids', []);
+
+        if (empty($ids)) {
+            return response()->json(['data' => []]);
+        }
+
+        $channels = Channel::whereIn('id', $ids)
+            ->select('id', 'source_status', 'source_last_checked_at', 'source_check_attempts', 'source_last_online_at', 'source_last_error', 'active_source_index', 'active_stream_url')
+            ->get()
+            ->keyBy('id');
+
+        return response()->json([
+            'data' => $channels->map(fn ($ch) => [
+                'id' => $ch->id,
+                'source_status' => $ch->source_status,
+                'source_last_checked_at' => $ch->source_last_checked_at,
+                'source_check_attempts' => $ch->source_check_attempts,
+                'source_last_online_at' => $ch->source_last_online_at,
+                'source_last_error' => $ch->source_last_error,
+                'active_source_index' => $ch->active_source_index,
+                'active_source_label' => $ch->active_source_label,
+            ])->values(),
+        ]);
+    }
+
+    /**
+     * Check the health of a channel's source URL and auto-restart if offline.
+     */
+    public function checkSource(Channel $channel, SourceHealthCheckService $healthCheck): JsonResponse
+    {
+        $result = $healthCheck->checkAndRefresh($channel);
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'status' => $channel->fresh()->source_status,
+                'message' => $result['message'] ?? 'Health check completed',
+                'details' => $result['details'] ?? [],
+                'restart' => $result['restart'] ?? null,
+                'last_checked_at' => $channel->fresh()->source_last_checked_at,
+                'check_attempts' => $channel->fresh()->source_check_attempts,
+            ],
+        ]);
+    }
+
+    /**
+     * Manually refresh (restart) a channel's ingest.
+     * Non-blocking — returns immediately, ingest restarts in background.
+     */
+    public function refreshSource(Channel $channel, SourceHealthCheckService $healthCheck): JsonResponse
+    {
+        $result = $healthCheck->manualRefresh($channel);
+
+        $fresh = $channel->fresh();
+
+        return response()->json([
+            'success' => $result['success'] ?? true,
+            'data' => [
+                'status' => $fresh->source_status,
+                'message' => $result['message'] ?? 'Refresh initiated',
+                'last_checked_at' => $fresh->source_last_checked_at,
+                'check_attempts' => $fresh->source_check_attempts,
+            ],
+        ]);
+    }
+
+    /**
+     * Stop a channel's ingest process.
+     */
+    public function stopSource(Channel $channel, SourceHealthCheckService $healthCheck): JsonResponse
+    {
+        $stopped = $healthCheck->stopChannel($channel);
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'stopped' => $stopped,
+                'message' => $stopped ? 'Channel stopped successfully' : 'No active ingest found',
+            ],
+        ]);
+    }
+
+    /**
+     * Manually switch a channel's active source to a specific index.
+     * 0 = Primary, 1 = Backup 1, 2 = Backup 2
+     */
+    public function switchSource(Request $request, Channel $channel, SourceHealthCheckService $healthCheck): JsonResponse
+    {
+        $validated = $request->validate([
+            'source_index' => 'required|integer|min:0|max:2',
+        ]);
+
+        $result = $healthCheck->switchSource($channel, $validated['source_index']);
+
+        return response()->json([
+            'success' => $result['success'],
+            'data' => $result,
+        ]);
     }
 }

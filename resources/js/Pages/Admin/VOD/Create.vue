@@ -82,6 +82,7 @@
               </div>
               <p class="text-gray-400 text-xs mt-1">Uploading... {{ uploadProgress }}%</p>
             </div>
+            <p v-if="uploadError" class="text-red-400 text-sm mt-2">{{ uploadError }}</p>
           </div>
         </div>
 
@@ -277,14 +278,69 @@ const triggerFileInput = () => fileInput.value?.click()
 const handleFileSelect = (e) => { uploadFile.value = e.target.files[0] }
 const handleDrop = (e) => { dragging.value = false; uploadFile.value = e.dataTransfer.files[0] }
 
-const submit = () => {
+const uploadError = ref('')
+
+const submit = async () => {
+  uploadError.value = ''
+
   if (sourceMode.value === 'upload' && uploadFile.value) {
-    form.post(route('admin.vod.upload'), {
-      forceFormData: true,
-      onStart: () => { uploadProgress.value = 1 },
-      onProgress: (p) => { uploadProgress.value = p.percentage },
-      onFinish: () => { uploadProgress.value = 0 },
-    })
+    const fd = new FormData()
+    fd.append('file', uploadFile.value)
+    fd.append('title', form.title)
+    fd.append('type', form.type)
+    if (form.description) fd.append('description', form.description)
+    if (form.year) fd.append('year', form.year)
+    if (form.duration) fd.append('duration', form.duration)
+    if (form.rating != null) fd.append('rating', form.rating)
+    if (form.director) fd.append('director', form.director)
+    if (form.poster_url) fd.append('poster_url', form.poster_url)
+    if (form.backdrop_url) fd.append('backdrop_url', form.backdrop_url)
+    if (form.trailer_url) fd.append('trailer_url', form.trailer_url)
+    if (form.tmdb_id) fd.append('tmdb_id', form.tmdb_id)
+    if (form.imdb_id) fd.append('imdb_id', form.imdb_id)
+    if (form.genre && form.genre.length) form.genre.forEach(g => fd.append('genre[]', g))
+    if (form.cast && form.cast.length) form.cast.forEach(c => fd.append('cast[]', c))
+    form.category_ids.forEach(id => fd.append('category_ids[]', id))
+    form.bouquet_ids.forEach(id => fd.append('bouquet_ids[]', id))
+    fd.append('is_active', form.is_active ? '1' : '0')
+    fd.append('is_featured', form.is_featured ? '1' : '0')
+
+    try {
+      uploadProgress.value = 1
+      form.processing = true
+
+      const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
+      const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+
+      const res = await fetch(route('admin.vod.upload'), {
+        method: 'POST',
+        headers: {
+          'X-Requested-With': 'XMLHttpRequest',
+          'Accept': 'text/html, application/xhtml+xml',
+          'X-XSRF-TOKEN': token,
+        },
+        credentials: 'same-origin',
+        body: fd,
+        onUploadProgress: (e) => {
+          if (e.lengthComputable) uploadProgress.value = Math.round((e.loaded / e.total) * 100)
+        },
+      })
+
+      uploadProgress.value = 100
+
+      if (res.redirected || res.ok) {
+        window.location.href = res.url || route('admin.vod.index')
+      } else {
+        const text = await res.text()
+        uploadError.value = `Upload failed (${res.status}). ${text.substring(0, 200)}`
+        uploadProgress.value = 0
+        form.processing = false
+      }
+    } catch (e) {
+      uploadError.value = 'Upload failed: ' + e.message
+      uploadProgress.value = 0
+      form.processing = false
+    }
   } else {
     form.post(route('admin.vod.store'))
   }

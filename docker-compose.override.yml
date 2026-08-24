@@ -1,0 +1,9 @@
+version: '3.8'
+services:
+  # Override service ports here to avoid conflicts with other apps on the server.
+  # Example for a web service named 'app' in your main docker-compose.yml:
+  # app:
+  #   ports:
+  #     - "8081:80"
+
+  # If your repository uses different service names, copy/adjust the blocks above.

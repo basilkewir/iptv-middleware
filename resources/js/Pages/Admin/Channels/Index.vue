@@ -91,15 +91,41 @@
                 <h3 class="text-white font-semibold truncate">{{ channel.name }}</h3>
                 <QualityBadge v-if="channel.quality_level" :quality="channel.quality_level" :showLabel="true" size="sm" />
               </div>
-              <span class="px-2 py-1 text-xs rounded-full shrink-0" :class="channel.is_active ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'">
-                {{ channel.is_active ? 'Live' : 'Offline' }}
-              </span>
+              <div class="flex items-center gap-2">
+                <span class="px-2 py-1 text-xs rounded-full shrink-0" :class="getSourceStatusClass(channel)">
+                  {{ getSourceStatusText(channel) }}
+                </span>
+                <select
+                  v-if="channel.backup_url_1 || channel.backup_url_2"
+                  :value="channel.active_source_index ?? 0"
+                  @change="switchSource(channel, parseInt($event.target.value))"
+                  :disabled="switchingSource[channel.id]"
+                  class="px-1 py-0.5 text-xs bg-gray-700 border border-gray-600 rounded text-gray-300 focus:outline-none focus:border-indigo-500 max-w-[110px]"
+                  title="Switch source"
+                >
+                  <option :value="0">Primary</option>
+                  <option v-if="channel.backup_url_1" :value="1">Backup 1</option>
+                  <option v-if="channel.backup_url_2" :value="2">Backup 2</option>
+                </select>
+                <span class="px-2 py-1 text-xs rounded-full shrink-0" :class="channel.is_active ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'">
+                  {{ channel.is_active ? 'Active' : 'Inactive' }}
+                </span>
+              </div>
             </div>
             <p class="text-gray-400 text-sm mb-1">{{ channel.categories?.[0]?.name || 'Uncategorized' }}</p>
             <div class="flex flex-wrap gap-1 mb-3">
               <span v-for="b in channel.bouquets?.slice(0, 2)" :key="b.id" class="px-1.5 py-0.5 text-xs bg-indigo-600/20 text-indigo-400 rounded">{{ b.name }}</span>
             </div>
             <div class="flex items-center gap-2">
+              <button @click="checkSource(channel)" :disabled="checkingChannels[channel.id]" class="px-3 py-2 bg-cyan-600/20 hover:bg-cyan-600 text-cyan-400 hover:text-white rounded-lg text-sm transition disabled:opacity-50" :title="'Check source health'">
+                <Activity class="w-4 h-4" :class="checkingChannels[channel.id] ? 'animate-spin' : ''" />
+              </button>
+              <button @click="refreshSource(channel)" :disabled="refreshingChannels[channel.id]" class="px-3 py-2 bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white rounded-lg text-sm transition disabled:opacity-50" :title="'Refresh source'">
+                <RefreshCw class="w-4 h-4" :class="refreshingChannels[channel.id] ? 'animate-spin' : ''" />
+              </button>
+              <button @click="stopSource(channel)" :disabled="stoppingChannels[channel.id]" class="px-3 py-2 bg-orange-600/20 hover:bg-orange-600 text-orange-400 hover:text-white rounded-lg text-sm transition disabled:opacity-50" :title="'Stop channel'">
+                <Square class="w-4 h-4" />
+              </button>
               <button @click="testChannel(channel)" class="px-3 py-2 bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white rounded-lg text-sm transition">Test</button>
               <Link :href="route('admin.channels.edit', channel.id)" class="flex-1 px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm transition text-center">Edit</Link>
               <button @click="confirmDelete(channel)" class="px-3 py-2 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white rounded-lg text-sm transition">Delete</button>
@@ -118,6 +144,7 @@
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Type</th>
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Quality</th>
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Category</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Source</th>
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Status</th>
               <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase">Actions</th>
             </tr>
@@ -139,12 +166,40 @@
               </td>
               <td class="px-4 py-3 text-gray-400 text-sm">{{ channel.categories?.[0]?.name || '-' }}</td>
               <td class="px-4 py-3">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-1 text-xs rounded-full" :class="getSourceStatusClass(channel)">
+                    {{ getSourceStatusText(channel) }}
+                  </span>
+                  <select
+                    v-if="channel.backup_url_1 || channel.backup_url_2"
+                    :value="channel.active_source_index ?? 0"
+                    @change="switchSource(channel, parseInt($event.target.value))"
+                    :disabled="switchingSource[channel.id]"
+                    class="px-1 py-0.5 text-xs bg-gray-700 border border-gray-600 rounded text-gray-300 focus:outline-none focus:border-indigo-500"
+                    title="Switch source"
+                  >
+                    <option :value="0">Primary</option>
+                    <option v-if="channel.backup_url_1" :value="1">Backup 1</option>
+                    <option v-if="channel.backup_url_2" :value="2">Backup 2</option>
+                  </select>
+                </div>
+              </td>
+              <td class="px-4 py-3">
                 <span class="px-2 py-1 text-xs rounded-full" :class="channel.is_active ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'">
                   {{ channel.is_active ? 'Active' : 'Inactive' }}
                 </span>
               </td>
               <td class="px-4 py-3">
                 <div class="flex items-center gap-1">
+                  <button @click="checkSource(channel)" :disabled="checkingChannels[channel.id]" class="p-1.5 hover:bg-gray-600 rounded transition text-gray-400 hover:text-cyan-400 disabled:opacity-50" title="Check source">
+                    <Activity class="w-4 h-4" :class="checkingChannels[channel.id] ? 'animate-spin' : ''" />
+                  </button>
+                  <button @click="refreshSource(channel)" :disabled="refreshingChannels[channel.id]" class="p-1.5 hover:bg-gray-600 rounded transition text-gray-400 hover:text-blue-400 disabled:opacity-50" title="Refresh source">
+                    <RefreshCw class="w-4 h-4" :class="refreshingChannels[channel.id] ? 'animate-spin' : ''" />
+                  </button>
+                  <button @click="stopSource(channel)" :disabled="stoppingChannels[channel.id]" class="p-1.5 hover:bg-gray-600 rounded transition text-gray-400 hover:text-orange-400 disabled:opacity-50" title="Stop channel">
+                    <Square class="w-4 h-4" />
+                  </button>
                   <button @click="toggleStatus(channel)" class="p-1.5 hover:bg-gray-600 rounded transition text-gray-400 hover:text-white" :title="channel.is_active ? 'Deactivate' : 'Activate'">
                     <Power class="w-4 h-4" :class="channel.is_active ? 'text-green-400' : 'text-red-400'" />
                   </button>
@@ -179,7 +234,7 @@
             <div class="flex justify-between"><span class="text-gray-400">Status:</span><span class="text-green-400">Online</span></div>
           </div>
           <div class="mt-4 p-4 bg-gray-700/50 rounded-lg">
-            <video v-if="testModal.stream_type === 'hls'" :src="testModal.stream_url" controls class="w-full rounded" />
+            <HLSPlayer v-if="testModal.stream_type === 'hls'" :src="testModal.stream_url" :autoplay="true" :muted="true" />
             <p v-else class="text-gray-400 text-center">Stream preview available for HLS streams</p>
           </div>
           <div class="flex justify-end mt-4">
@@ -204,12 +259,13 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Link, router } from '@inertiajs/vue3'
 import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
 import QualityBadge from '@/Components/QualityBadge.vue'
-import { Search, Plus, Upload, Tv, Pencil, Trash2, Power, LayoutGrid, List, ScanLine } from 'lucide-vue-next'
+import HLSPlayer from '@/Components/Player/HLSPlayer.vue'
+import { Search, Plus, Upload, Tv, Pencil, Trash2, Power, LayoutGrid, List, ScanLine, RefreshCw, Square, Activity } from 'lucide-vue-next'
 
 const props = defineProps({ channels: Object, categories: Array })
 
@@ -222,6 +278,10 @@ const viewMode = ref('grid')
 const selectedChannels = ref([])
 const deleteTarget = ref(null)
 const testModal = ref(null)
+const checkingChannels = ref({})
+const refreshingChannels = ref({})
+const stoppingChannels = ref({})
+const sourceStatuses = ref({})
 
 const isAllSelected = computed(() => {
   const data = filteredChannels.value
@@ -290,4 +350,162 @@ const scanAllQualities = () => {
     router.post(route('admin.quality.scan.all.channels'))
   }
 }
+
+const checkSource = async (channel) => {
+  checkingChannels.value[channel.id] = true
+  try {
+    const response = await fetch(route('admin.channels.check-source', channel.id), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+      },
+    })
+    const data = await response.json()
+    if (data.success) {
+      sourceStatuses.value[channel.id] = data.data.status
+      channel.source_status = data.data.status
+      channel.source_last_checked_at = data.data.last_checked_at
+      channel.source_check_attempts = data.data.check_attempts
+    }
+  } catch (e) {
+    console.error('Health check failed:', e)
+  } finally {
+    checkingChannels.value[channel.id] = false
+  }
+}
+
+const refreshSource = async (channel) => {
+  refreshingChannels.value[channel.id] = true
+  try {
+    const response = await fetch(route('admin.channels.refresh-source', channel.id), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+      },
+    })
+    const data = await response.json()
+    if (data.success) {
+      sourceStatuses.value[channel.id] = data.data.status
+      channel.source_status = data.data.status
+      channel.source_last_checked_at = data.data.last_checked_at
+      channel.source_check_attempts = data.data.check_attempts
+    }
+  } catch (e) {
+    console.error('Refresh failed:', e)
+  } finally {
+    refreshingChannels.value[channel.id] = false
+  }
+}
+
+const switchingSource = ref({})
+
+const switchSource = async (channel, sourceIndex) => {
+  switchingSource.value[channel.id] = true
+  try {
+    const response = await fetch(route('admin.channels.switch-source', channel.id), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+      },
+      body: JSON.stringify({ source_index: sourceIndex }),
+    })
+    const data = await response.json()
+    if (data.success) {
+      channel.active_source_index = data.data.source_index
+      channel.source_status = data.data.probe?.status || 'unknown'
+      sourceStatuses.value[channel.id] = data.data.probe?.status || 'unknown'
+    }
+  } catch (e) {
+    console.error('Source switch failed:', e)
+  } finally {
+    switchingSource.value[channel.id] = false
+  }
+}
+
+const stopSource = async (channel) => {
+  if (!confirm(`Stop channel "${channel.name}"?`)) return
+  stoppingChannels.value[channel.id] = true
+  try {
+    const response = await fetch(route('admin.channels.stop-source', channel.id), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+      },
+    })
+    const data = await response.json()
+    if (data.success) {
+      sourceStatuses.value[channel.id] = 'offline'
+      channel.source_status = 'offline'
+    }
+  } catch (e) {
+    console.error('Stop failed:', e)
+  } finally {
+    stoppingChannels.value[channel.id] = false
+  }
+}
+
+const getSourceStatusClass = (channel) => {
+  const status = sourceStatuses.value[channel.id] || channel.source_status
+  if (status === 'online') return 'bg-green-500/20 text-green-400'
+  if (status === 'offline') return 'bg-red-500/20 text-red-400'
+  return 'bg-gray-500/20 text-gray-400'
+}
+
+const getSourceStatusText = (channel) => {
+  const status = sourceStatuses.value[channel.id] || channel.source_status
+  const idx = channel.active_source_index ?? 0
+  const labels = ['Primary', 'Backup 1', 'Backup 2']
+  const label = labels[idx] || 'Primary'
+  if (status === 'online') return label
+  if (status === 'offline') return 'Offline'
+  return 'Unknown'
+}
+
+const getSourceLabel = (channel) => {
+  const idx = channel.active_source_index ?? 0
+  return ['Primary', 'Backup 1', 'Backup 2'][idx] || 'Primary'
+}
+
+const fetchSourceStatuses = async () => {
+  const ids = (props.channels?.data || []).map(c => c.id)
+  if (!ids.length) return
+  try {
+    const qs = ids.map(id => `ids[]=${id}`).join('&')
+    const resp = await fetch(route('admin.channels.source-statuses') + '?' + qs, {
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    })
+    const json = await resp.json()
+    if (json.data) {
+      json.data.forEach(s => {
+        sourceStatuses.value[s.id] = s.source_status
+        const ch = (props.channels?.data || []).find(c => c.id === s.id)
+        if (ch) {
+          ch.source_status = s.source_status
+          ch.source_last_checked_at = s.source_last_checked_at
+          ch.source_check_attempts = s.source_check_attempts
+          ch.active_source_index = s.active_source_index
+        }
+      })
+    }
+  } catch (e) {
+    console.error('Source status poll failed:', e)
+  }
+}
+
+let pollInterval = null
+onMounted(() => {
+  fetchSourceStatuses()
+  pollInterval = setInterval(fetchSourceStatuses, 30000)
+})
+onUnmounted(() => {
+  if (pollInterval) clearInterval(pollInterval)
+})
 </script>

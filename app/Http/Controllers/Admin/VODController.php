@@ -173,12 +173,13 @@ class VODController extends Controller
 
         // Store stream URL as VODMedia for movies/non-series
         if ($streamUrl && !in_array($vod->type, ['series', 'tv_show'])) {
+            $ext = pathinfo(parse_url($streamUrl, PHP_URL_PATH), PATHINFO_EXTENSION) ?: 'mp4';
             \App\Models\VODMedia::create([
                 'vod_content_id' => $vod->id,
                 'season_number'  => 0,
                 'episode_number' => 1,
                 'stream_url'     => $streamUrl,
-                'stream_type'    => 'hls',
+                'stream_type'    => $ext,
                 'quality'        => '1080p',
                 'resolution'     => '1080p',
                 'codec'          => 'h264',
@@ -203,7 +204,7 @@ class VODController extends Controller
                         'air_date'       => $epData['air_date'] ?? null,
                         'duration'       => $epData['duration'] ?? null,
                         'is_available'   => !empty($epData['stream_url']),
-                        'stream_type'    => 'hls',
+                        'stream_type'    => pathinfo(parse_url($epData['stream_url'] ?? '', PHP_URL_PATH), PATHINFO_EXTENSION) ?: 'mp4',
                         'quality'        => '1080p',
                         'resolution'     => '1080p',
                         'codec'          => 'h264',
@@ -313,7 +314,8 @@ class VODController extends Controller
 
         if ($request->hasFile('file')) {
             $file = $request->file('file');
-            $filename = time() . '_' . \Str::slug($validated['title'] ?? $vod->title) . '.' . $file->getClientOriginalExtension();
+            $fileExt = strtolower($file->getClientOriginalExtension());
+            $filename = time() . '_' . \Str::slug($validated['title'] ?? $vod->title) . '.' . $fileExt;
             $path = $file->storeAs('vod', $filename, 'public');
             $streamUrl = '/storage/' . $path;
         }
@@ -352,7 +354,7 @@ class VODController extends Controller
                             'air_date'       => $epData['air_date'] ?? null,
                             'duration'       => $epData['duration'] ?? null,
                             'is_available'   => !empty($epData['stream_url']),
-                            'stream_type'    => 'hls',
+                            'stream_type'    => pathinfo(parse_url($epData['stream_url'] ?? '', PHP_URL_PATH), PATHINFO_EXTENSION) ?: 'mp4',
                             'quality'        => '1080p',
                             'resolution'     => '1080p',
                             'codec'          => 'h264',
@@ -383,13 +385,13 @@ class VODController extends Controller
         if ($streamUrl !== null) {
             $media = $vod->vodMedia()->where('season_number', 0)->first();
             if ($media) {
-                $media->update(['stream_url' => $streamUrl, 'is_available' => !empty($streamUrl)]);
+                $media->update(['stream_url' => $streamUrl, 'stream_type' => $fileExt ?? $media->stream_type, 'is_available' => !empty($streamUrl)]);
             } else {
                 $vod->vodMedia()->create([
                     'season_number'  => 0,
                     'episode_number' => 1,
                     'stream_url'     => $streamUrl,
-                    'stream_type'    => 'hls',
+                    'stream_type'    => $fileExt ?? 'mp4',
                     'quality'        => '1080p',
                     'is_available'   => !empty($streamUrl),
                 ]);
@@ -607,7 +609,7 @@ class VODController extends Controller
     public function upload(Request $request): RedirectResponse
     {
         $validated = $request->validate([
-            'file'          => 'nullable|file|mimes:mp4,mkv,avi,mov,wmv,flv,webm|max:512000',
+            'file'          => 'nullable|file|mimes:mp4,mkv,avi,mov,wmv,flv,webm|max:2097152',
             'title'         => 'required|string|max:255',
             'type'          => 'nullable|in:movie,series,documentary,tv_show,anime,kids',
             'description'   => 'nullable|string',
@@ -632,11 +634,16 @@ class VODController extends Controller
         ]);
 
         $streamUrl = null;
+        $fileExt = 'mp4';
         if ($request->hasFile('file')) {
             $file = $request->file('file');
-            $filename = time() . '_' . \Str::slug($validated['title']) . '.' . $file->getClientOriginalExtension();
+            $fileExt = strtolower($file->getClientOriginalExtension());
+            $filename = time() . '_' . \Str::slug($validated['title']) . '.' . $fileExt;
             $path = $file->storeAs('vod', $filename, 'public');
             $streamUrl = '/storage/' . $path;
+        } elseif (!empty($validated['stream_url'])) {
+            $streamUrl = $validated['stream_url'];
+            $fileExt = pathinfo(parse_url($streamUrl, PHP_URL_PATH), PATHINFO_EXTENSION) ?: 'mp4';
         }
 
         $slug = \Str::slug($validated['title']);
@@ -675,7 +682,7 @@ class VODController extends Controller
                 'season_number'  => 0,
                 'episode_number' => 1,
                 'stream_url'     => $streamUrl,
-                'stream_type'    => 'hls',
+                'stream_type'    => $fileExt,
                 'quality'        => '1080p',
                 'resolution'     => '1080p',
                 'codec'          => 'h264',

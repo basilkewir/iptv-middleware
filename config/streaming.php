@@ -56,9 +56,9 @@ return [
         'enabled' => env('TRANSCODING_ENABLED', true),
         'ffmpeg_path' => env('FFMPEG_PATH', '/usr/bin/ffmpeg'),
         'ffprobe_path' => env('FFPROBE_PATH', '/usr/bin/ffprobe'),
-        'default_video_bitrate' => env('DEFAULT_VIDEO_BITRATE', '3000k'),
+        'default_video_bitrate' => env('DEFAULT_VIDEO_BITRATE', '1500k'),
         'default_audio_bitrate' => env('DEFAULT_AUDIO_BITRATE', '128k'),
-        'default_resolution' => env('DEFAULT_RESOLUTION', '1920x1080'),
+        'default_resolution' => env('DEFAULT_RESOLUTION', '854x480'),
         'presets' => [
             'low' => [
                 'video_bitrate' => '1000k',
@@ -144,6 +144,18 @@ return [
     | Stream Quality Monitoring
     |--------------------------------------------------------------------------
     */
+
+    /*
+    |--------------------------------------------------------------------------
+    | Flussonic Media Server
+    |--------------------------------------------------------------------------
+    */
+
+    'flussonic' => [
+        'url'      => env('FLUSSONIC_URL', 'http://localhost:8080'),
+        'username' => env('FLUSSONIC_USERNAME', 'flussonic'),
+        'password' => env('FLUSSONIC_PASSWORD', ''),
+    ],
 
     'monitoring' => [
         'enabled' => env('STREAM_MONITORING_ENABLED', true),

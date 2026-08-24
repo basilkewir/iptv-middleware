@@ -424,7 +424,6 @@ const stopBroadcast = async () => {
     stopping.value = false
   }
 }
-}
 
 watch(isLive, (live) => {
   if (live) {

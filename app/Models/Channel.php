@@ -12,6 +12,17 @@ class Channel extends Model
 {
     use HasFactory;
 
+    protected static function boot(): void
+    {
+        parent::boot();
+
+        static::creating(function (Channel $channel) {
+            if (is_null($channel->active_stream_url) && !is_null($channel->stream_url)) {
+                $channel->active_stream_url = $channel->stream_url;
+            }
+        });
+    }
+
     protected $fillable = [
         'name',
         'slug',
@@ -23,6 +34,8 @@ class Channel extends Model
         'language',
         'stream_url',
         'stream_type',
+        'program_number',
+        'local_address',
         'backup_url_1',
         'backup_url_2',
         'quality',
@@ -45,6 +58,13 @@ class Channel extends Model
         'quality_badge',
         'quality_updated_at',
         'sort_order',
+        'source_status',
+        'source_last_checked_at',
+        'source_last_online_at',
+        'source_check_attempts',
+        'source_last_error',
+        'active_stream_url',
+        'active_source_index',
     ];
 
     protected $casts = [
@@ -57,6 +77,11 @@ class Channel extends Model
             'channel_number' => 'integer',
             'bitrate' => 'integer',
             'sort_order' => 'integer',
+            'program_number' => 'integer',
+            'source_check_attempts' => 'integer',
+            'active_source_index' => 'integer',
+            'source_last_checked_at' => 'datetime',
+            'source_last_online_at' => 'datetime',
         
     ];
 
@@ -97,5 +122,38 @@ class Channel extends Model
     {
         return $this->belongsToMany(SubscriptionPackage::class, 'channel_restricted_packages', 'channel_id', 'package_id')
             ->withTimestamps();
+    }
+
+    /**
+     * Get the URL that the ingest process should currently use.
+     * Falls back to stream_url if active_stream_url is not set.
+     */
+    public function getActiveSourceUrlAttribute(): ?string
+    {
+        return $this->attributes['active_stream_url'] ?? $this->stream_url;
+    }
+
+    /**
+     * Return all source URLs in priority order: [main, backup1, backup2].
+     */
+    public function getSourceUrls(): array
+    {
+        return array_filter([
+            $this->stream_url,
+            $this->backup_url_1,
+            $this->backup_url_2,
+        ], fn ($url) => !empty($url));
+    }
+
+    /**
+     * Get a human-readable label for the currently active source.
+     */
+    public function getActiveSourceLabelAttribute(): string
+    {
+        return match ($this->active_source_index) {
+            1 => 'Backup 1',
+            2 => 'Backup 2',
+            default => 'Primary',
+        };
     }
 }

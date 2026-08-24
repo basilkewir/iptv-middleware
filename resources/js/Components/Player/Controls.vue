@@ -53,8 +53,7 @@
             class="p-1.5 sm:p-2 rounded-md hover:bg-white/20 transition-colors tv-touch-target tv-focusable"
           >
             <SpeakerXMarkIcon v-if="isMuted || volume === 0" class="w-5 h-5 sm:w-6 sm:h-6" />
-            <SpeakerHighIcon v-else-if="volume > 0.5" class="w-5 h-5 sm:w-6 sm:h-6" />
-            <SpeakerLowIcon v-else class="w-5 h-5 sm:w-6 sm:h-6" />
+            <SpeakerWaveIcon v-else class="w-5 h-5 sm:w-6 sm:h-6" />
           </button>
           <div class="w-0 sm:group-hover/volume:w-20 overflow-hidden transition-all duration-200">
             <input
@@ -101,8 +100,7 @@ import { ref, computed } from 'vue'
 import {
   PlayIcon,
   PauseIcon,
-  SpeakerHighIcon,
-  SpeakerLowIcon,
+  SpeakerWaveIcon,
   SpeakerXMarkIcon,
   ArrowsPointingOutIcon,
 } from '@heroicons/vue/24/solid'

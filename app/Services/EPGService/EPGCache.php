@@ -23,7 +23,7 @@ class EPGCache implements EPGCacheInterface
     public function __construct()
     {
         $this->prefix = config('cache.prefix', 'iptv') . ':epg:';
-        $this->defaultTtl = config('epg.cache_ttl', 14400);
+        $this->defaultTtl = (int) config('epg.cache_ttl', 14400);
     }
 
     public function getPrograms(string $key, callable $callback, ?int $ttl = null): array

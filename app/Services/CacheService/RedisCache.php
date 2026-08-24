@@ -19,7 +19,7 @@ class RedisCache implements CacheDriverInterface
     public function __construct()
     {
         $this->prefix = config('cache.prefix', 'iptv') . ':';
-        $this->defaultTtl = config('cache.ttl', 3600);
+        $this->defaultTtl = (int) config('cache.ttl', 3600);
     }
 
     public function get(string $key, mixed $default = null): mixed

@@ -26,7 +26,7 @@ class TMDBService
         $this->imageBaseUrl = config('tmdb.image_base_url');
         $this->language = config('tmdb.language', 'en-US');
         $this->region = config('tmdb.region', 'US');
-        $this->cacheTtl = config('tmdb.cache_ttl', 86400);
+        $this->cacheTtl = (int) config('tmdb.cache_ttl', 86400);
     }
 
     public function isConfigured(): bool

@@ -27,11 +27,21 @@ class Kernel extends ConsoleKernel
             ->everyFiveMinutes()
             ->withoutOverlapping();
 
-        // Keep every active channel playing locally (local-network HLS) and
-        // respawn any ingest that has died. Idempotent: channels already
-        // running are skipped.
-        $schedule->command('channels:ingest-all')
-            ->everyMinute()
+        // Ingest is now ON-DEMAND only: streams start when a client
+        // requests them via ensureHlsStream(). This prevents the server
+        // from being overwhelmed by 43+ simultaneous FFmpeg transcodes.
+        // UDP channels use -c copy (no re-encoding) for minimal CPU usage.
+
+        // Check every active channel's source in Flussonic and restart any
+        // that are offline or frozen (bitrate = 0 / no UDP data arriving).
+        // Two consecutive bad checks are required before a restart fires.
+        // NOTE: streams:check-sources was removed — use channels:auto-check-health instead.
+
+        // Source health check runs every 5 minutes instead of every minute
+        // to avoid spawning ingests during overload. On-demand ingest via
+        // ensureHlsStream() is the primary mechanism.
+        $schedule->command('channels:auto-check-health')
+            ->everyFiveMinutes()
             ->withoutOverlapping();
     }
 
