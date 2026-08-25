@@ -68,6 +68,45 @@
         </div>
       </div>
 
+      <!-- System Monitoring -->
+      <div v-if="system" class="bg-gray-800 rounded-xl p-6 border border-gray-700">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h3 class="text-lg font-semibold text-white">System Monitoring</h3>
+            <p class="text-gray-500 text-xs mt-0.5">{{ system.hostname }} · {{ system.os }} · up {{ system.uptime }}</p>
+          </div>
+          <span class="text-xs text-gray-500">updated {{ collectedAgo }}</span>
+        </div>
+
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+          <div v-for="gauge in systemGauges" :key="gauge.label" class="p-4 bg-gray-700/50 rounded-lg">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-gray-400 text-sm">{{ gauge.label }}</span>
+              <component :is="gauge.icon" class="w-4 h-4" :class="gauge.tone === 'ok' ? 'text-green-400' : gauge.tone === 'warn' ? 'text-yellow-400' : 'text-red-400'" />
+            </div>
+            <p class="text-xl font-bold text-white">{{ gauge.value }}</p>
+            <div class="mt-2 h-1.5 bg-gray-600/60 rounded-full overflow-hidden">
+              <div class="h-full rounded-full transition-all" :class="gauge.barClass" :style="{ width: gauge.pct + '%' }" />
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-gray-400 text-sm">HLS Ingests</span>
+            <span class="text-xs text-gray-500">{{ ingestSummary }}</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+            <div v-for="ing in ingests" :key="ing.id" class="flex items-center gap-3 p-2.5 bg-gray-700/40 rounded-lg">
+              <span class="w-2 h-2 rounded-full shrink-0" :class="ing.status === 'live' ? 'bg-green-400 animate-pulse' : ing.status === 'stale' ? 'bg-yellow-400' : ing.status === 'starting' ? 'bg-blue-400' : 'bg-red-400'" />
+              <span class="text-white text-sm truncate flex-1">#{{ ing.channel_number }} {{ ing.name || 'Unnamed' }}</span>
+              <span class="text-xs uppercase tracking-wide" :class="ing.status === 'live' ? 'text-green-400' : ing.status === 'stale' ? 'text-yellow-400' : 'text-red-400'">{{ ing.status }}</span>
+            </div>
+          </div>
+          <div v-if="!ingests.length" class="text-gray-500 text-sm text-center py-3">No active channel ingests</div>
+        </div>
+      </div>
+
       <!-- Top Channels -->
       <div v-if="stats.top_channels?.length" class="bg-gray-800 rounded-xl p-6 border border-gray-700">
         <h3 class="text-lg font-semibold text-white mb-4">Top Channels</h3>
@@ -223,7 +262,7 @@ import { ref, computed } from 'vue'
 import { Link } from '@inertiajs/vue3'
 import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
-import { RefreshCw, Users, DollarSign, Radio, Server, Tv, UserPlus, Film, Calendar, Settings, CreditCard } from 'lucide-vue-next'
+import { RefreshCw, Users, DollarSign, Radio, Server, Tv, UserPlus, Film, Calendar, Settings, CreditCard, Cpu, MemoryStick, HardDrive, Gauge } from 'lucide-vue-next'
 
 const props = defineProps({
   stats: {
@@ -239,6 +278,7 @@ const props = defineProps({
       top_channels: [],
       recent_activity: [],
       server_health: [],
+      system: null,
       user_growth: [],
       bandwidth_usage: [],
     }),
@@ -274,6 +314,49 @@ const bandwidthChartData = computed(() => {
 
 const recentActivityList = computed(() => props.stats.recent_activity || [])
 const serverHealthList = computed(() => props.stats.server_health || [])
+
+const system = computed(() => props.stats.system || null)
+const ingests = computed(() => system.value?.ingests || [])
+const collectedAgo = computed(() => {
+  if (!system.value?.collected_at) return ''
+  const secs = Math.max(0, Math.round((Date.now() - new Date(system.value.collected_at).getTime()) / 1000))
+  return secs < 60 ? `${secs}s ago` : `${Math.round(secs / 60)}m ago`
+})
+const ingestSummary = computed(() => {
+  const list = ingests.value
+  if (!list.length) return '0 total'
+  const live = list.filter(i => i.status === 'live').length
+  return `${live}/${list.length} live`
+})
+
+const toneForPct = (pct) => (pct < 60 ? 'ok' : pct < 85 ? 'warn' : 'critical')
+
+const systemGauges = computed(() => {
+  const s = system.value
+  if (!s) return []
+  const gauges = [
+    { label: 'CPU', value: `${s.cpu_usage}%`, pct: s.cpu_usage, icon: Cpu },
+    { label: 'Memory', value: `${s.memory_usage}%`, pct: s.memory_usage, icon: MemoryStick },
+    { label: 'Disk', value: `${s.disk_usage}%`, pct: s.disk_usage, icon: HardDrive },
+  ]
+  return gauges.map(g => {
+    const tone = toneForPct(g.pct)
+    return {
+      ...g,
+      tone,
+      barClass: tone === 'ok' ? 'bg-green-500' : tone === 'warn' ? 'bg-yellow-400' : 'bg-red-500',
+    }
+  }).concat([
+    {
+      label: `Load (${(s.load || []).join(' / ')})`,
+      value: `${(s.load || [0])[0]}`,
+      pct: Math.min(100, ((s.load || [0])[0] / Math.max(1, 4)) * 100),
+      icon: Gauge,
+      tone: 'ok',
+      barClass: 'bg-indigo-500',
+    },
+  ])
+})
 
 const activityIcon = (type) => {
   const icons = { user: UserPlus, subscription: CreditCard, system: Server }

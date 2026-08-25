@@ -10,6 +10,7 @@ use App\Models\Subscription;
 use App\Models\SystemLog;
 use App\Models\User;
 use App\Models\VODContent;
+use App\Services\SystemMonitorService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -52,6 +53,7 @@ class DashboardController extends Controller
             'top_channels' => $this->getTopChannels($startDate, $endDate),
             'recent_activity' => $this->getRecentActivity(),
             'server_health' => $this->getServerHealth(),
+            'system' => app(SystemMonitorService::class)->summary(),
         ];
 
         if ($request->expectsJson()) {
@@ -203,6 +205,9 @@ class DashboardController extends Controller
 
     private function getServerHealth(): array
     {
+        $monitor = app(SystemMonitorService::class);
+        $summary = $monitor->summary();
+
         return Server::all()
             ->map(fn ($server) => [
                 'id' => $server->id,
@@ -213,9 +218,9 @@ class DashboardController extends Controller
                 'current_streams' => $server->current_connections,
                 'max_streams' => $server->max_connections,
                 'bandwidth' => $server->bandwidth,
-                'cpu' => rand(20, 85),
-                'memory' => rand(40, 90),
-                'disk' => rand(30, 70),
+                'cpu' => $summary['cpu_usage'],
+                'memory' => $summary['memory_usage'],
+                'disk' => $summary['disk_usage'],
             ])
             ->toArray();
     }
