@@ -9,6 +9,7 @@ use App\Models\EPGProgram;
 use App\Models\User;
 use App\Models\VODContent;
 use App\Models\VODMedia;
+use App\Services\StreamingService\MulticastIngestService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
@@ -462,6 +463,19 @@ class XtreamController extends Controller
      */
     public function ensureHlsStream(int $channelId, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false): void
     {
+        // UDP/RTP multicast channels are served by ONE shared group reader
+        // (MulticastIngestService) instead of one ffmpeg per channel — dozens
+        // of independent readers of the same mux overflow kernel socket
+        // buffers and starve transcodes. All callers funnel through here.
+        if (str_starts_with($sourceUrl, 'udp://') || str_starts_with($sourceUrl, 'rtp://')) {
+            $channel = Channel::find($channelId);
+
+            if ($channel) {
+                app(MulticastIngestService::class)->ensureGroupReader($channel);
+                return;
+            }
+        }
+
         $outputDir = storage_path("app/streams/hls/{$channelId}");
         $pidFile = $outputDir . '/ingest.pid';
         $heartbeat = $outputDir . '/.heartbeat';
@@ -568,6 +582,18 @@ class XtreamController extends Controller
      */
     public function restartHlsStream(Channel $channel): void
     {
+        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+
+        // Multicast channels belong to the shared group reader: restart the
+        // whole group (it wipes + rewrites every member's output on start).
+        if ($sourceUrl && (str_starts_with($sourceUrl, 'udp://') || str_starts_with($sourceUrl, 'rtp://'))) {
+            $multicast = app(MulticastIngestService::class);
+            $multicast->stopGroup($channel);
+            $multicast->ensureGroupReader($channel);
+
+            return;
+        }
+
         $outputDir = storage_path("app/streams/hls/{$channel->id}");
         $pidFile = $outputDir . '/ingest.pid';
 

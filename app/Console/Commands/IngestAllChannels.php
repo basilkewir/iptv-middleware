@@ -75,6 +75,16 @@ class IngestAllChannels extends Command
                 continue;
             }
 
+            // UDP/RTP channels are written by the shared multicast group
+            // reader whose ffmpeg command line contains every member's
+            // output path — pkill-ing by this directory marker would kill
+            // the entire group. Skip process-killing for those.
+            $legacy = Channel::find((int) $id);
+
+            if ($legacy && (str_starts_with((string) $legacy->stream_url, 'udp://') || str_starts_with((string) $legacy->stream_url, 'rtp://'))) {
+                continue;
+            }
+
             $pidFile = $dir . '/ingest.pid';
 
             if (is_file($pidFile)) {

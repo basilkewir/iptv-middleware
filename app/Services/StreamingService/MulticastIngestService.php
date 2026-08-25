@@ -25,18 +25,21 @@ class MulticastIngestService
 {
     private const RESTART_BACKOFF_SECONDS = 10;
 
-    // One ffmpeg handles all programs from a multicast group — 2 threads is
-    // enough for demux + multi-output mux. More threads waste CPU on locking.
-    private const FFMPEG_THREADS = 2;
+    // One ffmpeg handles all programs from a multicast group. Threads 0
+    // (auto) lets ffmpeg parallelise decode/mux across outputs — with dozens
+    // of outputs a fixed low thread count cannot drain the socket in time
+    // and the kernel receive queue overflows.
+    private const FFMPEG_THREADS = 0;
 
-    // nice level — yields to nginx/PHP/MySQL under load without starving streams
-    private const NICE_LEVEL = 15;
+    // Modest niceness: yields to nginx/PHP/MySQL but must not starve the
+    // ingest loop, or the UDP receive queue overflows and packets drop.
+    private const NICE_LEVEL = 5;
 
     // Max 1-min load before the group reader waits before (re)starting.
-    private const LOAD_GATE = 5;
+    private const LOAD_GATE = 16;
 
     /** Load threshold the group reader waits under before respawning ffmpeg. */
-    private const HOLD_GATE = 9;
+    private const HOLD_GATE = 24;
 
     /**
      * Get all active multicast channels grouped by their source URL.
@@ -69,6 +72,12 @@ class MulticastIngestService
 
         if ($channel->local_address && ! str_contains($url, 'localaddr=')) {
             $url .= (str_contains($url, '?') ? '&' : '?') . 'localaddr=' . $channel->local_address;
+        }
+
+        // Large SO_RCVBUF so bursts from the mux don't overflow the kernel
+        // receive queue (requires net.core.rmem_max >= 16777216 on the host).
+        if (! str_contains($url, 'buffer_size=')) {
+            $url .= (str_contains($url, '?') ? '&' : '?') . 'buffer_size=16777216';
         }
 
         return $url;
@@ -181,6 +190,11 @@ class MulticastIngestService
 
         $cmd = $this->buildGroupReaderCommand($sourceUrl, $groupChannels, $pidFile, $logFile);
 
+        // The group PID file lives in storage/app/multicast — make sure the
+        // directory exists or the wrapper's `echo $$ > pidfile` fails silently
+        // and every subsequent ensure* call thinks no reader is running.
+        @mkdir(dirname($pidFile), 0755, true);
+
         Log::info('Starting multicast group reader', [
             'source' => $sourceUrl,
             'channels' => array_keys($groupChannels),
@@ -248,12 +262,19 @@ class MulticastIngestService
 
             $outputs[] = sprintf(
                 ' -map 0:p:%d -map_chapters -1 -ignore_unknown'
-                . ' -c:v copy -c:a aac -b:a 48k -ac 2 -ar 48000'
+                . '%s'
+                . ' -c:a aac -b:a 48k -ac 2 -ar 48000'
                 . ' -f hls -hls_time 6 -hls_list_size 5'
                 . ' -hls_flags delete_segments+temp_file+independent_segments+append_list'
                 . ' -hls_segment_filename %s/segment_%%04d.ts'
                 . ' %s/playlist.m3u8',
                 $programNumber,
+                // Channels flagged for transcoding get a full H.264 re-encode
+                // (normalises odd profiles that break TV players); the rest
+                // stream-copy at zero CPU cost.
+                ((bool) ($ch->transcoding_enabled ?? false))
+                    ? ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -threads 4'
+                    : ' -c:v copy',
                 escapeshellarg($outputDir),
                 escapeshellarg($outputDir)
             );
@@ -277,7 +298,8 @@ class MulticastIngestService
             .   'echo "LOAD_WAIT load=$LOAD" >> "$L"; sleep 5; '
             . 'done; '
             . 'while true; do '
-            .   ('nice -n ' . self::NICE_LEVEL . ' ffmpeg -threads ' . self::FFMPEG_THREADS . ' -rw_timeout 30000000 -timeout 30000000 -i %s')
+            .   ('nice -n ' . self::NICE_LEVEL . ' ffmpeg -threads ' . self::FFMPEG_THREADS
+            .   ' -fflags +genpts+discardcorrupt -rw_timeout 30000000 -timeout 30000000 -i %s')
             .   " \\\n%s \\\n"
             .   '2>>"$L"; '
             .   'echo "GROUP READER RESTART $(date +%%s)" >> "$L"; '
