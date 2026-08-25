@@ -40,7 +40,40 @@ Route::get('/hls/{key}/{file}', [HlsController::class, 'serve'])
     ->where('file', '.*')
     ->name('hls.serve');
 
-Route::middleware(['web', 'guest'])->group(function () {
+// ─── License Activation (accessible even when no valid license exists) ─────────
+Route::middleware('web')->group(function () {
+    Route::get('/license-required', fn () => Inertia::render('Auth/LicenseRequired'))
+        ->name('license.required');
+
+    Route::post('/license/activate', function (\Illuminate\Http\Request $request) {
+        $validated = $request->validate([
+            'license_key' => 'required|string',
+        ]);
+
+        $license = \App\Models\License::where('license_key', trim($validated['license_key']))->first();
+
+        if (! $license) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'license_key' => 'This license key is invalid, expired, or inactive.',
+            ]);
+        }
+
+        // A suspended license can be recovered by re-entering its correct key.
+        if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
+            $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
+        }
+
+        if (! $license->isValid()) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'license_key' => 'This license key is invalid, expired, or inactive.',
+            ]);
+        }
+
+        return redirect()->route('login')->with('success', 'License activated successfully. You can now sign in.');
+    })->name('license.activate');
+});
+
+Route::middleware(['web', 'guest', 'license.check'])->group(function () {
     Route::get('/', fn () => Inertia::render('Auth/Login'))->name('home');
     Route::get('/login', fn () => Inertia::render('Auth/Login'))->name('login');
 
@@ -80,7 +113,7 @@ Route::middleware(['web', 'guest'])->group(function () {
 });
 
 // ─── Authenticated Logout ──────────────────────────────────────────────────────
-Route::middleware('auth:web')->group(function () {
+Route::middleware(['auth:web', 'license.check'])->group(function () {
     Route::post('/logout', [App\Http\Controllers\Api\AuthController::class, 'logout'])->name('logout');
 });
 
@@ -88,7 +121,7 @@ Route::middleware('auth:web')->group(function () {
 Route::middleware('auth:web')->get('/dashboard', fn () => redirect()->route('admin.dashboard'));
 
 // ─── Admin Panel ───────────────────────────────────────────────────────────────
-Route::middleware(['auth:web', \App\Http\Middleware\AdminMiddleware::class])
+Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddleware::class])
     ->prefix('admin')
     ->name('admin.')
     ->group(function () {
@@ -456,6 +489,12 @@ Route::middleware(['auth:web', \App\Http\Middleware\AdminMiddleware::class])
         Route::get('/settings/domains', [SettingsController::class, 'domains'])->name('settings.domains');
         Route::put('/settings/domains', [SettingsController::class, 'updateDomains'])->name('settings.domains.update');
 
+        // ─── License Management ────────────────────────────────────────────
+        Route::get('/settings/license', [SettingsController::class, 'license'])->name('settings.license');
+        Route::post('/settings/license/activate', [SettingsController::class, 'activateLicense'])->name('settings.license.activate');
+        Route::post('/settings/license/deactivate', [SettingsController::class, 'deactivateLicense'])->name('settings.license.deactivate');
+        Route::delete('/settings/license/devices/{device}', [SettingsController::class, 'revokeDevice'])->name('settings.license.devices.revoke');
+
         // ─── Settings Actions ──────────────────────────────────────────────
         Route::post('/settings/api/regenerate', [SettingsController::class, 'regenerateApiKeys'])->name('settings.api.regenerate');
         Route::post('/settings/backup/run', [SettingsController::class, 'runBackup'])->name('settings.backup.run');
@@ -534,7 +573,7 @@ Route::get('/player_api.php', function (Request $request) {
 });
 
 // ─── Client Channel/Playout System ──────────────────────────────────
-Route::middleware('auth:web')->prefix('client')->name('client.')->group(function () {
+Route::middleware(['auth:web', 'license.check'])->prefix('client')->name('client.')->group(function () {
     Route::get('/channels', [\App\Http\Controllers\Client\ChannelController::class, 'index'])->name('channels.index');
     Route::get('/channels/create', fn () => \Inertia\Inertia::render('Client/Channel/Create'))->name('channels.create');
     Route::get('/channels/{channel}', [\App\Http\Controllers\Client\ChannelController::class, 'show'])->name('channels.show');
@@ -569,7 +608,7 @@ Route::middleware('auth:web')->prefix('client')->name('client.')->group(function
 });
 
 // ─── Client VOD System ───────────────────────────────────────────────
-Route::middleware('auth:web')->prefix('vod')->name('vod.')->group(function () {
+Route::middleware(['auth:web', 'license.check'])->prefix('vod')->name('vod.')->group(function () {
     Route::get('/', [\App\Http\Controllers\Client\VODController::class, 'index'])->name('index');
     Route::get('/movie/{id}', [\App\Http\Controllers\Client\VODController::class, 'showMovie'])->name('movie');
     Route::get('/series/{id}', [\App\Http\Controllers\Client\VODController::class, 'showSeries'])->name('series');

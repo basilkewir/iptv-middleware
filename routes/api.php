@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\WatchHistoryController;
 use App\Http\Controllers\Api\ReviewController;
+use App\Http\Controllers\Api\LicenseController;
 
 // Public endpoint for HMS to fetch channel list (used for default channel picker)
 Route::get('/hms/channels', function () {
@@ -52,34 +53,38 @@ Route::group([], function () {
     Route::get('/epg/current', [EPGController::class, 'current']);
     Route::get('/epg/upcoming', [EPGController::class, 'upcoming']);
 
-    Route::middleware('auth:sanctum')->group(function () {
-        Route::get('/user/profile', [ProfileController::class, 'show']);
+    // License validation endpoint (POST only, no middleware - public for initial license check)
+    Route::post('/license/validate', [LicenseController::class, 'validate']);
+
+    // License validation middleware applied to all routes below
+    Route::middleware('license')->group(function () {
+        Route::match(['GET', 'HEAD'], '/user/profile', [ProfileController::class, 'show']);
         Route::put('/user/profile', [ProfileController::class, 'update']);
 
-        Route::get('/favorites', [FavoriteController::class, 'index']);
-        Route::post('/favorites', [FavoriteController::class, 'store']);
+        Route::match(['GET', 'POST'], '/favorites', [FavoriteController::class, 'index']);
+        Route::post('/favorites/store', [FavoriteController::class, 'store']);
         Route::delete('/favorites/{id}', [FavoriteController::class, 'destroy']);
 
-        Route::get('/watch-history', [WatchHistoryController::class, 'index']);
+        Route::match(['GET', 'POST'], '/watch-history', [WatchHistoryController::class, 'index']);
         Route::post('/watch-history', [WatchHistoryController::class, 'store']);
         Route::put('/watch-history/{id}', [WatchHistoryController::class, 'update']);
 
-        Route::get('/reviews/vod/{vod}', [ReviewController::class, 'index']);
+        Route::match(['GET', 'POST'], '/reviews/vod/{vod}', [ReviewController::class, 'index']);
         Route::post('/reviews', [ReviewController::class, 'store']);
 
-    Route::get('/subscription', [SubscriptionController::class, 'current']);
-    Route::get('/subscription/packages', [SubscriptionController::class, 'packages']);
-    Route::get('/subscription/current', [SubscriptionController::class, 'current']);
-    Route::post('/subscription/subscribe', [SubscriptionController::class, 'subscribe']);
-    Route::post('/subscription/{package}/subscribe', [SubscriptionController::class, 'subscribe']);
-    Route::post('/subscription/renew', [SubscriptionController::class, 'renew']);
-    Route::get('/subscription/history', [SubscriptionController::class, 'history']);
+        Route::match(['GET', 'POST'], '/subscription', [SubscriptionController::class, 'current']);
+        Route::match(['GET', 'POST'], '/subscription/packages', [SubscriptionController::class, 'packages']);
+        Route::match(['GET', 'POST'], '/subscription/current', [SubscriptionController::class, 'current']);
+        Route::match(['POST'], '/subscription/subscribe', [SubscriptionController::class, 'subscribe']);
+        Route::match(['POST'], '/subscription/{package}/subscribe', [SubscriptionController::class, 'subscribe']);
+        Route::match(['POST'], '/subscription/renew', [SubscriptionController::class, 'renew']);
+        Route::match(['GET'], '/subscription/history', [SubscriptionController::class, 'history']);
 
-        Route::get('/payment/methods', [PaymentController::class, 'methods']);
-        Route::post('/payment/invoice', [PaymentController::class, 'createInvoice']);
-        Route::post('/payment/pay/{invoice}', [PaymentController::class, 'payInvoice']);
-        Route::get('/payment/invoices', [PaymentController::class, 'invoices']);
+        Route::match(['GET', 'POST'], '/payment/methods', [PaymentController::class, 'methods']);
+        Route::match(['POST'], '/payment/invoice', [PaymentController::class, 'createInvoice']);
+        Route::match(['POST'], '/payment/pay/{invoice}', [PaymentController::class, 'payInvoice']);
+        Route::match(['GET'], '/payment/invoices', [PaymentController::class, 'invoices']);
 
-        Route::get('/admin/servers', [\App\Http\Controllers\Api\AdminServerController::class, 'index']);
+        Route::match(['GET'], '/admin/servers', [\App\Http\Controllers\Api\AdminServerController::class, 'index']);
     });
 });

@@ -3,21 +3,36 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\LicenseDevice;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
 
 class ProfileController extends Controller
 {
     public function show(Request $request): JsonResponse
     {
         try {
-            $user = $request->user()->load('profile');
+            $license = $request->input('license');
+            $device = $request->input('device');
 
             return response()->json([
                 'success' => true,
                 'data' => [
-                    'user' => $user,
+                    'hotel' => [
+                        'hotel_id' => $license->hotel_id,
+                        'hotel_name' => $license->hotel_name,
+                        'license_type' => $license->license_type,
+                        'features' => $request->input('license_features'),
+                    ],
+                    'device' => [
+                        'id' => $device->id,
+                        'name' => $device->device_name,
+                        'type' => $device->device_type,
+                        'model' => $device->device_model,
+                        'os' => trim($device->device_os . ' ' . $device->device_os_version),
+                        'app_version' => $device->app_version,
+                        'last_seen_at' => $device->last_seen_at?->toISOString(),
+                    ],
                 ],
             ], 200);
         } catch (\Exception $e) {
@@ -32,47 +47,28 @@ class ProfileController extends Controller
     {
         try {
             $validated = $request->validate([
-                'first_name' => 'sometimes|string|max:255',
-                'last_name' => 'sometimes|string|max:255',
-                'email' => 'sometimes|email|unique:users,email,' . $request->user()->id,
-                'phone' => 'nullable|string|max:50',
-                'password' => 'nullable|string|min:8|confirmed',
-                'avatar' => 'nullable|string|max:500',
-                'country' => 'nullable|string|max:100',
-                'language' => 'nullable|string|max:10',
-                'timezone' => 'nullable|string|max:50',
-                'preferences' => 'nullable|array',
+                'device_name' => 'sometimes|string|max:255',
+                'device_model' => 'sometimes|string|max:255',
+                'app_version' => 'sometimes|string|max:50',
+                'mac_address' => 'sometimes|string|max:50',
             ]);
 
-            $user = $request->user();
+            /** @var LicenseDevice $device */
+            $device = $request->input('device');
 
-            $userData = collect($validated)->only([
-                'first_name', 'last_name', 'email', 'phone',
-            ])->toArray();
-
-            if (isset($validated['password'])) {
-                $userData['password'] = Hash::make($validated['password']);
-            }
-
-            $user->update($userData);
-
-            $profileData = collect($validated)->only([
-                'avatar', 'country', 'language', 'timezone', 'preferences',
-            ])->toArray();
-
-            if ($user->profile) {
-                $user->profile->update($profileData);
-            } else {
-                $user->profile()->create($profileData);
-            }
-
-            $user->load('profile');
+            $device->update($validated);
 
             return response()->json([
                 'success' => true,
                 'message' => 'Profile updated successfully.',
                 'data' => [
-                    'user' => $user,
+                    'device' => [
+                        'id' => $device->id,
+                        'name' => $device->device_name,
+                        'type' => $device->device_type,
+                        'model' => $device->device_model,
+                        'app_version' => $device->app_version,
+                    ],
                 ],
             ], 200);
         } catch (\Illuminate\Validation\ValidationException $e) {

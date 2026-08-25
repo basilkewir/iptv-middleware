@@ -154,6 +154,91 @@ class SettingsController extends Controller
         return $this->updateSettings($request, 'security');
     }
 
+    public function license(): Response
+    {
+        $license = \App\Models\License::with('licenseDevices')->first();
+
+        return Inertia::render('Admin/Settings/License', [
+            'license' => $license ? [
+                'id' => $license->id,
+                'license_key' => $license->license_key,
+                'masked_key' => substr($license->license_key, 0, 4) . str_repeat('•', max(0, strlen($license->license_key) - 8)) . substr($license->license_key, -4),
+                'hotel_id' => $license->hotel_id,
+                'hotel_name' => $license->hotel_name,
+                'license_type' => $license->license_type,
+                'status' => $license->status,
+                'is_valid' => $license->isValid(),
+                'max_devices' => $license->max_devices,
+                'current_devices' => $license->current_devices,
+                'features' => $license->getAvailableFeatures(),
+                'expires_at' => $license->expires_at?->toISOString(),
+                'last_validated_at' => $license->last_validated_at?->toISOString(),
+                'validation_count' => $license->validation_count,
+                'devices' => $license->licenseDevices->map(fn ($d) => [
+                    'id' => $d->id,
+                    'name' => $d->device_name,
+                    'type' => $d->device_type,
+                    'model' => $d->device_model,
+                    'os' => trim(($d->device_os ?? '') . ' ' . ($d->device_os_version ?? '')),
+                    'ip_address' => $d->ip_address,
+                    'status' => $d->status,
+                    'last_seen_at' => $d->last_seen_at?->toISOString(),
+                    'activated_at' => $d->first_activated_at?->toISOString(),
+                ]),
+            ] : null,
+        ]);
+    }
+
+    public function activateLicense(Request $request): RedirectResponse
+    {
+        $validated = $request->validate([
+            'license_key' => 'required|string',
+        ]);
+
+        $license = \App\Models\License::where('license_key', trim($validated['license_key']))->first();
+
+        if (! $license) {
+            return back()->withErrors([
+                'license_key' => 'This license key is invalid, expired, or inactive.',
+            ]);
+        }
+
+        // A suspended license can be recovered by re-entering its correct key.
+        if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
+            $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
+        }
+
+        if (! $license->isValid()) {
+            return back()->withErrors([
+                'license_key' => 'This license key is invalid, expired, or inactive.',
+            ]);
+        }
+
+        return back()->with('success', "License {$license->license_key} is active. System is licensed.");
+    }
+
+    public function deactivateLicense(): RedirectResponse
+    {
+        $license = \App\Models\License::query()->latest('id')->first();
+
+        if ($license) {
+            $license->update(['status' => \App\Models\License::STATUS_SUSPENDED]);
+        }
+
+        return redirect()->route('login')->with('success', 'License deactivated. Enter a valid license key to regain access.');
+    }
+
+    public function revokeDevice(Request $request, \App\Models\LicenseDevice $device): RedirectResponse
+    {
+        if ($device->isActive()) {
+            $device->license?->decrement('current_devices');
+        }
+
+        $device->update(['status' => \App\Models\LicenseDevice::STATUS_BLOCKED]);
+
+        return back()->with('success', "Device '{$device->device_name}' has been revoked.");
+    }
+
     public function roles(): Response
     {
         return Inertia::render('Admin/Settings/Roles', [

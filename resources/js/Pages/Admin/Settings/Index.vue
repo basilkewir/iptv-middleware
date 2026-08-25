@@ -26,10 +26,11 @@ import AdminLayout from '@/Layouts/AdminLayout.vue'
 import {
   Settings, Globe, Tv, Film, Rss, Users, Shield, KeyRound, CreditCard,
   FileText, Server, Database, Zap, Mail, Bell, ScrollText, Activity,
-  HardDrive, Code, Puzzle, Variable, Clock, Globe2
+  HardDrive, Code, Puzzle, Variable, Clock, Globe2, BadgeCheck
 } from 'lucide-vue-next'
 
 const sections = [
+  { key: 'license', label: 'License', icon: BadgeCheck, description: 'License status, activation, registered devices, and deactivation' },
   { key: 'general', label: 'General', icon: Settings, description: 'Site name, URL, language, timezone, branding, and maintenance mode' },
   { key: 'localization', label: 'Localization', icon: Globe, description: 'Languages, translations, regional formats, and measurement systems' },
   { key: 'channels', label: 'Channel Settings', icon: Tv, description: 'Channel management, stream types, fallback, and health checks' },

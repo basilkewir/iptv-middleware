@@ -18,6 +18,9 @@ class HandleInertiaRequests
     public function handle(Request $request, Closure $next): Response
     {
         Inertia::share([
+            'errors' => fn () => $request->hasSession() && $request->session()->has('errors')
+                ? (object) $request->session()->get('errors')->getBag('default')->getMessages()
+                : (object) [],
             'flash' => [
                 'success' => fn () => $request->session()->get('success'),
                 'error' => fn () => $request->session()->get('error'),
