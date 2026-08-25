@@ -29,6 +29,7 @@ class XtreamController extends Controller
     // not demux+mux, so extra threads just burn CPU with context switching.
     // Multicast group readers (many outputs per process) use 2 threads.
     private const FFMPEG_THREADS_SINGLE  = 1;
+    private const FFMPEG_THREADS_TRANSCODE = 8;
     private const FFMPEG_THREADS_MULTI   = 2;
 
     // nice level for ingest wrappers. 15 = well below normal so the OS
@@ -37,7 +38,7 @@ class XtreamController extends Controller
 
     // Max system load (1-min) before the wrapper pauses before starting ffmpeg.
     // On 8 cores, load 5 = ~62% utilisation — safe headroom.
-    private const INGEST_LOAD_GATE = 6;
+    private const INGEST_LOAD_GATE = 16;
 
     /**
      * Load threshold used INSIDE the wrapper retry loop. Before respawning
@@ -45,7 +46,7 @@ class XtreamController extends Controller
      * average drops below this value. This prevents guardian kill phases
      * from fighting instant respawns (thrash) on a saturated CPU.
      */
-    private const INGEST_HOLD_GATE = 8;
+    private const INGEST_HOLD_GATE = 24;
 
     // Authenticate and return user/server info (Xtream Codes protocol)
     public function auth(Request $request)
@@ -559,6 +560,38 @@ class XtreamController extends Controller
         }
     }
 
+    /**
+     * Force-restart the HLS ingest for one channel: kills the running wrapper
+     * and ffmpeg child, wipes its output directory and respawns immediately.
+     * Used by the dashboard per-channel refresh action (bypasses the restart
+     * backoff because an explicit operator action must always win).
+     */
+    public function restartHlsStream(Channel $channel): void
+    {
+        $outputDir = storage_path("app/streams/hls/{$channel->id}");
+        $pidFile = $outputDir . '/ingest.pid';
+
+        if (is_file($pidFile)) {
+            $pid = (int) trim((string) file_get_contents($pidFile));
+            @unlink($pidFile);
+            $this->stopIngestGroup($outputDir, $pid);
+        }
+
+        // A stale stop flag from an interrupted previous run would kill the
+        // freshly spawned ingest in its first loop iteration.
+        @unlink($outputDir . '/.stop');
+        cache()->forget("ffmpeg:last_restart:{$channel->id}");
+        $this->cleanOutputDirectory($outputDir);
+
+        $this->ensureHlsStream(
+            (int) $channel->id,
+            $channel->active_stream_url ?? $channel->stream_url,
+            $channel->program_number,
+            $channel->local_address,
+            (bool) ($channel->transcoding_enabled ?? false)
+        );
+    }
+
     private function ffmpegAlive(int $pid, int $channelId): bool
     {
         if (! posix_kill($pid, 0)) {
@@ -639,7 +672,12 @@ class XtreamController extends Controller
 
         $input = $sourceUrl;
         if ($localAddress !== null && $localAddress !== '' && (str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://'))) {
-            $input .= (str_contains($input, '?') ? '&' : '?') . 'localaddr=' . $localAddress;
+            // buffer_size raises SO_RCVBUF so bursty multi-program TS muxes do
+            // not overflow the kernel receive queue (requires matching
+            // net.core.rmem_max on the host, see docs).
+            $input .= (str_contains($input, '?') ? '&' : '?')
+                . 'localaddr=' . $localAddress
+                . '&buffer_size=8388608';
         }
 
         $isMulticast = str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://');
@@ -660,8 +698,11 @@ class XtreamController extends Controller
         // not found") and exits, so they are only emitted for non-multicast URLs.
         // UDP multicast must also avoid -re: it throttles reading to frame rate and
         // overflows the kernel recv buffer, dropping packets from the live feed.
+        // +genpts regenerates missing PTS after TS discontinuities and
+        // +discardcorrupt drops damaged packets instead of stalling the decode
+        // pipeline — both keep multicast ingests alive through rough patches.
         $inputOpts = $isMulticast
-            ? '-rw_timeout %d -timeout %d -i %s'
+            ? '-fflags +genpts+discardcorrupt -rw_timeout %d -timeout %d -i %s'
             : '-reconnect 1 -reconnect_streamed 0 -reconnect_delay_max 5 -rw_timeout %d -timeout %d -re -i %s';
 
         // -map p:N only applies to raw UDP MPEG-TS muxes where multiple programs
@@ -694,7 +735,9 @@ class XtreamController extends Controller
         $isMulticast = str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://');
 
         $videoFilter = $transcode
-            ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls '
+            // Full re-encode: needs multiple threads to hold realtime at
+            // 1080p50; only channels with transcoding enabled pay this cost.
+            ? ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls '
             : ($isMulticast
                 ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls '
                 : ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a copy -f hls ');
