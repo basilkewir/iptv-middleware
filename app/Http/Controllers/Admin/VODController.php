@@ -278,7 +278,7 @@ class VODController extends Controller
             'bouquet_ids.*' => 'exists:bouquets,id',
              'is_active' => 'sometimes|boolean',
              'is_featured' => 'sometimes|boolean',
-             'file' => 'nullable|file|mimes:mp4,mkv,avi,mov,wmv,flv,webm|max:512000',
+             'file' => 'nullable|file|mimes:mp4,mkv,avi,mov,wmv,flv,webm|max:10485760',
              'episode_urls' => 'nullable|array',
              'episodes_data' => 'nullable|array',
              'episodes_data.*.season_number' => 'required|integer|min:0',
@@ -486,7 +486,7 @@ class VODController extends Controller
     public function uploadEpisodeFile(Request $request, VODContent $vod): JsonResponse
     {
         $request->validate([
-            'file'           => 'required|file|mimes:mp4,mkv,avi,mov,wmv,flv,webm|max:2097152',
+            'file'           => 'required|file|mimes:mp4,mkv,avi,mov,wmv,flv,webm|max:10485760',
             'season_number'  => 'required|integer|min:1',
             'episode_number' => 'required|integer|min:1',
         ]);
@@ -609,7 +609,7 @@ class VODController extends Controller
     public function upload(Request $request): RedirectResponse
     {
         $validated = $request->validate([
-            'file'          => 'nullable|file|mimes:mp4,mkv,avi,mov,wmv,flv,webm|max:2097152',
+            'file'          => 'nullable|file|mimes:mp4,mkv,avi,mov,wmv,flv,webm|max:10485760',
             'title'         => 'required|string|max:255',
             'type'          => 'nullable|in:movie,series,documentary,tv_show,anime,kids',
             'description'   => 'nullable|string',
