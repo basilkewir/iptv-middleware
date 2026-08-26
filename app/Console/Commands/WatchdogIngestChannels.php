@@ -5,17 +5,22 @@ declare(strict_types=1);
 namespace App\Console\Commands;
 
 use App\Http\Controllers\XtreamController;
+use App\Models\AdminChannel\AdminChannel;
+use App\Models\AdminChannel\MyChannelBroadcast;
 use App\Models\Channel;
+use App\Services\AdminChannel\MyChannelHlsService;
 use Illuminate\Console\Command;
+use Illuminate\Support\Str;
 
 class WatchdogIngestChannels extends Command
 {
     protected $signature = 'channels:watchdog';
 
-    protected $description = 'Restart any HLS ingest that has stopped writing new segments';
+    protected $description = 'Restart any HLS ingest or admin channel playout that has stopped';
 
-    public function handle(XtreamController $xtream): int
+    public function handle(XtreamController $xtream, MyChannelHlsService $hls): int
     {
+        // ── Multicast / HTTP channel ingests ──
         $channels = Channel::query()
             ->where('is_active', true)
             ->whereNotNull('stream_url')
@@ -44,6 +49,28 @@ class WatchdogIngestChannels extends Command
             );
         }
 
+        // ── Admin channel playouts ──
+        $adminChannels = AdminChannel::where('is_active', true)->get();
+
+        foreach ($adminChannels as $channel) {
+            if ($this->isPlayoutAlive($channel)) {
+                continue;
+            }
+
+            $this->line("  - restarting dead admin playout: {$channel->channel_name}");
+
+            $broadcast = MyChannelBroadcast::create([
+                'channel_id' => $channel->id,
+                'session_id' => Str::uuid()->toString(),
+                'start_time' => now(),
+                'scheduled_end' => now()->addHours(24),
+                'status' => 'starting',
+                'playlist_snapshot' => $channel->myChannelPlaylist()->with('content')->get()->toJson(),
+            ]);
+
+            $hls->start($broadcast);
+        }
+
         return self::SUCCESS;
     }
 
@@ -58,11 +85,27 @@ class WatchdogIngestChannels extends Command
             }
         }
 
-        // No segments means the ingest hasn't started yet — not our job here
         if ($newest === 0) {
             return false;
         }
 
         return (time() - $newest) > XtreamController::INGEST_STALE_SECONDS;
+    }
+
+    private function isPlayoutAlive(AdminChannel $channel): bool
+    {
+        $pid = cache()->get("mychannel_hls:{$channel->id}");
+
+        if (! $pid) {
+            return false;
+        }
+
+        if (! @file_exists("/proc/{$pid}")) {
+            return false;
+        }
+
+        $cmdline = @file_get_contents("/proc/{$pid}/cmdline");
+
+        return $cmdline !== false && str_contains($cmdline, 'ffmpeg');
     }
 }
