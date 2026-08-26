@@ -25,6 +25,10 @@ class MulticastIngestService
 {
     private const RESTART_BACKOFF_SECONDS = 10;
 
+    // Max programs mapped into one shared ffmpeg reader. Buckets bound the
+    // blast radius of a single corrupt program killing its whole process.
+    private const MAX_OUTPUTS_PER_READER = 10;
+
     // One ffmpeg handles all programs from a multicast group. Threads 0
     // (auto) lets ffmpeg parallelise decode/mux across outputs — with dozens
     // of outputs a fixed low thread count cannot drain the socket in time
@@ -84,12 +88,17 @@ class MulticastIngestService
     }
 
     /**
-     * Check if a channel's group reader is running and healthy.
+     * Check if the bucket reader owning this channel is running and healthy.
      */
     public function isGroupRunning(Channel $channel): bool
     {
-        $sourceUrl = $this->buildSourceUrl($channel);
-        $pidFile = $this->getGroupPidFile($sourceUrl);
+        $bucket = $this->bucketIndexOf($channel);
+
+        if ($bucket === null) {
+            return false;
+        }
+
+        $pidFile = $this->getGroupPidFile($this->buildSourceUrl($channel), $bucket);
 
         if (! is_file($pidFile)) {
             return false;
@@ -123,17 +132,50 @@ class MulticastIngestService
     }
 
     /**
-     * Start or verify the group reader for a channel.
-     * Returns true if the reader is running (started or already alive).
+     * Which bucket reader owns this channel (position in the ordered group).
+     */
+    private function bucketIndexOf(Channel $channel): ?int
+    {
+        $sourceUrl = $this->buildSourceUrl($channel);
+        $groups = $this->getChannelGroups();
+
+        if (! isset($groups[$sourceUrl])) {
+            return null;
+        }
+
+        $pos = array_search($channel->id, array_keys($groups[$sourceUrl]), true);
+
+        if ($pos === false) {
+            return null;
+        }
+
+        return intdiv((int) $pos, self::MAX_OUTPUTS_PER_READER);
+    }
+
+    /**
+     * Start (or verify) the group readers for a channel's multicast source.
+     * Outputs are split across multiple reader processes (buckets of
+     * self::MAX_OUTPUTS_PER_READER programs): one corrupt program crashing
+     * an ffmpeg then only interrupts its bucket — the wrapper respawns it
+     * within seconds — instead of freezing every channel at once.
+     *
+     * Verifies EVERY bucket of the source, not just this channel's own:
+     * a healthy bucket must not mask dead sibling buckets.
      */
     public function ensureGroupReader(Channel $channel): bool
     {
-        if ($this->isGroupRunning($channel)) {
+        $sourceUrl = $this->buildSourceUrl($channel);
+        $groups = $this->getChannelGroups();
+
+        if (! isset($groups[$sourceUrl])) {
+            return false;
+        }
+
+        if ($this->allBucketsAlive($sourceUrl, count($groups[$sourceUrl]))) {
             $this->touchHeartbeat($channel);
             return true;
         }
 
-        $sourceUrl = $this->buildSourceUrl($channel);
         $lockKey = "multicast:reader:lock:" . md5($sourceUrl);
 
         $lock = Cache::lock($lockKey, 30);
@@ -143,7 +185,7 @@ class MulticastIngestService
 
         try {
             // Double-check after acquiring lock
-            if ($this->isGroupRunning($channel)) {
+            if ($this->allBucketsAlive($sourceUrl, count($groups[$sourceUrl]))) {
                 $this->touchHeartbeat($channel);
                 return true;
             }
@@ -155,7 +197,41 @@ class MulticastIngestService
     }
 
     /**
-     * Start the single-reader ffmpeg for the multicast group.
+     * True when every expected bucket reader process is alive.
+     */
+    private function allBucketsAlive(string $sourceUrl, int $channelCount): bool
+    {
+        $buckets = (int) ceil($channelCount / self::MAX_OUTPUTS_PER_READER);
+
+        for ($i = 0; $i < $buckets; $i++) {
+            $pidFile = $this->getGroupPidFile($sourceUrl, $i);
+
+            if (! is_file($pidFile)) {
+                return false;
+            }
+
+            $pid = (int) trim((string) @file_get_contents($pidFile));
+
+            if ($pid <= 0 || ! @file_exists("/proc/{$pid}")) {
+                @unlink($pidFile);
+                return false;
+            }
+
+            $cmdline = @file_get_contents("/proc/{$pid}/cmdline");
+
+            if ($cmdline === false || ! str_contains($cmdline, 'ffmpeg')) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Start the group reader ffmpeg process(es) for the multicast group.
+     * Channels are split into buckets of MAX_OUTPUTS_PER_READER programs:
+     * one corrupt program crashing an ffmpeg then only interrupts its own
+     * bucket (respawned within seconds) instead of freezing every channel.
      */
     private function startGroupReader(Channel $channel): bool
     {
@@ -167,10 +243,6 @@ class MulticastIngestService
         }
 
         $groupChannels = $groups[$sourceUrl];
-        $scriptDir = storage_path('app');
-        $pidFile = $this->getGroupPidFile($sourceUrl);
-        $logFile = $this->getGroupLogFile($sourceUrl);
-        $groupId = $this->getGroupId($sourceUrl);
 
         // Clean output directories for all channels in this group
         foreach ($groupChannels as $ch) {
@@ -188,54 +260,79 @@ class MulticastIngestService
             @unlink($dir . '/.stop');
         }
 
-        $cmd = $this->buildGroupReaderCommand($sourceUrl, $groupChannels, $pidFile, $logFile);
+        // Split into buckets of MAX_OUTPUTS_PER_READER programs each.
+        // Buckets whose reader is still alive are left untouched — only the
+        // dead ones get their outputs wiped and respawned.
+        $buckets = array_chunk($groupChannels, self::MAX_OUTPUTS_PER_READER, true);
 
-        // The group PID file lives in storage/app/multicast — make sure the
-        // directory exists or the wrapper's `echo $$ > pidfile` fails silently
-        // and every subsequent ensure* call thinks no reader is running.
-        @mkdir(dirname($pidFile), 0755, true);
+        $started = 0;
 
-        Log::info('Starting multicast group reader', [
-            'source' => $sourceUrl,
-            'channels' => array_keys($groupChannels),
-            'pid_file' => $pidFile,
-        ]);
+        foreach ($buckets as $index => $bucketChannels) {
+            $pidFile = $this->getGroupPidFile($sourceUrl, $index);
+            $logFile = $this->getGroupLogFile($sourceUrl, $index);
 
-        $wrapperWithPid = 'echo $$ > ' . escapeshellarg($pidFile) . '; ' . $cmd;
-        $shellCmd = 'setsid bash -c ' . escapeshellarg($wrapperWithPid)
-            . ' < /dev/null > /dev/null 2>&1 &';
+            if (is_file($pidFile)) {
+                $existingPid = (int) trim((string) @file_get_contents($pidFile));
 
-        shell_exec($shellCmd);
+                if ($existingPid > 0 && @file_exists("/proc/{$existingPid}")) {
+                    continue; // this bucket is still healthy
+                }
 
-        usleep(500000);
-
-        $pid = is_file($pidFile) ? (int) trim((string) file_get_contents($pidFile)) : 0;
-
-        if ($pid > 0) {
-            cache()->put("multicast:group:" . md5($sourceUrl), $pid, 86400);
-
-            foreach ($groupChannels as $ch) {
-                cache()->put("ffmpeg:channel:{$ch->id}", $pid, 86400);
-                // Write a per-channel PID file pointing to the group reader
-                // so existing monitoring code can check it
-                $chPidFile = storage_path("app/streams/hls/{$ch->id}/ingest.pid");
-                @file_put_contents($chPidFile, (string) $pid);
+                @unlink($pidFile);
             }
 
-            Log::info('Multicast group reader started', [
+            $cmd = $this->buildGroupReaderCommand($sourceUrl, $bucketChannels, $pidFile, $logFile);
+
+            // The group PID file lives in storage/app/multicast — make sure the
+            // directory exists or the wrapper's `echo $$ > pidfile` fails silently
+            // and every subsequent ensure* call thinks no reader is running.
+            @mkdir(dirname($pidFile), 0755, true);
+
+            Log::info('Starting multicast group reader', [
                 'source' => $sourceUrl,
-                'pid' => $pid,
-                'channel_count' => count($groupChannels),
+                'bucket' => $index,
+                'channels' => array_keys($bucketChannels),
+                'pid_file' => $pidFile,
             ]);
 
-            return true;
+            $wrapperWithPid = 'echo $$ > ' . escapeshellarg($pidFile) . '; ' . $cmd;
+            $shellCmd = 'setsid bash -c ' . escapeshellarg($wrapperWithPid)
+                . ' < /dev/null > /dev/null 2>&1 &';
+
+            shell_exec($shellCmd);
+
+            usleep(500000);
+
+            $pid = is_file($pidFile) ? (int) trim((string) file_get_contents($pidFile)) : 0;
+
+            if ($pid > 0) {
+                cache()->put("multicast:group:" . md5($sourceUrl) . ":{$index}", $pid, 86400);
+
+                foreach ($bucketChannels as $ch) {
+                    cache()->put("ffmpeg:channel:{$ch->id}", $pid, 86400);
+                    // Write a per-channel PID file pointing to the bucket
+                    // reader so existing monitoring code can check it
+                    $chPidFile = storage_path("app/streams/hls/{$ch->id}/ingest.pid");
+                    @file_put_contents($chPidFile, (string) $pid);
+                }
+
+                Log::info('Multicast group reader started', [
+                    'source' => $sourceUrl,
+                    'bucket' => $index,
+                    'pid' => $pid,
+                    'channel_count' => count($bucketChannels),
+                ]);
+
+                $started++;
+            } else {
+                Log::error('Failed to start multicast group reader', [
+                    'source' => $sourceUrl,
+                    'bucket' => $index,
+                ]);
+            }
         }
 
-        Log::error('Failed to start multicast group reader', [
-            'source' => $sourceUrl,
-        ]);
-
-        return false;
+        return $started > 0;
     }
 
     /**
@@ -249,6 +346,21 @@ class MulticastIngestService
         string $logFile
     ): string {
         $isMulticast = str_starts_with($sourceUrl, 'udp://') || str_starts_with($sourceUrl, 'rtp://');
+
+        // Wait for the local multicast interface to hold its address before
+        // joining the group — otherwise ffmpeg fails with
+        // "setsockopt(IP_ADD_MEMBERSHIP): No such device" and the bucket
+        // crash-loops until the wrapper gives up.
+        $first = reset($channels);
+        $localAddress = is_object($first) ? ($first->local_address ?? null) : null;
+
+        $networkWait = '';
+        if ($isMulticast && $localAddress !== null && $localAddress !== '') {
+            $networkWait = 'for i in $(seq 1 30); do '
+                . 'if ip addr show | grep -q ' . escapeshellarg($localAddress) . '; then '
+                . '  echo "NETWORK READY $i" >> "$L"; break; fi; '
+                . 'echo "WAITING FOR NETWORK $i" >> "$L"; sleep 1; done; ';
+        }
 
         // Build per-channel output segments
         $outputs = [];
@@ -290,6 +402,7 @@ class MulticastIngestService
             'ODIR=%s; L=%s; '
             . 'echo "GROUP READER START $$ $(date +%%s)" >> "$L"; '
             . 'trap \'echo "GROUP READER EXIT rc=$? $(date +%%s)" >> "$L"\' EXIT; '
+            . $networkWait
             // Wait for load to drop before starting
             . 'LOAD_GATE=' . self::LOAD_GATE . '; '
             . 'for i in $(seq 1 12); do '
@@ -319,16 +432,8 @@ class MulticastIngestService
      */
     public function stopAll(): void
     {
-        $groups = $this->getChannelGroups();
-
-        foreach ($groups as $sourceUrl => $channels) {
-            $pidFile = $this->getGroupPidFile($sourceUrl);
-
-            if (! is_file($pidFile)) {
-                continue;
-            }
-
-            $pid = (int) trim((string) file_get_contents($pidFile));
+        foreach (glob(storage_path('app/multicast') . '/*.pid') ?: [] as $pidFile) {
+            $pid = (int) trim((string) @file_get_contents($pidFile));
 
             if ($pid > 0) {
                 @exec("kill -TERM -{$pid} 2>/dev/null");
@@ -337,11 +442,12 @@ class MulticastIngestService
             }
 
             @unlink($pidFile);
+        }
 
+        foreach ($this->getChannelGroups() as $sourceUrl => $channels) {
             foreach ($channels as $ch) {
                 cache()->forget("ffmpeg:channel:{$ch->id}");
             }
-
             cache()->forget("multicast:group:" . md5($sourceUrl));
         }
     }
@@ -352,21 +458,18 @@ class MulticastIngestService
     public function stopGroup(Channel $channel): void
     {
         $sourceUrl = $this->buildSourceUrl($channel);
-        $pidFile = $this->getGroupPidFile($sourceUrl);
 
-        if (! is_file($pidFile)) {
-            return;
+        foreach (glob(storage_path('app/multicast/' . $this->getGroupId($sourceUrl) . '_*.pid')) ?: [] as $pidFile) {
+            $pid = (int) trim((string) @file_get_contents($pidFile));
+
+            if ($pid > 0) {
+                @exec("kill -TERM -{$pid} 2>/dev/null");
+                usleep(500000);
+                @exec("kill -KILL -{$pid} 2>/dev/null");
+            }
+
+            @unlink($pidFile);
         }
-
-        $pid = (int) trim((string) file_get_contents($pidFile));
-
-        if ($pid > 0) {
-            @exec("kill -TERM -{$pid} 2>/dev/null");
-            usleep(500000);
-            @exec("kill -KILL -{$pid} 2>/dev/null");
-        }
-
-        @unlink($pidFile);
 
         $groups = $this->getChannelGroups();
         if (isset($groups[$sourceUrl])) {
@@ -415,14 +518,14 @@ class MulticastIngestService
         return $status;
     }
 
-    private function getGroupPidFile(string $sourceUrl): string
+    private function getGroupPidFile(string $sourceUrl, int $bucket = 0): string
     {
-        return storage_path('app/multicast/' . $this->getGroupId($sourceUrl) . '.pid');
+        return storage_path('app/multicast/' . $this->getGroupId($sourceUrl) . "_{$bucket}.pid");
     }
 
-    private function getGroupLogFile(string $sourceUrl): string
+    private function getGroupLogFile(string $sourceUrl, int $bucket = 0): string
     {
-        return '/tmp/multicast_reader_' . $this->getGroupId($sourceUrl) . '.log';
+        return '/tmp/multicast_reader_' . $this->getGroupId($sourceUrl) . "_{$bucket}.log";
     }
 
     private function getGroupId(string $sourceUrl): string
