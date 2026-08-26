@@ -396,8 +396,11 @@ class SourceHealthCheckService
     private function checkMulticastIngest(Channel $channel): array
     {
         $outputDir = storage_path("app/streams/hls/{$channel->id}");
-        $pidFile = $outputDir . '/ingest.pid';
-        $playlist = $outputDir . '/playlist.m3u8';
+        $pidFile  = $outputDir . '/ingest.pid';
+        // MyChannel playout writes index.m3u8; multicast ingest writes playlist.m3u8
+        $playlist = is_file($outputDir . '/index.m3u8')
+            ? $outputDir . '/index.m3u8'
+            : $outputDir . '/playlist.m3u8';
 
         if (! is_file($pidFile)) {
             return [
