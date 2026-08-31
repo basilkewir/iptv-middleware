@@ -321,10 +321,111 @@ class AdminChannelController extends Controller
     public function testStream(Request $request, AdminChannel $channel): JsonResponse
     {
         $streamUrl = $request->input('stream_url');
+        $sourceType = $request->input('source_type', 'stream');
+        $startTime = microtime(true);
 
-        $testResult = $this->adminChannelService->testStreamUrl($streamUrl);
+        if (empty($streamUrl)) {
+            return response()->json([
+                'success' => false,
+                'data' => ['status' => 'offline', 'error' => 'No stream URL configured'],
+            ]);
+        }
 
-        return response()->json($testResult);
+        if ($sourceType === 'youtube' || str_contains($streamUrl, 'youtube.com') || str_contains($streamUrl, 'youtu.be')) {
+            $ytService = new \App\Services\YouTubeService();
+            $result = $ytService->verifyUrl($streamUrl);
+            $responseTime = round((microtime(true) - $startTime) * 1000);
+            if ($result['success']) {
+                return response()->json([
+                    'success' => true,
+                    'data' => [
+                        'status' => 'online',
+                        'stream_url' => $result['stream_url'],
+                        'response_time' => $responseTime,
+                        'detected_type' => 'hls',
+                    ],
+                ]);
+            }
+            return response()->json([
+                'success' => false,
+                'data' => [
+                    'status' => 'offline',
+                    'response_time' => $responseTime,
+                    'error' => $result['error'] ?? 'YouTube resolution failed',
+                ],
+            ]);
+        }
+
+        $probeResult = $this->probeStreamLocal($streamUrl);
+        $responseTime = round((microtime(true) - $startTime) * 1000);
+
+        return response()->json([
+            'success' => $probeResult['online'],
+            'data' => [
+                'status' => $probeResult['online'] ? 'online' : 'offline',
+                'http_code' => $probeResult['http_code'] ?? 0,
+                'response_time' => $responseTime,
+                'detected_type' => $probeResult['detected_type'] ?? null,
+                'codec' => $probeResult['codec'] ?? null,
+                'resolution' => $probeResult['resolution'] ?? null,
+                'error' => $probeResult['error'] ?? null,
+            ],
+        ]);
+    }
+
+    private function probeStreamLocal(string $url): array
+    {
+        $result = ['online' => false, 'error' => null];
+
+        $isMulticast = str_starts_with($url, 'udp://') || str_starts_with($url, 'rtp://');
+        $isHls = str_contains(strtolower($url), '.m3u8');
+        $timeout = $isMulticast ? 10 : 15;
+
+        if ($isMulticast) {
+            $cmd = sprintf(
+                'timeout %d ffprobe -v error -show_streams -show_format -of json -analyzeduration 5M -probesize 5M %s 2>&1; echo "EXIT:$?"',
+                $timeout,
+                escapeshellarg($url)
+            );
+        } else {
+            $cmd = sprintf(
+                'timeout %d ffprobe -v error -show_streams -show_format -of json -analyzeduration 10M -probesize 1M -user_agent "IPTV-Middleware/1.0" %s 2>&1; echo "EXIT:$?"',
+                $timeout,
+                escapeshellarg($url)
+            );
+        }
+
+        $output = shell_exec($cmd);
+
+        $exitCode = 1;
+        if (preg_match('/EXIT:(\d+)\s*$/', $output, $m)) {
+            $exitCode = (int) $m[1];
+            $output = preg_replace('/EXIT:\d+\s*$/', '', $output);
+        }
+
+        $data = json_decode(trim($output), true);
+
+        if ($exitCode === 0 && $data && isset($data['streams'])) {
+            $result['online'] = true;
+
+            foreach ($data['streams'] as $stream) {
+                if (($stream['codec_type'] ?? '') === 'video' && ! isset($result['codec'])) {
+                    $result['codec'] = $stream['codec_name'] ?? null;
+                    $result['resolution'] = ($stream['width'] ?? 0) . 'x' . ($stream['height'] ?? 0);
+                }
+            }
+
+            $fmt = $data['format'] ?? [];
+            $result['detected_type'] = $isHls ? 'hls' : ($isMulticast ? 'udp' : 'http');
+        } else {
+            $errorMsg = $data['error']['message'] ?? null;
+            if (preg_match('/error.*?((?:Connection|HTTP|403|404|timeout|refused|No route).*)/i', $output, $em)) {
+                $errorMsg = $em[1];
+            }
+            $result['error'] = $errorMsg ?: 'Stream unreachable (exit=' . $exitCode . ')';
+        }
+
+        return $result;
     }
 
     public function scanMulticast(Request $request): JsonResponse
