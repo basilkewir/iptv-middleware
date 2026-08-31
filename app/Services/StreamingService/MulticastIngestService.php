@@ -468,24 +468,36 @@ class MulticastIngestService
                 continue;
             }
 
+            // Channels flagged for transcoding get a full H.264 + AAC re-encode
+            // (normalises odd profiles/codecs that break TV players). The rest
+            // stream-copy BOTH video and audio at near-zero CPU cost — this is
+            // what keeps dozens of UDP channels almost free, like Flussonic.
+            $transcoding = (bool) ($ch->transcoding_enabled ?? false);
+
+            $videoCodec = $transcoding
+                ? ($this->resolveEncoder($ch) === 'gpu'
+                    ? ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k'
+                    : ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -threads 4')
+                : ' -c:v copy';
+
+            // Stream-copied audio keeps the source codec (AC3/MP2/AAC) so there
+            // is zero encode load; only transcoding channels are normalized to AAC.
+            $audioCodec = $transcoding
+                ? ' -c:a aac -b:a 128k -ac 2 -ar 48000'
+                : ' -c:a copy';
+
             $outputs[] = sprintf(
                 ' -map 0:p:%d -map_chapters -1 -ignore_unknown'
                 . '%s'
                 . ' -max_muxing_queue_size 65536'
-                . ' -c:a aac -b:a 128k -ac 2 -ar 48000'
-                . ' -f hls -hls_time 6 -hls_list_size 5'
+                . '%s%s'
+                . ' -f hls -hls_time 1 -hls_list_size 2'
                 . ' -hls_flags delete_segments+temp_file+independent_segments'
                 . ' -hls_segment_filename %s/segment_%%04d.ts'
                 . ' %s/playlist.m3u8',
                 $programNumber,
-                // Channels flagged for transcoding get a full H.264 re-encode
-                // (normalises odd profiles that break TV players); the rest
-                // stream-copy at zero CPU cost.
-                ((bool) ($ch->transcoding_enabled ?? false))
-                    ? ($this->resolveEncoder($ch) === 'gpu'
-                        ? ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k'
-                        : ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -threads 4')
-                    : ' -c:v copy',
+                $videoCodec,
+                $audioCodec,
                 escapeshellarg($outputDir),
                 escapeshellarg($outputDir)
             );

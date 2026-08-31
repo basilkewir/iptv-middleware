@@ -694,6 +694,25 @@ class SourceHealthCheckService
             return $this->checkMulticastIngest($channel);
         }
 
+        // For HTTP/HLS: the provider must only ever see ONE connection per
+        // channel — the local ffmpeg ingest — regardless of how many players
+        // sit behind this middleware or how often health checks run. If the
+        // channel is already being ingested locally and that ingest is fresh,
+        // verify the LOCAL ingest instead of ffprobing the provider's public
+        // stream (an ffprobe opens a second provider connection, which the
+        // provider counts as an extra concurrent viewer — the Lavf entries
+        // duplicating every channel in its panel).
+        //
+        // Only probe the upstream URL directly when we are NOT checking the
+        // currently-ingested source (i.e. a backup that is not being pulled, or
+        // the local ingest is stale/dead and we must decide whether to restart
+        // in place vs fail over).
+        $activeUrl = $channel->active_stream_url ?? $channel->stream_url;
+        $isActiveSource = ($url === $activeUrl);
+        if ($isActiveSource && $this->hasFreshLocalIngest($channel)) {
+            return $this->okResult('Source is live via local ingest (provider sees only this one connection)');
+        }
+
         $isHls = in_array($channel->stream_type, ['hls', 'm3u8']) || str_contains(strtolower($url), '.m3u8');
 
         $timeout = self::CHECK_TIMEOUT_SECONDS;
@@ -827,6 +846,58 @@ class SourceHealthCheckService
     }
 
     /**
+     * True when this HTTP/HLS channel has a live local ffmpeg ingest and the
+     * HLS playlist it produces is fresh. Used so health checks verify the
+     * LOCAL ingest instead of opening a second connection to the provider —
+     * the provider must only ever count the single ingest as the viewer.
+     */
+    private function hasFreshLocalIngest(Channel $channel): bool
+    {
+        $outputDir = storage_path("app/streams/hls/{$channel->id}");
+        $pidFile   = $outputDir . '/ingest.pid';
+
+        if (! is_file($pidFile)) {
+            return false;
+        }
+
+        $pid = (int) trim((string) @file_get_contents($pidFile));
+
+        if ($pid <= 0 || ! @file_exists("/proc/{$pid}")) {
+            return false;
+        }
+
+        // Also make sure the process that owns this pid is actually ffmpeg —
+        // a leftover pid file pointing at a recycled pid must not fool us.
+        $cmdline = @file_get_contents("/proc/{$pid}/cmdline");
+        if ($cmdline === false || ! str_contains($cmdline, 'ffmpeg')) {
+            return false;
+        }
+
+        $playlist = $outputDir . '/playlist.m3u8';
+
+        if (! is_file($playlist)) {
+            // No playlist yet — still online if the ingest just started.
+            $age = is_dir($outputDir) ? (time() - (int) @filemtime($outputDir)) : PHP_INT_MAX;
+            return $age < 30;
+        }
+
+        $age = time() - (int) @filemtime($playlist);
+
+        // Match the watchdog's staleness window so a frozen ingest is treated
+        // as needing a restart/probe rather than passing as healthy.
+        return $age <= XtreamController::INGEST_STALE_SECONDS;
+    }
+
+    private function okResult(string $message): array
+    {
+        return [
+            'status' => 'online',
+            'message' => $message,
+            'details' => [],
+        ];
+    }
+
+    /**
      * Probe a URL for audio streams (used by AutoCheckSourceHealth).
      * Returns false for UDP multicast (audio status is checked via ingest logs).
      */
@@ -839,6 +910,15 @@ class SourceHealthCheckService
         $isMulticast = str_starts_with($url, 'udp://') || str_starts_with($url, 'rtp://');
         if ($isMulticast) {
             return true; // Skip audio probe for multicast — trust the ingest
+        }
+
+        // If the channel already has a fresh local ingest, don't ffprobe the
+        // provider's public stream — that opens a second connection the provider
+        // counts as an extra viewer. A live ingest implies the source delivered
+        // audio (it decoded the channels and is muxing HLS), so report it as
+        // present. Informational only.
+        if ($this->hasFreshLocalIngest($channel)) {
+            return true;
         }
 
         $inputUrl = escapeshellarg($url);
