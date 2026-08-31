@@ -37,6 +37,7 @@ class AdminChannel extends Model
         'output_frame_rate',
         'video_codec',
         'audio_codec',
+        'transcoding_device',
         'broadcast_status',
         'broadcast_mode',
         'scheduled_start',

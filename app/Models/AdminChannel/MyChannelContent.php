@@ -12,12 +12,13 @@ class MyChannelContent extends Model
     protected $table = 'my_channel_content';
 
     protected $fillable = [
-        'channel_id', 'title', 'description', 'duration',
+        'channel_id', 'folder_id', 'title', 'description', 'duration',
         'file_name', 'file_path', 'file_size', 'thumbnail_url',
         'uploaded_by', 'uploaded_at', 'last_played_at', 'play_count',
         'quality_level', 'resolution_width', 'resolution_height',
         'bitrate', 'video_codec', 'audio_codec', 'frame_rate',
         'is_active', 'is_featured', 'featured_order', 'is_transcoded',
+        'prepared_at',
     ];
 
     protected $casts = [
@@ -27,6 +28,7 @@ class MyChannelContent extends Model
         'uploaded_at' => 'datetime',
         'last_played_at' => 'datetime',
         'frame_rate' => 'float',
+        'prepared_at' => 'datetime',
     ];
 
     public function channel(): BelongsTo
@@ -37,6 +39,11 @@ class MyChannelContent extends Model
     public function uploader(): BelongsTo
     {
         return $this->belongsTo(User::class, 'uploaded_by');
+    }
+
+    public function folder(): BelongsTo
+    {
+        return $this->belongsTo(MyChannelMediaFolder::class, 'folder_id');
     }
 
     public function playlistEntries(): HasMany

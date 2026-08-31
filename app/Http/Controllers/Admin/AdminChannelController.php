@@ -13,6 +13,7 @@ use App\Models\AdminChannel\AdminChannelSubscription;
 use App\Models\AdminChannel\AdminChannelViewLog;
 use App\Models\AdminChannel\MyChannelBroadcast;
 use App\Models\AdminChannel\MyChannelContent;
+use App\Models\AdminChannel\MyChannelMediaFolder;
 use App\Models\AdminChannel\MyChannelPlaylist;
 use App\Models\AdminChannel\MyChannelSetting;
 use App\Models\Bouquet;
@@ -24,6 +25,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str as StrHelper;
 use App\Services\AdminChannel\AdminChannelService;
 use App\Services\AdminChannel\MyChannelHlsService;
@@ -151,6 +153,7 @@ class AdminChannelController extends Controller
             'tags' => 'nullable|array',
             'package_ids' => 'nullable|array',
             'bouquet_ids' => 'nullable|array',
+            'transcoding_device' => 'nullable|in:cpu,gpu',
             'settings' => 'nullable|array',
         ]);
 
@@ -268,6 +271,7 @@ class AdminChannelController extends Controller
             'tags' => 'sometimes|nullable|array',
             'package_ids' => 'sometimes|nullable|array',
             'bouquet_ids' => 'sometimes|nullable|array',
+            'transcoding_device' => 'sometimes|nullable|in:cpu,gpu',
             'settings' => 'sometimes|nullable|array',
         ]);
 
@@ -384,21 +388,40 @@ class AdminChannelController extends Controller
 
     public function bulkDelete(Request $request): JsonResponse
     {
-        $ids = $request->input('ids', []);
+        $validated = $request->validate([
+            'ids' => 'required|array',
+            'ids.*' => 'exists:admin_channels,id',
+        ]);
+
+        $ids = $validated['ids'];
+
+        if (empty($ids)) {
+            return response()->json(['message' => 'No channels selected'], 400);
+        }
 
         AdminChannel::whereIn('id', $ids)->delete();
 
-        return response()->json(['message' => 'Channels deleted successfully']);
+        return response()->json(['message' => count($ids) . ' channel(s) deleted successfully']);
     }
 
     public function bulkToggleStatus(Request $request): JsonResponse
     {
-        $ids = $request->input('ids', []);
-        $isActive = $request->input('is_active', false);
+        $validated = $request->validate([
+            'ids' => 'required|array',
+            'ids.*' => 'exists:admin_channels,id',
+            'is_active' => 'required|boolean',
+        ]);
+
+        $ids = $validated['ids'];
+        $isActive = $validated['is_active'];
+
+        if (empty($ids)) {
+            return response()->json(['message' => 'No channels selected'], 400);
+        }
 
         AdminChannel::whereIn('id', $ids)->update(['is_active' => $isActive]);
 
-        return response()->json(['message' => 'Channels status updated successfully']);
+        return response()->json(['message' => count($ids) . ' channel(s) updated successfully']);
     }
 
     public function scanQualityAll(Request $request): JsonResponse
@@ -784,8 +807,17 @@ class AdminChannelController extends Controller
     public function myChannelContent(Request $request, AdminChannel $channel): JsonResponse
     {
         $content = MyChannelContent::where('channel_id', $channel->id)
+            ->with('folder')
             ->when($request->filled('is_featured'), fn($q) => $q->where('is_featured', true))
             ->when($request->filled('quality'), fn($q) => $q->where('quality_level', $request->input('quality')))
+            ->when($request->filled('folder_id'), function ($q) use ($request) {
+                $folderId = $request->input('folder_id');
+                if (in_array($folderId, ['null', 'uncategorized', 'root'], true)) {
+                    $q->whereNull('folder_id');
+                } else {
+                    $q->where('folder_id', (int) $folderId);
+                }
+            })
             ->orderBy('created_at', 'desc')
             ->paginate($request->input('per_page', 20));
 
@@ -798,7 +830,12 @@ class AdminChannelController extends Controller
             'file' => 'required|file|mimes:mp4,avi,mkv,mov,webm|max:2048000',
             'title' => 'required|string|max:255',
             'description' => 'nullable|string',
+            'folder_id' => 'nullable|integer',
         ]);
+
+        if (! empty($data['folder_id']) && ! MyChannelMediaFolder::where('channel_id', $channel->id)->whereKey($data['folder_id'])->exists()) {
+            throw ValidationException::withMessages(['folder_id' => 'Folder does not belong to this channel.']);
+        }
 
         $file = $request->file('file');
         $userId = $request->user()->id;
@@ -850,6 +887,7 @@ class AdminChannelController extends Controller
 
         $content = MyChannelContent::create([
             'channel_id' => $channel->id,
+            'folder_id' => $data['folder_id'] ?? null,
             'title' => $data['title'],
             'description' => $data['description'] ?? null,
             'duration' => $duration,
@@ -866,6 +904,13 @@ class AdminChannelController extends Controller
             'audio_codec' => $audioCodec,
             'frame_rate' => $frameRate ?: 0,
         ]);
+
+        // Prepare the normalized playout copy in the background
+        try {
+            \App\Jobs\PrepareMyChannelContent::dispatch($content->id);
+        } catch (\Throwable $e) {
+            Log::warning('Failed to dispatch content prepare', ['content_id' => $content->id, 'error' => $e->getMessage()]);
+        }
 
         return response()->json(['content' => $content]);
     }
@@ -893,22 +938,143 @@ class AdminChannelController extends Controller
         $data = $request->validate([
             'title' => 'sometimes|required|string|max:255',
             'description' => 'sometimes|nullable|string',
+            'folder_id' => 'sometimes|nullable|integer',
             'is_active' => 'sometimes|boolean',
             'is_featured' => 'sometimes|boolean',
             'featured_order' => 'sometimes|integer|min:0',
             'quality_level' => 'sometimes|in:4k,fhd,hd,sd,low',
         ]);
 
+        if (array_key_exists('folder_id', $data) && $data['folder_id'] !== null
+            && ! MyChannelMediaFolder::where('channel_id', $channel->id)->whereKey($data['folder_id'])->exists()) {
+            throw ValidationException::withMessages(['folder_id' => 'Folder does not belong to this channel.']);
+        }
+
         $content->update($data);
 
-        return response()->json(['content' => $content->fresh()]);
+        return response()->json(['content' => $content->fresh('folder')]);
     }
 
     public function destroyContent(Request $request, AdminChannel $channel, MyChannelContent $content): JsonResponse
     {
+        // Deleting a library item must also free the actual media on the
+        // server: the raw file, its thumbnail and the prepared playout copy.
+        if ($content->file_path) {
+            Storage::disk('public')->delete($content->file_path);
+        }
+        if ($content->thumbnail_url) {
+            Storage::disk('public')->delete($content->thumbnail_url);
+        }
+
+        $prepared = storage_path('app/streams/normalized/' . $channel->channel_slug . '/prepared_' . $content->id . '.mp4');
+        @unlink($prepared);
+        @unlink($prepared . '.sig.json');
+
         $content->delete();
 
         return response()->json(['message' => 'Content deleted successfully']);
+    }
+
+    // ─── My Channel Media Folders ──────────────────────────────────────────
+
+    public function myChannelFolders(Request $request, AdminChannel $channel): JsonResponse
+    {
+        $folders = MyChannelMediaFolder::where('channel_id', $channel->id)
+            ->withCount('contents')
+            ->orderBy('name')
+            ->get();
+
+        return response()->json(['folders' => $folders]);
+    }
+
+    public function storeMyChannelFolder(Request $request, AdminChannel $channel): JsonResponse
+    {
+        $data = $request->validate([
+            'name' => 'required|string|max:255',
+            'parent_id' => 'nullable|integer',
+        ]);
+
+        if (! empty($data['parent_id'])) {
+            $parent = MyChannelMediaFolder::where('channel_id', $channel->id)->findOrFail($data['parent_id']);
+            $data['parent_id'] = $parent->id;
+        }
+
+        $folder = MyChannelMediaFolder::create([
+            'channel_id' => $channel->id,
+            'parent_id' => $data['parent_id'] ?? null,
+            'name' => trim($data['name']),
+        ]);
+
+        return response()->json(['folder' => $folder]);
+    }
+
+    public function updateMyChannelFolder(Request $request, AdminChannel $channel, MyChannelMediaFolder $folder): JsonResponse
+    {
+        if ($folder->channel_id !== $channel->id) {
+            abort(404);
+        }
+
+        $data = $request->validate([
+            'name' => 'sometimes|required|string|max:255',
+            'parent_id' => 'sometimes|nullable|integer',
+        ]);
+
+        if (array_key_exists('parent_id', $data)) {
+            $data['parent_id'] = $data['parent_id'] !== null
+                ? MyChannelMediaFolder::where('channel_id', $channel->id)->findOrFail($data['parent_id'])->id
+                : null;
+
+            if ($data['parent_id'] !== null) {
+                if ((int) $data['parent_id'] === (int) $folder->id) {
+                    throw ValidationException::withMessages(['parent_id' => 'A folder cannot be its own parent.']);
+                }
+                if ($this->folderIsDescendant($folder, (int) $data['parent_id'])) {
+                    throw ValidationException::withMessages(['parent_id' => 'Cannot move a folder into its own subfolder.']);
+                }
+            }
+        }
+
+        $folder->update($data);
+
+        return response()->json(['folder' => $folder->fresh()]);
+    }
+
+    public function destroyMyChannelFolder(Request $request, AdminChannel $channel, MyChannelMediaFolder $folder): JsonResponse
+    {
+        if ($folder->channel_id !== $channel->id) {
+            abort(404);
+        }
+
+        $parentId = $folder->parent_id;
+
+        MyChannelMediaFolder::where('parent_id', $folder->id)->update(['parent_id' => $parentId]);
+        MyChannelContent::where('folder_id', $folder->id)->update(['folder_id' => $parentId]);
+
+        $folder->delete();
+
+        return response()->json(['message' => 'Folder deleted']);
+    }
+
+    protected function folderIsDescendant(MyChannelMediaFolder $folder, int $candidateId): bool
+    {
+        $seen = [];
+
+        do {
+            $parent = MyChannelMediaFolder::whereKey($candidateId)->first();
+            if (! $parent) {
+                break;
+            }
+            if ((int) $parent->id === (int) $folder->id) {
+                return true;
+            }
+            if (isset($seen[$parent->id])) {
+                break;
+            }
+            $seen[$parent->id] = true;
+            $candidateId = (int) ($parent->parent_id ?? 0);
+        } while ($candidateId > 0);
+
+        return false;
     }
 
     public function getMyChannelPlaylist(Request $request, AdminChannel $channel): JsonResponse

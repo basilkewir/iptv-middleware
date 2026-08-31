@@ -43,6 +43,11 @@ Route::middleware(['auth', \App\Http\Middleware\AdminMiddleware::class])
         Route::post('/clients/bulk-action', [App\Http\Controllers\Admin\ClientController::class, 'bulkAction'])->name('clients.bulkAction');
 
         // ─── Channels ─────────────────────────────────────────────────────
+        // ─── Multicast Scanner (must be before resource to avoid route collision) ───
+        Route::get('/channels/multicast-scan', [App\Http\Controllers\Admin\MulticastScanController::class, 'index'])->name('channels.multicast-scan');
+        Route::post('/channels/multicast-scan/probe', [App\Http\Controllers\Admin\MulticastScanController::class, 'scan'])->name('channels.multicast-scan.probe');
+        Route::post('/channels/multicast-scan/import', [App\Http\Controllers\Admin\MulticastScanController::class, 'import'])->name('channels.multicast-scan.import');
+
         Route::resource('channels', App\Http\Controllers\Admin\ChannelController::class)->except(['create', 'edit']);
         Route::post('/channels/{channel}/toggle-status', [App\Http\Controllers\Admin\ChannelController::class, 'toggleStatus'])->name('channels.toggleStatus');
         Route::post('/channels/bulk-import', [App\Http\Controllers\Admin\ChannelController::class, 'bulkImport'])->name('channels.bulkImport');

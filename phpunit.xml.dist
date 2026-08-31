@@ -29,5 +29,6 @@
         <env name="REDIS_PORT" value="6379"/>
         <env name="MAIL_MAILER" value="log"/>
         <env name="SANCTUM_STATE_PASSWORD" value="123456"/>
+        <env name="LICENSE_JWT_SECRET" value="dGVzdHNlY3JldGtleWZvcnVuaXR0ZXN0aW5nb25seQ=="/>
     </php>
 </phpunit>

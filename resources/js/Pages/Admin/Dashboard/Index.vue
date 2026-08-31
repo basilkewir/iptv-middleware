@@ -91,6 +91,37 @@
           </div>
         </div>
 
+        <!-- Per-NIC bandwidth -->
+        <div class="mb-4" v-if="nics.length">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-gray-400 text-sm">Network Interfaces</span>
+            <span class="text-xs text-gray-500">{{ nics.filter(n => n.up).length }}/{{ nics.length }} up · live throughput</span>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+            <div v-for="nic in nics" :key="nic.name" class="p-3 bg-gray-700/40 rounded-lg">
+              <div class="flex items-center justify-between mb-1.5">
+                <span class="text-white text-sm font-medium truncate">
+                  {{ nic.name }}
+                  <span v-if="nic.ip" class="text-gray-500 font-normal">· {{ nic.ip }}</span>
+                </span>
+                <span class="w-2 h-2 rounded-full shrink-0" :class="nic.up ? 'bg-green-400' : 'bg-red-400'" />
+              </div>
+              <div class="grid grid-cols-2 gap-2 text-xs">
+                <div>
+                  <span class="text-gray-500 block">↓ RX</span>
+                  <span class="text-blue-300 font-semibold">{{ nic.rx_mbps }} Mbps</span>
+                  <span class="text-gray-600 block text-[10px]">{{ nic.rx_total_gb }} GB total</span>
+                </div>
+                <div>
+                  <span class="text-gray-500 block">↑ TX</span>
+                  <span class="text-green-300 font-semibold">{{ nic.tx_mbps }} Mbps</span>
+                  <span class="text-gray-600 block text-[10px]">{{ nic.tx_total_gb }} GB total</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div>
           <div class="flex items-center justify-between mb-2">
             <span class="text-gray-400 text-sm">HLS Ingests</span>
@@ -100,7 +131,14 @@
             <div v-for="ing in ingests" :key="ing.id" class="flex items-center gap-3 p-2.5 bg-gray-700/40 rounded-lg">
               <span class="w-2 h-2 rounded-full shrink-0" :class="ing.status === 'live' ? 'bg-green-400 animate-pulse' : ing.status === 'stale' ? 'bg-yellow-400' : ing.status === 'starting' ? 'bg-blue-400' : 'bg-red-400'" />
               <span class="text-white text-sm truncate flex-1">#{{ ing.channel_number }} {{ ing.name || 'Unnamed' }}</span>
-              <span class="text-xs uppercase tracking-wide" :class="ing.status === 'live' ? 'text-green-400' : ing.status === 'stale' ? 'text-yellow-400' : 'text-red-400'">{{ ing.status }}</span>
+              <button
+                @click="refreshIngest(ing.id)"
+                :disabled="refreshing === ing.id"
+                :title="`Restart ingest for ${ing.name || 'channel ' + ing.channel_number}`"
+                class="p-1.5 rounded-md text-gray-400 hover:text-white hover:bg-gray-600 transition disabled:opacity-50"
+              >
+                <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': refreshing === ing.id }" />
+              </button>
             </div>
           </div>
           <div v-if="!ingests.length" class="text-gray-500 text-sm text-center py-3">No active channel ingests</div>
@@ -259,7 +297,7 @@
 
 <script setup>
 import { ref, computed } from 'vue'
-import { Link } from '@inertiajs/vue3'
+import { Link, router } from '@inertiajs/vue3'
 import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
 import { RefreshCw, Users, DollarSign, Radio, Server, Tv, UserPlus, Film, Calendar, Settings, CreditCard, Cpu, MemoryStick, HardDrive, Gauge } from 'lucide-vue-next'
@@ -317,6 +355,7 @@ const serverHealthList = computed(() => props.stats.server_health || [])
 
 const system = computed(() => props.stats.system || null)
 const ingests = computed(() => system.value?.ingests || [])
+const nics = computed(() => system.value?.nics || [])
 const collectedAgo = computed(() => {
   if (!system.value?.collected_at) return ''
   const secs = Math.max(0, Math.round((Date.now() - new Date(system.value.collected_at).getTime()) / 1000))
@@ -328,6 +367,17 @@ const ingestSummary = computed(() => {
   const live = list.filter(i => i.status === 'live').length
   return `${live}/${list.length} live`
 })
+
+const refreshing = ref(null)
+const refreshIngest = (id) => {
+  refreshing.value = id
+  router.post(route('admin.channels.refresh-ingest', { channel: id }), {}, {
+    preserveScroll: true,
+    preserveState: true,
+    onFinish: () => { refreshing.value = null },
+    onSuccess: () => router.reload({ only: ['stats'] }),
+  })
+}
 
 const toneForPct = (pct) => (pct < 60 ? 'ok' : pct < 85 ? 'warn' : 'critical')
 

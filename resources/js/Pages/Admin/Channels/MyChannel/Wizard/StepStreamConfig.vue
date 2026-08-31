@@ -96,6 +96,21 @@
         </div>
       </div>
     </div>
+
+    <div class="bg-gray-700/30 rounded-lg p-4 border border-gray-600">
+      <h4 class="text-white font-medium mb-3">Transcoding</h4>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-2">Transcoding Device</label>
+          <select v-model="form.transcoding_device"
+            class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500">
+            <option value="cpu">CPU (libx264)</option>
+            <option value="gpu">GPU (h264_nvenc)</option>
+          </select>
+          <p class="text-xs text-gray-500 mt-1">GPU uses NVIDIA NVENC hardware encoder (faster, lower CPU usage)</p>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 

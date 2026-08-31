@@ -43,6 +43,19 @@ class Kernel extends ConsoleKernel
         $schedule->command('channels:auto-check-health')
             ->everyFiveMinutes()
             ->withoutOverlapping();
+
+        // Watchdog runs every minute to detect stale ingests and failover
+        // to backup streams after the 10s grace period.
+        $schedule->command('channels:watchdog')
+            ->everyMinute()
+            ->withoutOverlapping();
+
+        // Refresh per-source statuses (primary + backups) for the admin UI on a
+        // rotating subset every 3 minutes. Keeps live/offline chips real without
+        // overwhelming the box with a full-catalogue ffprobe sweep.
+        $schedule->command('channels:probe-sources')
+            ->everyThreeMinutes()
+            ->withoutOverlapping();
     }
 
     protected function commands(): void

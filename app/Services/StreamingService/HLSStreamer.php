@@ -31,6 +31,22 @@ class HLSStreamer implements HLSStreamerInterface
 
         $inputUrl = $channel->source_url;
 
+        if ($channel->isYouTube() && empty($inputUrl)) {
+            $ytService = new \App\Services\YouTubeService();
+            $resolveResult = $ytService->resolveToStreamUrl($channel);
+            if ($resolveResult['success']) {
+                $inputUrl = $resolveResult['stream_url'];
+            }
+        }
+
+        if (empty($inputUrl)) {
+            Log::error('Cannot start HLS stream: no source URL', [
+                'stream_id' => $stream->id,
+                'channel_id' => $channel->id,
+            ]);
+            return;
+        }
+
         $ffmpegCommand = $this->buildFFmpegCommand(
             input: $inputUrl,
             outputPath: $streamPath,
@@ -175,7 +191,7 @@ class HLSStreamer implements HLSStreamerInterface
 
         return sprintf(
             'ffmpeg -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i %s ' .
-            '-c:v libx264 -c:a aac -f hls ' .
+            '-c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k -c:a aac -f hls ' .
             '-hls_time %d -hls_list_size %d ' .
             '-hls_flags delete_segments+append_list ' .
             '-hls_segment_filename %s/segment_%%03d.ts ' .

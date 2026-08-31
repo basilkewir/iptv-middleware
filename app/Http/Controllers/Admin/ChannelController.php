@@ -23,40 +23,55 @@ class ChannelController extends Controller
     {
         $query = Channel::with(['categories', 'epgSource', 'bouquets']);
 
-        if ($search = $request->input('search')) {
-            $query->where(function ($q) use ($search) {
-                $q->where('name', 'like', "%{$search}%")
-                    ->orWhere('stream_url', 'like', "%{$search}%")
-                    ->orWhere('genre', 'like', "%{$search}%");
+        $filters = $request->only(['search', 'category_id', 'status', 'type', 'quality', 'genre', 'country']);
+        $filters = array_filter($filters, fn ($v) => $v !== null && $v !== '');
+
+        if (! empty($filters['search'])) {
+            $query->where(function ($q) use ($filters) {
+                $q->where('name', 'like', "%{$filters['search']}%")
+                    ->orWhere('stream_url', 'like', "%{$filters['search']}%")
+                    ->orWhere('genre', 'like', "%{$filters['search']}%");
             });
         }
 
-        if ($categoryId = $request->input('category_id')) {
-            $query->whereHas('categories', fn ($q) => $q->where('categories.id', $categoryId));
+        if (! empty($filters['category_id'])) {
+            $query->whereHas('categories', fn ($q) => $q->where('categories.id', $filters['category_id']));
         }
 
-        if ($request->has('status')) {
-            $query->where('is_active', $request->boolean('status'));
+        if (array_key_exists('status', $filters)) {
+            $query->where('is_active', filter_var($filters['status'], FILTER_VALIDATE_BOOLEAN));
         }
 
-        if ($genre = $request->input('genre')) {
-            $query->where('genre', $genre);
+        if (! empty($filters['type'])) {
+            $query->where('stream_type', $filters['type']);
         }
 
-        if ($country = $request->input('country')) {
-            $query->where('country', $country);
+        if (array_key_exists('quality', $filters)) {
+            $filters['quality'] === 'unknown'
+                ? $query->whereNull('quality_level')
+                : $query->where('quality_level', $filters['quality']);
         }
 
-        $channels = $query->latest()->paginate($request->input('per_page', 15));
+        if (! empty($filters['genre'])) {
+            $query->where('genre', $filters['genre']);
+        }
+
+        if (! empty($filters['country'])) {
+            $query->where('country', $filters['country']);
+        }
+
+        $perPage = max(1, min(100, (int) $request->input('per_page', 15)));
+        $channels = $query->latest()->paginate($perPage)->withQueryString();
         $categories = ContentCategory::where('is_active', true)->orderBy('sort_order')->get();
 
         if ($request->expectsJson()) {
-            return response()->json(['data' => $channels]);
+            return response()->json(['data' => $channels, 'filters' => $filters]);
         }
 
         return Inertia::render('Admin/Channels/Index', [
             'channels' => $channels,
             'categories' => $categories,
+            'filters' => $filters,
         ]);
     }
 
@@ -94,8 +109,16 @@ class ChannelController extends Controller
             'genre' => 'nullable|string|max:255',
             'country' => 'nullable|string|max:10',
             'language' => 'nullable|string|max:10',
-            'stream_url' => 'required|string',
+            'stream_url' => 'nullable|string',
             'stream_type' => 'nullable|in:m3u8,rtmp,rtsp,udp,hls,dash',
+            'source_type' => 'nullable|in:stream,youtube',
+            'source_url' => 'nullable|string',
+            'youtube_url' => 'nullable|url',
+            'youtube_cookies' => 'nullable|array',
+            'youtube_url_1' => 'nullable|url',
+            'youtube_url_1_verified' => 'nullable|boolean',
+            'youtube_url_2' => 'nullable|url',
+            'youtube_url_2_verified' => 'nullable|boolean',
             'program_number' => 'nullable|integer|min:1',
             'local_address' => 'nullable|string|max:45',
             'backup_url_1' => 'nullable|string',
@@ -111,6 +134,7 @@ class ChannelController extends Controller
             'bouquet_ids' => 'nullable|array',
             'bouquet_ids.*' => 'exists:bouquets,id',
             'transcoding_enabled' => 'nullable|boolean',
+            'transcoding_device' => 'nullable|in:cpu,gpu',
             'transcoding_profile' => 'nullable|string',
             'transcoding_resolution' => 'nullable|string',
             'transcoding_video_codec' => 'nullable|string',
@@ -124,7 +148,13 @@ class ChannelController extends Controller
             'restricted_package_ids.*' => 'exists:subscription_packages,id',
         ]);
 
-        $channel = Channel::create([
+        if (($validated['source_type'] ?? null) === 'youtube') {
+            $validated['stream_url'] = $validated['youtube_url'] ?? $validated['stream_url'] ?? null;
+        } elseif (empty($validated['stream_url'])) {
+            $validated['stream_url'] = $validated['source_url'] ?? null;
+        }
+
+        $channelData = [
             'name' => $validated['name'],
             'slug' => \Str::slug($validated['name']),
             'channel_number' => $validated['channel_number'] ?? ((int) Channel::max('channel_number') + 1),
@@ -137,6 +167,14 @@ class ChannelController extends Controller
             'active_stream_url' => $validated['stream_url'],
             'active_source_index' => 0,
             'stream_type' => $validated['stream_type'] ?? 'hls',
+            'source_type' => ($validated['source_type'] ?? null) ?? 'stream',
+            'source_url' => $validated['source_url'] ?? null,
+            'youtube_url' => $validated['youtube_url'] ?? null,
+            'youtube_cookies' => $validated['youtube_cookies'] ?? null,
+            'youtube_url_1' => $validated['youtube_url_1'] ?? null,
+            'youtube_url_1_verified' => $validated['youtube_url_1_verified'] ?? false,
+            'youtube_url_2' => $validated['youtube_url_2'] ?? null,
+            'youtube_url_2_verified' => $validated['youtube_url_2_verified'] ?? false,
             'program_number' => $validated['program_number'] ?? null,
             'local_address' => $validated['local_address'] ?? null,
             'backup_url_1' => $validated['backup_url_1'] ?? null,
@@ -148,6 +186,7 @@ class ChannelController extends Controller
             'epg_language' => $validated['epg_language'] ?? null,
             'timezone_offset' => $validated['timezone_offset'] ?? null,
             'transcoding_enabled' => $validated['transcoding_enabled'] ?? false,
+            'transcoding_device' => $validated['transcoding_device'] ?? null,
             'transcoding_profile' => $validated['transcoding_profile'] ?? null,
             'transcoding_resolution' => $validated['transcoding_resolution'] ?? null,
             'transcoding_video_codec' => $validated['transcoding_video_codec'] ?? null,
@@ -157,7 +196,13 @@ class ChannelController extends Controller
             'is_adult' => $validated['is_adult'] ?? false,
             'is_available_to_all' => $validated['is_available_to_all'] ?? true,
             'ip_restriction' => $validated['ip_restriction'] ?? null,
-        ]);
+        ];
+
+        if (($validated['source_type'] ?? null) === 'youtube' && !empty($validated['youtube_url'])) {
+            $channelData['stream_url'] = $validated['youtube_url'];
+        }
+
+        $channel = Channel::create($channelData);
 
         $channel->categories()->sync($validated['category_ids']);
 
@@ -167,6 +212,33 @@ class ChannelController extends Controller
 
         if (!empty($validated['restricted_package_ids'])) {
             $channel->restrictedPackages()->sync($validated['restricted_package_ids']);
+        }
+
+        // Resolve the primary YouTube URL (and any backup YouTube URLs) into
+        // their playable HLS stream URLs now that the channel exists, so the
+        // ingest/failover code never sees a YouTube URL directly.
+        $ytService = new \App\Services\YouTubeService();
+        if ($ytService->isYtDlpAvailable()) {
+            if (($validated['source_type'] ?? null) === 'youtube' && !empty($validated['youtube_url'] ?? null)) {
+                $resolveResult = $ytService->resolveToStreamUrl($channel);
+                if ($resolveResult['success']) {
+                    $channel->source_url = $resolveResult['stream_url'];
+                    $channel->save();
+                }
+            }
+
+            foreach ([1, 2] as $backupIndex) {
+                $youTubeBackupUrl = $validated["youtube_url_{$backupIndex}"] ?? null;
+                if (empty($youTubeBackupUrl)) {
+                    continue;
+                }
+                $resolved = $ytService->resolveUrlToStreamUrl($youTubeBackupUrl, $channel->getYouTubeCookies());
+                if ($resolved) {
+                    $backupField = $backupIndex === 1 ? 'backup_url_1' : 'backup_url_2';
+                    $channel->{$backupField} = $resolved;
+                    $channel->save();
+                }
+            }
         }
 
         return redirect()->route('admin.channels.index')
@@ -185,6 +257,14 @@ class ChannelController extends Controller
             'language' => 'nullable|string|max:10',
             'stream_url' => 'sometimes|string',
             'stream_type' => 'sometimes|in:m3u8,rtmp,rtsp,udp,hls,dash',
+            'source_type' => 'nullable|in:stream,youtube',
+            'source_url' => 'nullable|string',
+            'youtube_url' => 'nullable|url',
+            'youtube_cookies' => 'nullable|array',
+            'youtube_url_1' => 'nullable|url',
+            'youtube_url_1_verified' => 'nullable|boolean',
+            'youtube_url_2' => 'nullable|url',
+            'youtube_url_2_verified' => 'nullable|boolean',
             'program_number' => 'sometimes|nullable|integer|min:1',
             'local_address' => 'sometimes|nullable|string|max:45',
             'backup_url_1' => 'nullable|string',
@@ -200,6 +280,7 @@ class ChannelController extends Controller
             'bouquet_ids' => 'nullable|array',
             'bouquet_ids.*' => 'exists:bouquets,id',
             'transcoding_enabled' => 'nullable|boolean',
+            'transcoding_device' => 'nullable|in:cpu,gpu',
             'transcoding_profile' => 'nullable|string',
             'transcoding_resolution' => 'nullable|string',
             'transcoding_video_codec' => 'nullable|string',
@@ -236,6 +317,42 @@ class ChannelController extends Controller
             $validated['channel_number'] = $channel->channel_number;
         }
 
+        if (isset($validated['source_type']) && $validated['source_type'] === 'youtube' && !empty($validated['youtube_url'] ?? null)) {
+            $validated['stream_url'] = $validated['youtube_url'];
+            $validated['source_type'] = 'youtube';
+            $ytService = new \App\Services\YouTubeService();
+            if ($ytService->isYtDlpAvailable()) {
+                $resolveResult = $ytService->resolveToStreamUrl($channel);
+                if ($resolveResult['success']) {
+                    $validated['source_url'] = $resolveResult['stream_url'];
+                }
+            }
+        }
+
+        // Resolve any backup YouTube URLs into their playable HLS stream URL
+        // (stored in backup_url_1 / backup_url_2) so the ingest/failover code
+        // never sees a YouTube URL directly.
+        foreach ([1, 2] as $backupIndex) {
+            $youtubeField = "youtube_url_{$backupIndex}";
+            $backupField  = "backup_url_{$backupIndex}";
+            $youTubeBackupUrl = $validated[$youtubeField] ?? null;
+
+            if (empty($youTubeBackupUrl)) {
+                if (array_key_exists($youtubeField, $validated)) {
+                    $validated[$backupField] = null;
+                }
+                continue;
+            }
+
+            $ytService = $ytService ?? new \App\Services\YouTubeService();
+            if ($ytService->isYtDlpAvailable()) {
+                $resolved = $ytService->resolveUrlToStreamUrl($youTubeBackupUrl, $channel->getYouTubeCookies());
+                if ($resolved) {
+                    $validated[$backupField] = $resolved;
+                }
+            }
+        }
+
         // When primary stream_url changes and we're still on it, update active_stream_url too
         if (isset($validated['stream_url']) && $channel->active_source_index === 0) {
             $validated['active_stream_url'] = $validated['stream_url'];
@@ -247,16 +364,113 @@ class ChannelController extends Controller
             ->with('success', 'Channel updated successfully.');
     }
 
+    /**
+     * Verify a YouTube URL and bypass robot verification.
+     * Works both for existing channels and during channel creation.
+     */
+    public function verifyYouTube(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'youtube_url' => 'required|url',
+        ]);
+
+        $ytService = new \App\Services\YouTubeService();
+
+        $result = $ytService->verifyUrl($validated['youtube_url']);
+
+        if ($result['success']) {
+            return response()->json([
+                'success' => true,
+                'data' => [
+                    'verified' => $result['verified'] ?? true,
+                    'stream_url' => $result['stream_url'] ?? null,
+                    'cookies' => $result['cookies'] ?? [],
+                    'channel_id' => $result['channel_id'] ?? null,
+                    'type' => $result['type'] ?? null,
+                    'verified_at' => now()->toISOString(),
+                ],
+            ]);
+        }
+
+        return response()->json([
+            'success' => false,
+            'message' => $result['error'] ?? 'Verification failed',
+        ], 422);
+    }
+
     public function destroy(Request $request, Channel $channel): RedirectResponse
     {
+        $this->stopIngest($channel->id);
         $channel->categories()->detach();
         $channel->bouquets()->detach();
         $channel->restrictedPackages()->detach();
         $channel->streamAssignments()->delete();
         $channel->delete();
+        $this->cleanHlsDir($channel->id);
 
         return redirect()->route('admin.channels.index')
             ->with('success', 'Channel deleted successfully.');
+    }
+
+    public function bulkDelete(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'ids' => 'required|array',
+            'ids.*' => 'exists:channels,id',
+        ]);
+
+        $ids = $validated['ids'];
+
+        foreach ($ids as $id) {
+            $this->stopIngest($id);
+        }
+
+        Channel::whereIn('id', $ids)->each(function ($channel) {
+            $channel->categories()->detach();
+            $channel->bouquets()->detach();
+            $channel->restrictedPackages()->detach();
+            $channel->streamAssignments()->delete();
+            $channel->delete();
+        });
+
+        foreach ($ids as $id) {
+            $this->cleanHlsDir($id);
+        }
+
+        return response()->json(['message' => count($ids) . ' channel(s) deleted successfully']);
+    }
+
+    private function stopIngest(int $channelId): void
+    {
+        $outputDir = storage_path("app/streams/hls/{$channelId}");
+        $pidFile = $outputDir . '/ingest.pid';
+        $stopFile = $outputDir . '/.stop';
+
+        @touch($stopFile);
+
+        if (is_file($pidFile)) {
+            $pid = (int) trim((string) file_get_contents($pidFile));
+            if ($pid > 0) {
+                @exec('pkill -TERM -f ' . escapeshellarg("ingest_{$channelId}") . ' 2>/dev/null');
+                @posix_kill($pid, SIGTERM);
+                usleep(500000);
+                @posix_kill($pid, SIGKILL);
+            }
+            @unlink($pidFile);
+        }
+
+        @exec('pkill -TERM -f ' . escapeshellarg("segment_*.ts") . ' 2>/dev/null');
+    }
+
+    private function cleanHlsDir(int $channelId): void
+    {
+        $outputDir = storage_path("app/streams/hls/{$channelId}");
+        if (is_dir($outputDir)) {
+            @array_map('unlink', glob("{$outputDir}/*"));
+            @rmdir($outputDir);
+        }
+        @unlink($outputDir . '/.stop');
+        @unlink($outputDir . '/.heartbeat');
     }
 
     public function toggleStatus(Request $request, Channel $channel): JsonResponse
@@ -496,7 +710,7 @@ class ChannelController extends Controller
 
     public function testStream(Request $request, Channel $channel): JsonResponse
     {
-        $streamUrl = $channel->stream_url;
+        $streamUrl = $channel->source_url;
         $startTime = microtime(true);
 
         if (empty($streamUrl)) {
@@ -514,7 +728,34 @@ class ChannelController extends Controller
         try {
             $detectedType = $channel->stream_type ?: $this->detectStreamType($streamUrl);
 
-            // Use ffprobe to validate the actual stream
+            if ($channel->isYouTube()) {
+                $ytService = new \App\Services\YouTubeService();
+                if (!$ytService->isYtDlpAvailable()) {
+                    return response()->json([
+                        'success' => false,
+                        'data' => [
+                            'status' => 'offline',
+                            'http_code' => 0,
+                            'response_time' => 0,
+                            'error' => 'yt-dlp not available — cannot verify YouTube stream',
+                        ],
+                    ]);
+                }
+                $resolveResult = $ytService->resolveToStreamUrl($channel);
+                if (!$resolveResult['success']) {
+                    return response()->json([
+                        'success' => false,
+                        'data' => [
+                            'status' => 'offline',
+                            'http_code' => 0,
+                            'response_time' => 0,
+                            'error' => 'YouTube stream resolution failed: ' . ($resolveResult['error'] ?? 'unknown'),
+                        ],
+                    ]);
+                }
+                $streamUrl = $resolveResult['stream_url'];
+            }
+
             $probeResult = $this->probeStreamWithFfprobe($streamUrl, $detectedType);
 
             $responseTime = round((microtime(true) - $startTime) * 1000);
@@ -892,40 +1133,84 @@ class ChannelController extends Controller
         }
 
         $channels = Channel::whereIn('id', $ids)
-            ->select('id', 'source_status', 'source_last_checked_at', 'source_check_attempts', 'source_last_online_at', 'source_last_error', 'active_source_index', 'active_stream_url')
+            ->select('id', 'source_status', 'source_last_checked_at', 'source_check_attempts', 'source_last_online_at', 'source_last_error', 'source_statuses_json', 'sources_last_probed_at', 'active_source_index', 'active_stream_url', 'stream_url', 'backup_url_1', 'backup_url_2')
             ->get()
             ->keyBy('id');
 
         return response()->json([
             'data' => $channels->map(fn ($ch) => [
-                'id' => $ch->id,
-                'source_status' => $ch->source_status,
-                'source_last_checked_at' => $ch->source_last_checked_at,
+                'id'                    => $ch->id,
+                'source_status'         => $ch->source_status,
+                'source_last_checked_at'=> $ch->source_last_checked_at,
                 'source_check_attempts' => $ch->source_check_attempts,
                 'source_last_online_at' => $ch->source_last_online_at,
-                'source_last_error' => $ch->source_last_error,
-                'active_source_index' => $ch->active_source_index,
-                'active_source_label' => $ch->active_source_label,
+                'source_last_error'     => $ch->source_last_error,
+                'source_statuses'       => array_values($ch->source_statuses),
+                'sources_last_probed_at'=> $ch->sources_last_probed_at,
+                'active_source_index'   => $ch->active_source_index,
+                'active_source_label'   => $ch->active_source_label,
+                'active_stream_url'     => $ch->active_stream_url,
+                'active_url_type'       => $this->resolveUrlType($ch->active_stream_url ?? $ch->stream_url),
             ])->values(),
         ]);
     }
 
+    private function resolveUrlType(?string $url): string
+    {
+        if (!$url) return 'unknown';
+        if (str_starts_with($url, 'udp://') || str_starts_with($url, 'rtp://')) return 'udp';
+        if (str_contains(strtolower($url), '.m3u8') || in_array(strtolower(pathinfo($url, PATHINFO_EXTENSION)), ['m3u8'])) return 'hls';
+        if (str_starts_with($url, 'rtmp://')) return 'rtmp';
+        if (str_starts_with($url, 'rtsp://')) return 'rtsp';
+        if (str_contains(strtolower($url), 'mpegts') || str_contains(strtolower($url), '/ts')) return 'mpegts';
+        return 'http';
+    }
+
     /**
      * Check the health of a channel's source URL and auto-restart if offline.
+     * Also refreshes per-source statuses for the real-status chips.
      */
     public function checkSource(Channel $channel, SourceHealthCheckService $healthCheck): JsonResponse
     {
+        // Refresh per-source statuses first so the response carries real chips.
+        $healthCheck->probeAllSources($channel);
+
         $result = $healthCheck->checkAndRefresh($channel);
+
+        $fresh = $channel->fresh();
+
+        return response()->json([
+            'success' => true,
+            'data' => [
+                'status' => $fresh->source_status,
+                'message' => $result['message'] ?? 'Health check completed',
+                'details' => $result['details'] ?? [],
+                'restart' => $result['restart'] ?? null,
+                'last_checked_at' => $fresh->source_last_checked_at,
+                'check_attempts' => $fresh->source_check_attempts,
+                'source_statuses' => array_values($fresh->source_statuses),
+                'active_source_index' => $fresh->active_source_index,
+                'active_source_label' => $fresh->active_source_label,
+            ],
+        ]);
+    }
+
+    /**
+     * Manually re-probe every source (primary + backups) and return fresh
+     * per-source live/offline status without touching the ingest or switching.
+     */
+    public function probeSources(Channel $channel, SourceHealthCheckService $healthCheck): JsonResponse
+    {
+        $statuses = $healthCheck->probeAllSources($channel);
 
         return response()->json([
             'success' => true,
             'data' => [
                 'status' => $channel->fresh()->source_status,
-                'message' => $result['message'] ?? 'Health check completed',
-                'details' => $result['details'] ?? [],
-                'restart' => $result['restart'] ?? null,
                 'last_checked_at' => $channel->fresh()->source_last_checked_at,
-                'check_attempts' => $channel->fresh()->source_check_attempts,
+                'source_statuses' => array_values($statuses),
+                'active_source_index' => $channel->fresh()->active_source_index,
+                'active_source_label' => $channel->fresh()->active_source_label,
             ],
         ]);
     }
@@ -947,6 +1232,8 @@ class ChannelController extends Controller
                 'message' => $result['message'] ?? 'Refresh initiated',
                 'last_checked_at' => $fresh->source_last_checked_at,
                 'check_attempts' => $fresh->source_check_attempts,
+                'source_statuses' => array_values($fresh->source_statuses),
+                'active_source_index' => $fresh->active_source_index,
             ],
         ]);
     }
@@ -979,9 +1266,14 @@ class ChannelController extends Controller
 
         $result = $healthCheck->switchSource($channel, $validated['source_index']);
 
+        $fresh = $channel->fresh();
+
         return response()->json([
             'success' => $result['success'],
-            'data' => $result,
+            'data' => array_merge($result, [
+                'source_statuses' => array_values($fresh->source_statuses),
+                'active_source_index' => $fresh->active_source_index,
+            ]),
         ]);
     }
 }

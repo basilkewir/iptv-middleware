@@ -25,8 +25,79 @@ class SystemMonitorService
             'uptime' => $this->uptimeHuman(),
             'php_version' => PHP_VERSION,
             'ingests' => $this->ingestStatuses(),
+            'nics' => $this->nicStats(),
             'collected_at' => now()->toIso8601String(),
         ];
+    }
+
+    /**
+     * Per-NIC traffic stats (totals + throughput since the previous sample).
+     * Rates are derived from cached samples so no artificial sleeps are needed;
+     * the first request after boot shows zero rates until a second sample lands.
+     *
+     * @return array<int, array{name: string, up: bool, ip: string|null, rx_mbps: float, tx_mbps: float, rx_total_gb: float, tx_total_gb: float}>
+     */
+    public function nicStats(): array
+    {
+        $now = microtime(true);
+        $sample = [];
+
+        foreach (glob('/sys/class/net/*') ?: [] as $path) {
+            $iface = basename($path);
+
+            if ($iface === 'lo') {
+                continue;
+            }
+
+            $rx = (int) @file_get_contents($path . '/statistics/rx_bytes');
+            $tx = (int) @file_get_contents($path . '/statistics/tx_bytes');
+            $operstate = trim((string) @file_get_contents($path . '/operstate'));
+
+            $sample[$iface] = [
+                'rx' => $rx,
+                'tx' => $tx,
+                'up' => $operstate === 'up',
+                'ip' => $this->interfaceIp($iface),
+            ];
+        }
+
+        $previous = cache()->get('monitor:net_sample');
+        cache()->put('monitor:net_sample', ['t' => $now, 'data' => array_map(fn ($s) => ['rx' => $s['rx'], 'tx' => $s['tx']], $sample)], 300);
+
+        $result = [];
+
+        foreach ($sample as $name => $nic) {
+            $rxMbps = 0.0;
+            $txMbps = 0.0;
+
+            if (isset($previous['data'][$name])) {
+                $dt = $now - (float) $previous['t'];
+
+                if ($dt >= 0.5) {
+                    $rxMbps = round(max(0, $nic['rx'] - $previous['data'][$name]['rx']) * 8 / $dt / 1_000_000, 2);
+                    $txMbps = round(max(0, $nic['tx'] - $previous['data'][$name]['tx']) * 8 / $dt / 1_000_000, 2);
+                }
+            }
+
+            $result[] = [
+                'name' => $name,
+                'up' => $nic['up'],
+                'ip' => $nic['ip'],
+                'rx_mbps' => $rxMbps,
+                'tx_mbps' => $txMbps,
+                'rx_total_gb' => round($nic['rx'] / 1024 ** 3, 2),
+                'tx_total_gb' => round($nic['tx'] / 1024 ** 3, 2),
+            ];
+        }
+
+        return $result;
+    }
+
+    private function interfaceIp(string $iface): ?string
+    {
+        $ips = @shell_exec("ip -4 -o addr show dev " . escapeshellarg($iface) . " 2>/dev/null | awk '{print \$4}' | head -1");
+
+        return $ips ? trim(explode('/', trim($ips))[0]) : null;
     }
 
     public function osName(): string

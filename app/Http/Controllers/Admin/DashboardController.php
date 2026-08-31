@@ -63,6 +63,19 @@ class DashboardController extends Controller
         return Inertia::render('Admin/Dashboard/Index', ['stats' => $stats]);
     }
 
+    public function refreshIngest(Request $request, Channel $channel, \App\Http\Controllers\XtreamController $xtream): JsonResponse|\Illuminate\Http\RedirectResponse
+    {
+        abort_unless($channel->is_active, 404);
+
+        $xtream->restartHlsStream($channel);
+
+        if ($request->expectsJson()) {
+            return response()->json(['success' => true, 'channel_id' => $channel->id]);
+        }
+
+        return back()->with('success', "Ingest for '{$channel->name}' restarted.");
+    }
+
     private function getUserGrowth(Carbon $start, Carbon $end): array
     {
         $data = User::select(

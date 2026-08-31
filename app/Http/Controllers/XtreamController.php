@@ -39,7 +39,7 @@ class XtreamController extends Controller
 
     // Max system load (1-min) before the wrapper pauses before starting ffmpeg.
     // On 8 cores, load 5 = ~62% utilisation — safe headroom.
-    private const INGEST_LOAD_GATE = 16;
+    private const INGEST_LOAD_GATE = 40;
 
     /**
      * Load threshold used INSIDE the wrapper retry loop. Before respawning
@@ -403,47 +403,54 @@ class XtreamController extends Controller
         // Parse the streamId to determine file type
         $extension = strtolower(pathinfo($streamId, PATHINFO_EXTENSION));
 
-        // .m3u8 request — serve the playlist directly, rewriting
-        // segment URLs to route through this endpoint so the player
-        // never needs to follow an external redirect.
-        if ($extension === 'm3u8') {
-            $hlsDir = storage_path("app/streams/hls/{$channelId}");
-            $playlist = "{$hlsDir}/playlist.m3u8";
+        $hlsDir  = storage_path("app/streams/hls/{$channelId}");
+        $hlsBase = config('app.url') . "/hls/{$channelId}";
 
-            if (!file_exists($playlist)) {
-                return response('Service Unavailable', 503, [
-                    'Retry-After' => '3',
-                    'Cache-Control' => 'no-cache, no-store, must-revalidate',
-                ]);
-            }
+        // Non-m3u8 requests (no extension or .ts) — always redirect to the
+        // HLS playlist. Never expose the raw udp:// source URL to the player.
+        if ($extension !== 'm3u8') {
+            return redirect("{$hlsBase}/playlist.m3u8");
+        }
 
-            $content = file_get_contents($playlist);
-            if ($content === false) {
-                return response('Service Unavailable', 503, [
-                    'Retry-After' => '3',
-                    'Cache-Control' => 'no-cache, no-store, must-revalidate',
-                ]);
-            }
+        // .m3u8 request — wait up to 8 s for the multicast group reader to
+        // produce its first playlist before giving up. This prevents players
+        // from seeing a 503 on the very first request after a cold start and
+        // interpreting it as "stream format not supported".
+        $playlist = "{$hlsDir}/playlist.m3u8";
+        $waited   = 0;
+        while (! file_exists($playlist) && $waited < 8) {
+            usleep(500000); // 0.5 s
+            $waited++;
+        }
 
-            // Rewrite segment references to absolute /hls/ paths so the
-            // player never needs to follow an external redirect and stays
-            // authenticated.  e.g. "segment_047.ts" → "http://host/hls/14/segment_047.ts"
-            $hlsBase = config('app.url') . "/hls/{$channelId}";
-            $content = preg_replace(
-                '/^(?!#)(\S+\.ts)\s*$/m',
-                $hlsBase . '/$1',
-                $content
-            );
-
-            return response($content, 200, [
-                'Content-Type' => 'application/vnd.apple.mpegurl',
-                'Cache-Control' => 'no-cache, no-store, must-revalidate',
-                'Access-Control-Allow-Origin' => '*',
+        if (! file_exists($playlist)) {
+            return response('Service Unavailable', 503, [
+                'Retry-After'  => '3',
+                'Cache-Control'=> 'no-cache, no-store, must-revalidate',
             ]);
         }
 
-        // Fallback: redirect for unknown extensions
-        return redirect(config('app.url') . "/hls/{$channelId}/playlist.m3u8");
+        $content = file_get_contents($playlist);
+        if ($content === false) {
+            return response('Service Unavailable', 503, [
+                'Retry-After'  => '3',
+                'Cache-Control'=> 'no-cache, no-store, must-revalidate',
+            ]);
+        }
+
+        // Rewrite segment references to absolute /hls/ paths so the
+        // player never needs to follow an external redirect.
+        $content = preg_replace(
+            '/^(?!#)(\S+\.ts)\s*$/m',
+            $hlsBase . '/$1',
+            $content
+        );
+
+        return response($content, 200, [
+            'Content-Type'               => 'application/vnd.apple.mpegurl',
+            'Cache-Control'              => 'no-cache, no-store, must-revalidate',
+            'Access-Control-Allow-Origin'=> '*',
+        ]);
     }
 
     /**
@@ -463,19 +470,6 @@ class XtreamController extends Controller
      */
     public function ensureHlsStream(int $channelId, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false): void
     {
-        // UDP/RTP multicast channels are served by ONE shared group reader
-        // (MulticastIngestService) instead of one ffmpeg per channel — dozens
-        // of independent readers of the same mux overflow kernel socket
-        // buffers and starve transcodes. All callers funnel through here.
-        if (str_starts_with($sourceUrl, 'udp://') || str_starts_with($sourceUrl, 'rtp://')) {
-            $channel = Channel::find($channelId);
-
-            if ($channel) {
-                app(MulticastIngestService::class)->ensureGroupReader($channel);
-                return;
-            }
-        }
-
         $outputDir = storage_path("app/streams/hls/{$channelId}");
         $pidFile = $outputDir . '/ingest.pid';
         $heartbeat = $outputDir . '/.heartbeat';
@@ -546,11 +540,14 @@ class XtreamController extends Controller
             // kill the freshly spawned ingest.
             @unlink($outputDir . '/.stop');
 
+            // Look up transcoding device preference (cpu/gpu) for this channel.
+            $transcodingDevice = Channel::find($channelId)?->transcoding_device;
+
             // The wrapper writes its own $$ PID to the pidFile as its first
             // action, so we capture the actual bash PID (not the setsid parent
             // which exits immediately after forking).
             $wrapperWithPid = 'echo $$ > ' . escapeshellarg($pidFile) . '; '
-                . $this->ingestWrapperCommand($outputDir, $sourceUrl, $programNumber, $localAddress, $transcode);
+                . $this->ingestWrapperCommand($outputDir, $sourceUrl, $programNumber, $localAddress, $transcode, $transcodingDevice);
 
             $cmd = 'setsid bash -c ' . escapeshellarg($wrapperWithPid)
                 . ' < /dev/null > /dev/null 2>&1 &';
@@ -692,18 +689,17 @@ class XtreamController extends Controller
      * on the right NIC, and -map p:{N} keeps only the requested program so
      * this ingest's HLS playlist contains just that one channel.
      */
-    private function ingestWrapperCommand(string $outputDir, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false): string
+    private function ingestWrapperCommand(string $outputDir, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false, ?string $transcodingDevice = null): string
     {
         $log = '/tmp/ingest_' . basename($outputDir) . '.log';
 
         $input = $sourceUrl;
         if ($localAddress !== null && $localAddress !== '' && (str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://'))) {
-            // buffer_size raises SO_RCVBUF so bursty multi-program TS muxes do
-            // not overflow the kernel receive queue (requires matching
-            // net.core.rmem_max on the host, see docs).
+            // 32 MB SO_RCVBUF absorbs bursts from multi-program TS muxes without
+            // dropping packets (requires net.core.rmem_max >= 33554432 on host).
             $input .= (str_contains($input, '?') ? '&' : '?')
                 . 'localaddr=' . $localAddress
-                . '&buffer_size=8388608';
+                . '&buffer_size=33554432';
         }
 
         $isMulticast = str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://');
@@ -727,9 +723,26 @@ class XtreamController extends Controller
         // +genpts regenerates missing PTS after TS discontinuities and
         // +discardcorrupt drops damaged packets instead of stalling the decode
         // pipeline — both keep multicast ingests alive through rough patches.
+        //
+        // Live HLS (.m3u8) and HTTP MPEG-TS streams must NOT use -re: they
+        // are already paced by the upstream server. Adding -re throttles
+        // ffmpeg to 1x speed which causes it to fall behind the live feed.
+        // Only file-based HTTP sources (mp4, mkv, avi…) need -re to avoid
+        // reading the entire file into memory at once.
+        // HTTP MPEG-TS sources can also have PTS discontinuities (same as UDP
+        // multicast), so +genpts+discardcorrupt is applied to all live HTTP too.
+        $isHls = str_contains(strtolower($input), '.m3u8');
+        $isLiveHttp = $isHls || !preg_match('/\.(mp4|mkv|avi|mov|wmv|flv|webm|ts|m4v)$/i', parse_url($input, PHP_URL_PATH) ?? '');
+        $userAgent = '-user_agent \'VLC/3.0.16 LibVLC/3.0.16\'';
+        // For UDP: +genpts fixes missing PTS after TS discontinuities,
+        // +discardcorrupt drops damaged packets, -err_detect ignore_err skips
+        // corrupt frames without stalling, -avoid_negative_ts make_zero fixes
+        // DTS jumps that freeze the HLS muxer (the main cause of stalling).
         $inputOpts = $isMulticast
-            ? '-fflags +genpts+discardcorrupt -rw_timeout %d -timeout %d -i %s'
-            : '-reconnect 1 -reconnect_streamed 0 -reconnect_delay_max 5 -rw_timeout %d -timeout %d -re -i %s';
+            ? '-fflags +genpts+discardcorrupt -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -rw_timeout %d -timeout %d -i %s'
+            : ($isLiveHttp
+                ? '-fflags +genpts+discardcorrupt -max_interleave_delta 0 -reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d ' . $userAgent . ' -i %s'
+                : '-reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d -re -i %s');
 
         // -map p:N only applies to raw UDP MPEG-TS muxes where multiple programs
         // share one stream. For HTTP/HLS sources (e.g. Flussonic re-stream) the
@@ -751,22 +764,37 @@ class XtreamController extends Controller
         //     forever until .stop is written or the process is killed.
         //
         // -c:v copy avoids CPU-heavy x264 re-encoding when the source is
-        // already H.264. Transcode (libx264) is used for MPEG-2 sources or
-        // channels with dual video streams that break TV players.
+        // already H.264. Transcode uses either h264_nvenc (GPU) or libx264 (CPU)
+        // depending on the channel's transcoding_device setting.
         // For HTTP/HLS sources the upstream is already AAC-muxed HLS —
         // copy both video and audio, zero re-encode CPU cost.
         // For UDP multicast sources audio may be AC3/MP2, so transcode to
         // AAC at 48k (enough for TV, half the CPU of 128k).
-        // libx264 transcode is only used when explicitly enabled on the channel.
         $isMulticast = str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://');
 
+        $useGpu = $transcode && strtolower($transcodingDevice ?? 'cpu') === 'gpu';
+
+        // Some live HTTP/HLS sources (e.g. Flussonic re-streams) carry more
+        // than one video/audio elementary stream in each TS segment; without an
+        // explicit -map ffmpeg's default selection can pick an audio-only
+        // program and produce HLS segments with no video track (black screen).
+        // Explicitly map the first video + first audio stream (the `?` suffix
+        // makes each optional) so video always survives. UDP multicast keeps
+        // the -map p:N program selection instead.
+        $liveMap = $isMulticast ? '' : ' -map 0:v:0? -map 0:a:0? -map_chapters -1 ';
+
         $videoFilter = $transcode
-            // Full re-encode: needs multiple threads to hold realtime at
-            // 1080p50; only channels with transcoding enabled pay this cost.
-            ? ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls '
+            // GPU or CPU re-encode depending on transcoding_device setting.
+            ? ($useGpu
+                ? $liveMap . ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls '
+                : ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . $liveMap . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls ')
             : ($isMulticast
-                ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls '
-                : ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a copy -f hls ');
+                // Copy both streams — no audio transcode on UDP channels.
+                // mp3/mp2/ac3 plays natively on all modern IPTV players.
+                // Transcoding 64 channels simultaneously was the primary
+                // cause of load 32+ and the resulting HOLD stalls.
+                ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a copy -f hls '
+                : ' -threads ' . self::FFMPEG_THREADS_SINGLE . $liveMap . ' -c:v copy -c:a copy -f hls ');
 
         // All channels run permanently — no idle timeout.  This ensures
         // instant zapping: every channel has its ingest already running
@@ -790,7 +818,7 @@ class XtreamController extends Controller
             .   'HAS_SEGS=0; ls "$ODIR"/segment_*.ts > /dev/null 2>&1 && HAS_SEGS=1; '
             .   '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/segment_*.ts "$ODIR"/playlist.m3u8; '
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
-            .   '-hls_time 6 -hls_list_size 5 '
+            .   ($isMulticast ? '-hls_time 1 -hls_list_size 2 ' : '-hls_time 6 -hls_list_size 5 ')
             .   '-hls_flags delete_segments+temp_file+independent_segments+append_list '
             .   '-hls_segment_filename "$ODIR"/segment_%%04d.ts '
             .   '"$ODIR"/playlist.m3u8 2>>"$L"; '
@@ -799,8 +827,12 @@ class XtreamController extends Controller
             .   'else DELAY=$((DELAY * 2)); [ $DELAY -gt 30 ] && DELAY=30; fi; '
             .   'echo "WRAPPER RETRY delay=$DELAY $(date +%%s)" >> "$L"; '
             .   'sleep $DELAY; '
+            // UDP channels use a higher hold gate so a busy HTTP-channel
+            // load spike doesn't block multicast recovery. UDP ffmpeg is
+            // copy-only and uses negligible CPU — it should always restart.
             .   'LOAD=$(cut -d. -f1 /proc/loadavg); '
-            .   'while [ "$LOAD" -ge ' . self::INGEST_HOLD_GATE . ' ]; do echo "HOLD load=$LOAD" >> "$L"; sleep 10; LOAD=$(cut -d. -f1 /proc/loadavg); done; '
+            .   'HOLD=' . ($isMulticast ? '60' : (string) self::INGEST_HOLD_GATE) . '; '
+            .   'while [ "$LOAD" -ge "$HOLD" ]; do echo "HOLD load=$LOAD gate=$HOLD" >> "$L"; sleep 10; LOAD=$(cut -d. -f1 /proc/loadavg); done; '
             . 'done',
             escapeshellarg($outputDir),
             escapeshellarg($log),

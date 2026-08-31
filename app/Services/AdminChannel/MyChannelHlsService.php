@@ -6,23 +6,49 @@ namespace App\Services\AdminChannel;
 
 use App\Models\AdminChannel\AdminChannel;
 use App\Models\AdminChannel\MyChannelBroadcast;
+use App\Models\AdminChannel\MyChannelContent;
 use App\Models\AdminChannel\MyChannelPlaylist;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 
+/**
+ * 24/7 "Studio Playout" engine for admin channels.
+ *
+ * Architecture
+ * ------------
+ * 1. PREPARE  — every playlist item is transcoded once into a canonical
+ *    intermediate (uniform H.264/AAC-48k, constant frame rate, baked-in
+ *    start/end/custom offsets, guaranteed audio track). Mixed codecs / frame
+ *    rates / portrait-phone clips can no longer break the playout.
+ * 2. PLAYOUT  — a single long-lived ffmpeg reads the prepared files through
+ *    the concat demuxer and re-encodes to HLS. Output timestamps are forced to
+ *    a constant frame timeline (fps + setpts=N/(fps*TB)) so clip boundaries
+ *    are timestamp-continuous; this eliminates the NVENC ">1000 frames
+ *    duplicated" blow-ups and the perceived end-of-video cut.
+ * 3. WRAPPER  — a `while true` shell loop relaunches ffmpeg, computing the
+ *    next HLS segment number from the segments already on disk so the m3u8
+ *    stays continuous across any crash/restart.
+ * 4. WATCHDOG — process death *and* freeze detection (stream stopped advancing)
+ *    both trigger a restart; a broadcast only ends when the admin stops it.
+ */
 class MyChannelHlsService
 {
     private string $segmentRoot;
+    private string $normalizedRoot;
     private string $ffmpeg;
+    private string $ffprobe;
     private int $segmentDuration = 6;
     private int $playlistSize    = 12;
 
     public function __construct()
     {
-        $this->segmentRoot = storage_path('app/streams/hls');
-        $this->ffmpeg      = config('streaming.transcoding.ffmpeg_path', '/usr/bin/ffmpeg');
+        $this->segmentRoot    = storage_path('app/streams/hls');
+        $this->normalizedRoot = storage_path('app/streams/normalized');
+        $this->ffmpeg         = config('streaming.transcoding.ffmpeg_path', '/usr/bin/ffmpeg');
+        $this->ffprobe        = config('streaming.transcoding.ffprobe_path', '/usr/bin/ffprobe');
     }
 
     public function start(MyChannelBroadcast $broadcast): bool
@@ -33,10 +59,36 @@ class MyChannelHlsService
             return false;
         }
 
-        $this->stop($channel);
-
         $streamDir = $this->streamDir($channel);
+        $wasRunning = $this->isRunning($channel);
+
+        if ($wasRunning) {
+            // Kill existing process but keep segments on disk
+            $this->softStop($channel);
+        } else {
+            $this->stop($channel);
+        }
+
         $this->ensureDirectory($streamDir);
+
+        // Make sure every prepared intermediate used by the playout is fresh.
+        // Repeated starts are cheap: a signature file skips up-to-date files.
+        $prepStart = microtime(true);
+        try {
+            $prep = $this->prepareChannel($channel);
+        } catch (\Throwable $e) {
+            Log::error('My channel prepare failed', ['channel_id' => $channel->id, 'error' => $e->getMessage()]);
+            $prep = ['prepared' => 0, 'skipped' => 0, 'failed' => []];
+        }
+        if ($prep['prepared'] > 0 || $prep['failed']) {
+            Log::info('My channel prepare summary', [
+                'channel_id' => $channel->id,
+                'prepared'   => $prep['prepared'],
+                'skipped'    => $prep['skipped'],
+                'failed'     => $prep['failed'],
+                'seconds'    => round(microtime(true) - $prepStart, 2),
+            ]);
+        }
 
         $playlist = $this->resolvePlaylist($channel);
 
@@ -47,13 +99,25 @@ class MyChannelHlsService
         }
 
         try {
-            $files = $this->collectFiles($playlist);
+            $files = $this->collectFiles($playlist, $channel);
             if (empty($files)) {
                 throw new \RuntimeException('No playable media files found on disk');
             }
 
             $this->writeOverlayAssets($streamDir, $channel);
-            $loopScript = $this->writeLoopScript($streamDir, $files, $channel);
+
+            // When restarting, keep existing segment numbering for seamless HLS
+            $startSegment = 0;
+            if ($wasRunning || is_dir($streamDir)) {
+                $segments    = glob("{$streamDir}/segment_*.ts") ?: [];
+                if (! empty($segments)) {
+                    natsort($segments);
+                    $last        = basename((string) end($segments), '.ts');
+                    $startSegment = (int) substr($last, 8) + 1;
+                }
+            }
+
+            $loopScript = $this->writeLoopScript($streamDir, $files, $channel, $startSegment);
         } catch (\Throwable $e) {
             $broadcast->update(['status' => 'error', 'error_message' => $e->getMessage()]);
             Log::error('Failed to build loop script', ['channel_id' => $channel->id, 'error' => $e->getMessage()]);
@@ -84,26 +148,145 @@ class MyChannelHlsService
 
     public function stop(AdminChannel $channel): void
     {
-        $pid = Cache::get($this->cacheKey($channel));
-
-        if ($pid) {
-            @exec("kill -TERM -{$pid} 2>/dev/null");
-            @exec("kill -TERM {$pid} 2>/dev/null");
-            Cache::forget($this->cacheKey($channel));
-            Log::info('Playout terminated', ['channel_id' => $channel->id, 'pid' => $pid]);
-        }
-
+        $pid = (int) Cache::get($this->cacheKey($channel));
         $streamDir = $this->streamDir($channel);
-        @exec("pkill -f " . escapeshellarg($streamDir) . " 2>/dev/null");
+
+        $this->killPlayout($pid, $streamDir);
+
+        Cache::forget($this->cacheKey($channel));
+        Log::info('Playout terminated', ['channel_id' => $channel->id, 'pid' => $pid]);
 
         if (File::isDirectory($streamDir)) {
             File::deleteDirectory($streamDir);
         }
     }
 
+    public function softStop(AdminChannel $channel): void
+    {
+        $pid = (int) Cache::get($this->cacheKey($channel));
+        $streamDir = $this->streamDir($channel);
+
+        $this->killPlayout($pid, $streamDir);
+
+        Cache::forget($this->cacheKey($channel));
+        Log::info('Playout soft-stopped', ['channel_id' => $channel->id, 'pid' => $pid]);
+    }
+
+    /**
+     * Kill the playout wrapper and any ffmpeg still writing to the stream dir.
+     *
+     * NVENC ffmpeg sometimes wedges while handling SIGTERM (stuck in a futex
+     * wait), which left orphan ffmpeg processes running after "End Broadcast".
+     * So we send SIGTERM to the process group and matching PIDs, give them a
+     * short grace period, then escalate to SIGKILL for anything still alive.
+     */
+    private function killPlayout(?int $pid, string $streamDir): void
+    {
+        $pattern = escapeshellarg($streamDir);
+
+        if ($pid) {
+            @exec("kill -TERM -{$pid} 2>/dev/null");
+            @exec("kill -TERM {$pid} 2>/dev/null");
+        }
+        @exec("pkill -TERM -f {$pattern} 2>/dev/null");
+
+        usleep(1500000); // grace period for graceful shutdown
+
+        if ($pid) {
+            @exec("kill -9 -{$pid} 2>/dev/null");
+            @exec("kill -9 {$pid} 2>/dev/null");
+        }
+        @exec("pkill -9 -f {$pattern} 2>/dev/null");
+
+        usleep(300000); // let SIGKILL land before the caller deletes the dir
+    }
+
     public function isRunning(AdminChannel $channel): bool
     {
-        return (bool) Cache::get($this->cacheKey($channel));
+        $streamDir = $this->streamDir($channel);
+        $slug      = basename($streamDir);
+
+        // Candidate PIDs: cache first, then the on-disk pid file written at
+        // launch. The pid file keeps liveness detection working even when the
+        // cache store does not persist across processes (e.g. array driver)
+        // or was flushed.
+        $pids = [];
+
+        $cached = Cache::get($this->cacheKey($channel));
+        if ($cached) {
+            $pids[] = (int) $cached;
+        }
+
+        $pidFile = "{$streamDir}/playout.pid";
+        if (is_file($pidFile)) {
+            $fromFile = (int) trim((string) @file_get_contents($pidFile));
+            if ($fromFile > 0) {
+                $pids[] = $fromFile;
+            }
+        }
+
+        foreach (array_unique(array_filter($pids)) as $pid) {
+            if (! @file_exists("/proc/{$pid}")) {
+                continue;
+            }
+
+            $cmdline = @file_get_contents("/proc/{$pid}/cmdline");
+
+            if ($cmdline === false) {
+                continue;
+            }
+
+            // The wrapper loop script contains the stream dir path.
+            // An ffmpeg child contains the slug in its output path.
+            // Either counts as "running".
+            if (str_contains($cmdline, $slug)) {
+                return true;
+            }
+        }
+
+        // Nothing alive — drop the stale pid file so it can't linger forever.
+        if (is_file($pidFile)) {
+            @unlink($pidFile);
+        }
+
+        return false;
+    }
+
+    /**
+     * True when the playout process is alive but the HLS stream has stopped
+     * advancing (no fresh .m3u8 or segment for $maxStaleSeconds). A frozen
+     * ffmpeg otherwise looks "healthy" and would stall forever.
+     */
+    public function isStalled(AdminChannel $channel, int $maxStaleSeconds = 45): bool
+    {
+        if (! $this->isRunning($channel)) {
+            return false; // dead process — handled separately by the watchdog
+        }
+
+        $streamDir = $this->streamDir($channel);
+        if (! is_dir($streamDir)) {
+            return false;
+        }
+
+        $newest = 0;
+
+        $playlist = "{$streamDir}/index.m3u8";
+        if (is_file($playlist)) {
+            $newest = max($newest, (int) @filemtime($playlist));
+        }
+
+        foreach (glob("{$streamDir}/segment_*.ts") ?: [] as $seg) {
+            $newest = max($newest, (int) @filemtime($seg));
+        }
+
+        if ($newest === 0) {
+            // No segments yet — a recently launched playout gets a grace
+            // period to write its first segment before being called stalled.
+            $dirAge = time() - (int) @filemtime($streamDir);
+            return $dirAge > $maxStaleSeconds * 2;
+        }
+
+        return (time() - $newest) > $maxStaleSeconds;
     }
 
     /**
@@ -149,7 +332,207 @@ class MyChannelHlsService
         ]);
     }
 
-    // ─── Private helpers ──────────────────────────────────────────────────────
+    // ─── Prepare stage (normalize content) ──────────────────────────────────
+
+    /**
+     * Ensure every piece of playable content for a channel has a fresh
+     * prepared intermediate. Returns prepared/skipped/failed counts. Safe to
+     * call repeatedly — up-to-date files are skipped via a signature file.
+     */
+    public function prepareChannel(AdminChannel $channel, bool $force = false): array
+    {
+        $stats = ['prepared' => 0, 'skipped' => 0, 'failed' => []];
+        $slug  = $channel->channel_slug;
+
+        if (! $channel->is_my_channel) {
+            return $stats;
+        }
+
+        $this->ensureDirectory("{$this->normalizedRoot}/{$slug}");
+
+        $entries = MyChannelPlaylist::where('channel_id', $channel->id)
+            ->orderBy('order_index')
+            ->with('content')
+            ->get();
+
+        foreach ($entries as $entry) {
+            if (! $entry->content || ! $entry->content->file_path) {
+                continue;
+            }
+            $src = Storage::disk('public')->path($entry->content->file_path);
+            if (! File::exists($src)) {
+                continue;
+            }
+            try {
+                $preExists = is_file($this->preparedPathFor($slug, $entry->content->id));
+                $this->prepareFile($channel, $entry->content->id, $src, $entry, $force);
+                if ($force || ! $preExists) {
+                    $stats['prepared']++;
+                } else {
+                    $stats['skipped']++;
+                }
+            } catch (\Throwable $e) {
+                $stats['failed'][] = $entry->content->title . ': ' . $e->getMessage();
+                Log::error('Content prepare failed', [
+                    'channel_id' => $channel->id,
+                    'content_id' => $entry->content->id,
+                    'error'      => $e->getMessage(),
+                ]);
+            }
+        }
+
+        // Playout is strictly limited to playlist-tab items. Orphaned files
+        // in the upload directory are intentionally NOT part of the playout.
+
+        return $stats;
+    }
+
+    /**
+     * Transcode a single content record into the canonical playout format.
+     * Returns the absolute path of the prepared intermediate (existing file is
+     * reused when its signature matches the source + bake settings).
+     *
+     * @throws \RuntimeException when the transcode fails
+     */
+    public function prepareFile(
+        AdminChannel $channel,
+        int|string $contentId,
+        string $srcPath,
+        ?MyChannelPlaylist $entry = null,
+        bool $force = false
+    ): string {
+        $slug = $channel->channel_slug;
+        $this->ensureDirectory("{$this->normalizedRoot}/{$slug}");
+
+        $dest = $this->preparedPathFor($slug, $contentId);
+        $sig  = $dest . '.sig.json';
+
+        $resolution = $channel->output_resolution ?: '1280x720';
+        $bitrate    = (int) ($channel->output_bitrate ?: 2200);
+        $fps        = (int) ($channel->output_frame_rate ?: 25);
+        $height     = $this->resolutionHeight($resolution);
+        $device     = strtolower($channel->transcoding_device ?? 'cpu');
+
+        $start = 0;
+        $duration = 0;
+        if ($entry) {
+            if ((int) $entry->custom_duration > 0) {
+                $start    = (int) $entry->start_offset;
+                $duration = (int) $entry->custom_duration;
+            } elseif ((int) $entry->end_offset > 0) {
+                $start    = (int) $entry->start_offset;
+                $duration = (int) $entry->end_offset - (int) $entry->start_offset;
+            } elseif ((int) $entry->start_offset > 0) {
+                $start = (int) $entry->start_offset;
+            }
+        }
+
+        $signature = [
+            'src'  => realpath($srcPath),
+            'mtime' => filemtime($srcPath),
+            'size' => filesize($srcPath),
+            'fps'  => $fps,
+            'height' => $height,
+            'bitrate' => $bitrate,
+            'device'  => $device,
+            'start'   => $start,
+            'duration'=> $duration,
+        ];
+
+        if (! $force && is_file($dest) && is_file($sig)) {
+            $stored = json_decode((string) @file_get_contents($sig), true);
+            if (is_array($stored) && $stored === $signature) {
+                return $dest;
+            }
+        }
+
+        $tmp = $dest . '.tmp_' . getmypid() . '.mp4';
+
+        $videoCodec = ($device === 'gpu' && $this->hasNvenc())
+            ? "h264_nvenc -preset p4 -rc vbr -cq 26 -b:v 0 -maxrate {$bitrate}k -bufsize {$bitrate}k"
+            : "libx264 -preset veryfast -crf 23 -maxrate {$bitrate}k -bufsize {$bitrate}k";
+
+        $timeArgs = $duration > 0 ? ' -t ' . (int) $duration : '';
+
+        $cmd = sprintf(
+            '%s -y -hide_banner -loglevel warning -ss %d -i %s -map 0:v:0 -map 0:a:0? -vf %s -c:v %s -c:a aac -ac 2 -ar 48000 -b:a 128k%s -movflags +faststart %s',
+            $this->ffmpeg,
+            max(0, $start),
+            escapeshellarg($srcPath),
+            escapeshellarg("fps={$fps},scale=-2:{$height}:flags=lanczos,setsar=1,setpts=PTS-STARTPTS,format=yuv420p"),
+            $videoCodec,
+            $timeArgs,
+            escapeshellarg($tmp)
+        );
+
+        @unlink($tmp);
+        exec($cmd . ' 2>&1', $outLines, $rc);
+
+        if ($rc !== 0 || ! is_file($tmp) || filesize($tmp) < 1024) {
+            @unlink($tmp);
+            if ($rc !== 0) {
+                $err = implode(' | ', array_slice($outLines, -6));
+                throw new \RuntimeException("ffmpeg prepare failed rc={$rc}: {$err}");
+            }
+            throw new \RuntimeException('prepared output missing');
+        }
+
+        // Guarantee an audio track: a clip with no audio must not produce an
+        // intermediate that later breaks the playout's amix filter.
+        $this->ensureAudioTrack($tmp);
+
+        rename($tmp, $dest);
+        File::put($sig, json_encode($signature));
+
+        if (is_int($contentId)) {
+            MyChannelContent::whereKey($contentId)->update(['prepared_at' => now()]);
+        }
+
+        Log::info('Content prepared for playout', [
+            'channel_id'  => $channel->id,
+            'content_id'  => $contentId,
+            'dest'        => $dest,
+            'size'        => filesize($dest),
+            'est_duration_sec' => round(filesize($dest) / max(1, $bitrate * 1024 / 8), 1),
+        ]);
+
+        return $dest;
+    }
+
+    private function ensureAudioTrack(string $prepared): void
+    {
+        exec(
+            sprintf('%s -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 %s', $this->ffprobe, escapeshellarg($prepared)),
+            $hasAudio, $rc
+        );
+        if ($rc === 0 && ! empty(array_filter($hasAudio))) {
+            return;
+        }
+
+        $tmp = $prepared . '.noaud.tmp.mp4';
+        exec(
+            sprintf(
+                '%s -y -v error -i %s -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 -c:v copy -c:a aac -ac 2 -ar 48000 -b:a 128k -shortest -movflags +faststart %s',
+                $this->ffmpeg,
+                escapeshellarg($prepared),
+                escapeshellarg($tmp)
+            ),
+            $out, $rc
+        );
+        if ($rc === 0 && is_file($tmp) && filesize($tmp) > 1024) {
+            unlink($prepared);
+            rename($tmp, $prepared);
+        } elseif (is_file($tmp)) {
+            @unlink($tmp);
+        }
+    }
+
+    private function preparedPathFor(string $slug, int|string $id): string
+    {
+        return "{$this->normalizedRoot}/{$slug}/prepared_{$id}.mp4";
+    }
+
+    // ─── Overlay helpers ─────────────────────────────────────────────────────
 
     /**
      * Write ticker.txt and copy image assets to fixed filenames in the stream
@@ -207,7 +590,7 @@ class MyChannelHlsService
      * directory and all existing segments, relaunch from the next segment
      * number so HLS clients buffering the last ~12 segments see no gap.
      */
-    private function restartKeepingSegments(AdminChannel $channel): void
+    public function restartKeepingSegments(AdminChannel $channel): void
     {
         $streamDir = $this->streamDir($channel);
 
@@ -221,20 +604,15 @@ class MyChannelHlsService
         }
 
         // Kill current FFmpeg but leave stream dir intact
-        $pid = Cache::get($this->cacheKey($channel));
-        if ($pid) {
-            @exec("kill -TERM -{$pid} 2>/dev/null");
-            @exec("kill -TERM {$pid} 2>/dev/null");
-            Cache::forget($this->cacheKey($channel));
-        }
-        @exec("pkill -f " . escapeshellarg($streamDir) . " 2>/dev/null");
-        usleep(800000); // 0.8 s — let FFmpeg flush final segment
+        $pid = (int) Cache::get($this->cacheKey($channel));
+        $this->killPlayout($pid, $streamDir);
+        Cache::forget($this->cacheKey($channel));
 
         // Refresh image assets with new files before rebuilding script
         $this->writeOverlayAssets($streamDir, $channel);
 
         $playlist = $this->resolvePlaylist($channel);
-        $files    = $this->collectFiles($playlist);
+        $files    = $this->collectFiles($playlist, $channel);
         if (empty($files)) {
             return;
         }
@@ -247,7 +625,7 @@ class MyChannelHlsService
         }
     }
 
-    private function resolvePlaylist(AdminChannel $channel): \Illuminate\Support\Collection
+    private function resolvePlaylist(AdminChannel $channel): Collection
     {
         $items = MyChannelPlaylist::where('channel_id', $channel->id)
             ->orderBy('order_index')
@@ -263,9 +641,15 @@ class MyChannelHlsService
         return $items->values();
     }
 
-    private function collectFiles(\Illuminate\Support\Collection $playlist): array
+    /**
+     * Resolve the files ffmpeg should play. Prefers the prepared intermediate
+     * for each content record (uniform codec/CFR/audio) and falls back to the
+     * raw source when a prepared file is not (yet) available.
+     */
+    private function collectFiles(Collection $playlist, AdminChannel $channel): array
     {
-        $files = [];
+        $files        = [];
+        $slug         = $channel->channel_slug;
 
         foreach ($playlist as $content) {
             if (! $content || ! $content->file_path) {
@@ -276,20 +660,38 @@ class MyChannelHlsService
 
             if (! File::exists($absolute)) {
                 Log::warning('My channel content file missing, skipping', [
-                    'content_id' => $content->id,
+                    'content_id' => $content->id ?? null,
                     'path'       => $absolute,
                 ]);
                 continue;
             }
 
+            if ($content->id > 0) {
+                $prepared = $this->preparedPathFor($slug, (int) $content->id);
+                if (is_file($prepared)) {
+                    $files[] = $prepared;
+                    continue;
+                }
+            }
+
             $files[] = $absolute;
         }
 
-        return $files;
+        $files = array_values(array_unique($files));
+
+        // Trim the concat list to files that actually exist right now; a stale
+        // path in the middle would make the whole ffmpeg run abort.
+        return array_filter($files, fn ($f) => File::exists($f));
     }
 
     /**
      * Build the playout shell script.
+     *
+     * Timestamp design: input PTS resets at every concat boundary, which made
+     * the upstream ffmpeg (with -r CFR) duplicate thousands of frames and
+     * segfault NVENC after the first item boundary — the "video cuts off at
+     * the end" bug. The fps + setpts filters below rebuild the output timeline
+     * as a pure frame counter, so timestamps are strictly monotonic forever.
      *
      * Overlay design:
      *   - Logo / watermark: -i inputs pointing to fixed filenames in stream dir.
@@ -311,8 +713,14 @@ class MyChannelHlsService
         $gop        = $fps * 2;
 
         $concatPath  = "{$streamDir}/concat.txt";
+        // Repeat the file list 500 times so one ffmpeg run loops for days
+        // without needing a restart. The while true wrapper handles the rare
+        // case where ffmpeg exits after exhausting all repetitions or crashes.
+        // NOTE: -stream_loop -1 is intentionally NOT used — it is silently
+        // ignored by the concat demuxer and causes a segfault at EOF.
         $concatLines = array_map(fn ($f) => 'file ' . escapeshellarg($f), $files);
-        File::put($concatPath, implode("\n", $concatLines) . "\n");
+        $singlePass  = implode("\n", $concatLines) . "\n";
+        File::put($concatPath, str_repeat($singlePass, 500));
 
         [$extraInputs, $filterComplex, $hasImages] = $this->buildFiltergraph(
             $streamDir, $channel, $width, $height, $fps
@@ -321,25 +729,53 @@ class MyChannelHlsService
         $inputLines  = $hasImages ? $extraInputs . "\\\n    " : '';
         $startNum    = $startSegment > 0 ? "-start_number {$startSegment} " : '';
 
+        $videoCodec = (strtolower($channel->transcoding_device ?? 'cpu') === 'gpu' && $this->hasNvenc())
+            ? 'h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0'
+            : 'libx264 -preset ultrafast -tune zerolatency -crf 28 -threads 2';
+
         $script = <<<BASH
 #!/bin/sh
 STREAM_DIR="{$streamDir}"
 FFMPEG="{$ffmpeg}"
 CONCAT="{$concatPath}"
 
-exec "\$FFMPEG" -y -hide_banner -loglevel warning \\
-    -stream_loop -1 -f concat -safe 0 -re -i "\$CONCAT" \\
-    {$inputLines}-c:v libx264 -preset ultrafast -tune zerolatency -crf 28 -threads 2 \\
-    -maxrate {$bitrate}k -bufsize {$bitrate}k -r {$fps} -g {$gop} -pix_fmt yuv420p \\
-    -filter_complex "{$filterComplex}" \\
-    -map '[vout]' -map 0:a? \\
-    -c:a aac -b:a 128k -ac 2 -ar 48000 \\
-    -f hls -hls_time {$this->segmentDuration} -hls_list_size {$this->playlistSize} \\
-    -hls_flags independent_segments+delete_segments+append_list \\
-    -hls_allow_cache 0 \\
-    -hls_segment_type mpegts \\
-    {$startNum}-hls_segment_filename "\$STREAM_DIR/segment_%05d.ts" \\
-    "\$STREAM_DIR/index.m3u8" >> "\$STREAM_DIR/ffmpeg.log" 2>&1
+# Next segment number = highest segment on disk + 1. Keeps the HLS playlist
+# continuous across any crash/restart instead of resetting to 0.
+next_segment() {
+    last=\$(ls "\$STREAM_DIR"/segment_*.ts 2>/dev/null | sed 's/.*segment_0*//;s/\.ts\$//' | sort -n 2>/dev/null | tail -1)
+    if [ -n "\$last" ]; then
+        echo \$((last + 1))
+    else
+        echo 0
+    fi
+}
+
+while true; do
+    N=\$(next_segment)
+    if [ "\$N" -gt 0 ]; then
+        START_N="-start_number \$N"
+    else
+        START_N=""
+    fi
+    echo "PLAYOUT START seg=\$N \$(date +%s)" >> "\$STREAM_DIR/ffmpeg.log"
+    "\$FFMPEG" -y -hide_banner -loglevel warning \\
+        -fflags +genpts+igndts -f concat -safe 0 -re -i "\$CONCAT" \\
+        -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \\
+        {$inputLines}-c:v {$videoCodec} \\
+        -maxrate {$bitrate}k -bufsize {$bitrate}k -g {$gop} -pix_fmt yuv420p \\
+        -filter_complex "{$filterComplex}" \\
+        -map '[vout]' -map '[aout]' \\
+        -c:a aac -b:a 128k -ac 2 -ar 48000 \\
+        -f hls -hls_time {$this->segmentDuration} -hls_list_size {$this->playlistSize} \\
+        -hls_flags independent_segments+delete_segments+append_list \\
+        -hls_allow_cache 0 \\
+        -hls_segment_type mpegts \\
+        -max_muxing_queue_size 4096 \\
+        {$startNum}\$START_N -hls_segment_filename "\$STREAM_DIR/segment_%05d.ts" \\
+        "\$STREAM_DIR/index.m3u8" >> "\$STREAM_DIR/ffmpeg.log" 2>&1
+    echo "PLAYOUT EXIT rc=\$? \$(date +%s)" >> "\$STREAM_DIR/ffmpeg.log"
+    sleep 3
+done
 BASH;
 
         File::put($scriptPath, $script);
@@ -355,6 +791,8 @@ BASH;
      * reads them once at startup from the fixed filenames in the stream dir.
      * Ticker uses drawtext textfile+reload=1 so it re-reads ticker.txt every
      * frame — text changes take effect immediately with no restart.
+     * Audio is always mixed with anullsrc silence (clips without audio would
+     * otherwise abort amix) and normalized to a 48k sample counter.
      *
      * Returns [string $extraInputLines, string $filterComplex, bool $hasImages]
      */
@@ -363,8 +801,13 @@ BASH;
         $extraInputs = [];
         $filters     = [];
         $lastVideo   = '[vscaled]';
-        $inputIndex  = 1; // input 0 is the concat source
 
+        // anullsrc is always input index 1 (after concat); image overlays start at 2
+        $inputIndex  = 2;
+        $audioInputIndex = 1;
+
+        // Mix real audio (if present) with silent fallback so files without audio don't stall
+        $audioFilter = "[0:a][{$audioInputIndex}:a]amix=inputs=2:duration=first:dropout_transition=0,aresample=48000:async=1,asetpts=N/SR/TB[aout]";
         $filters[] = "[0:v]scale=-2:{$height}:flags=lanczos,setsar=1[vscaled]";
 
         // ── Logo ─────────────────────────────────────────────────────────────
@@ -444,9 +887,10 @@ BASH;
             $lastVideo  = '[vclock]';
         }
 
-        // Rename final label to [vout]
-        $last      = array_pop($filters);
-        $filters[] = preg_replace('/\[[a-z_]+\]$/', '[vout]', $last);
+        // Rebuild video PTS as a strict frame counter so the concat boundaries
+        // stay timestamp-continuous (fixes the old NVENC dup/segfault/cut).
+        $filters[] = "{$lastVideo}fps={$fps},setpts=N/({$fps}*TB)[vout]";
+        $filters[] = $audioFilter;
 
         $hasImages       = ! empty($extraInputs);
         $extraInputLines = $hasImages ? implode(" \\\n    ", $extraInputs) : '';
@@ -526,6 +970,12 @@ BASH;
 
         $pid = (int) (end($output) ?: 0);
 
+        if ($pid > 0) {
+            // Persist the PID next to the stream so liveness checks survive
+            // cache flushes and cross-process cache drivers.
+            @file_put_contents("{$streamDir}/playout.pid", (string) $pid);
+        }
+
         return $pid > 0 ? $pid : null;
     }
 
@@ -549,6 +999,16 @@ BASH;
     private function cacheKey(AdminChannel $channel): string
     {
         return "mychannel_hls:{$channel->id}";
+    }
+
+    private function hasNvenc(): bool
+    {
+        static $cached;
+        if ($cached === null) {
+            exec('ffmpeg -hide_banner -encoders 2>/dev/null', $output, $exit);
+            $cached = $exit === 0 && str_contains(implode("\n", $output), 'h264_nvenc');
+        }
+        return $cached;
     }
 
     private function ensureDirectory(string $path): void

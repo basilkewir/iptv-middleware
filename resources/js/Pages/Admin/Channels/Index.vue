@@ -10,10 +10,10 @@
           <button @click="scanAllQualities" class="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg transition flex items-center gap-2">
             <ScanLine class="w-4 h-4" /> Scan All Qualities
           </button>
-          <Link :href="route('admin.channels.import')" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition flex items-center gap-2">
+          <Link :href="route('admin.channels.import', {}, false)" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition flex items-center gap-2">
             <Upload class="w-4 h-4" /> Bulk Import
           </Link>
-          <Link :href="route('admin.channels.create')" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center gap-2">
+          <Link :href="route('admin.channels.create', {}, false)" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center gap-2">
             <Plus class="w-4 h-4" /> Add Channel
           </Link>
         </div>
@@ -91,22 +91,12 @@
                 <h3 class="text-white font-semibold truncate">{{ channel.name }}</h3>
                 <QualityBadge v-if="channel.quality_level" :quality="channel.quality_level" :showLabel="true" size="sm" />
               </div>
-              <div class="flex items-center gap-2">
-                <span class="px-2 py-1 text-xs rounded-full shrink-0" :class="getSourceStatusClass(channel)">
-                  {{ getSourceStatusText(channel) }}
-                </span>
-                <select
-                  v-if="channel.backup_url_1 || channel.backup_url_2"
-                  :value="channel.active_source_index ?? 0"
-                  @change="switchSource(channel, parseInt($event.target.value))"
+              <div class="flex items-center gap-2 flex-wrap">
+                <ChannelSources
+                  :channel="channel"
                   :disabled="switchingSource[channel.id]"
-                  class="px-1 py-0.5 text-xs bg-gray-700 border border-gray-600 rounded text-gray-300 focus:outline-none focus:border-indigo-500 max-w-[110px]"
-                  title="Switch source"
-                >
-                  <option :value="0">Primary</option>
-                  <option v-if="channel.backup_url_1" :value="1">Backup 1</option>
-                  <option v-if="channel.backup_url_2" :value="2">Backup 2</option>
-                </select>
+                  @switch="(idx) => switchSource(channel, idx)"
+                />
                 <span class="px-2 py-1 text-xs rounded-full shrink-0" :class="channel.is_active ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'">
                   {{ channel.is_active ? 'Active' : 'Inactive' }}
                 </span>
@@ -127,7 +117,7 @@
                 <Square class="w-4 h-4" />
               </button>
               <button @click="testChannel(channel)" class="px-3 py-2 bg-blue-600/20 hover:bg-blue-600 text-blue-400 hover:text-white rounded-lg text-sm transition">Test</button>
-              <Link :href="route('admin.channels.edit', channel.id)" class="flex-1 px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm transition text-center">Edit</Link>
+              <Link :href="route('admin.channels.edit', channel.id, false)" class="flex-1 px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg text-sm transition text-center">Edit</Link>
               <button @click="confirmDelete(channel)" class="px-3 py-2 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white rounded-lg text-sm transition">Delete</button>
             </div>
           </div>
@@ -166,23 +156,11 @@
               </td>
               <td class="px-4 py-3 text-gray-400 text-sm">{{ channel.categories?.[0]?.name || '-' }}</td>
               <td class="px-4 py-3">
-                <div class="flex items-center gap-2">
-                  <span class="px-2 py-1 text-xs rounded-full" :class="getSourceStatusClass(channel)">
-                    {{ getSourceStatusText(channel) }}
-                  </span>
-                  <select
-                    v-if="channel.backup_url_1 || channel.backup_url_2"
-                    :value="channel.active_source_index ?? 0"
-                    @change="switchSource(channel, parseInt($event.target.value))"
-                    :disabled="switchingSource[channel.id]"
-                    class="px-1 py-0.5 text-xs bg-gray-700 border border-gray-600 rounded text-gray-300 focus:outline-none focus:border-indigo-500"
-                    title="Switch source"
-                  >
-                    <option :value="0">Primary</option>
-                    <option v-if="channel.backup_url_1" :value="1">Backup 1</option>
-                    <option v-if="channel.backup_url_2" :value="2">Backup 2</option>
-                  </select>
-                </div>
+                <ChannelSources
+                  :channel="channel"
+                  :disabled="switchingSource[channel.id]"
+                  @switch="(idx) => switchSource(channel, idx)"
+                />
               </td>
               <td class="px-4 py-3">
                 <span class="px-2 py-1 text-xs rounded-full" :class="channel.is_active ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'">
@@ -203,7 +181,7 @@
                   <button @click="toggleStatus(channel)" class="p-1.5 hover:bg-gray-600 rounded transition text-gray-400 hover:text-white" :title="channel.is_active ? 'Deactivate' : 'Activate'">
                     <Power class="w-4 h-4" :class="channel.is_active ? 'text-green-400' : 'text-red-400'" />
                   </button>
-                  <Link :href="route('admin.channels.edit', channel.id)" class="p-1.5 hover:bg-gray-600 rounded transition text-gray-400 hover:text-white"><Pencil class="w-4 h-4" /></Link>
+                  <Link :href="route('admin.channels.edit', channel.id, false)" class="p-1.5 hover:bg-gray-600 rounded transition text-gray-400 hover:text-white"><Pencil class="w-4 h-4" /></Link>
                   <button @click="confirmDelete(channel)" class="p-1.5 hover:bg-red-600/20 rounded transition text-gray-400 hover:text-red-400"><Trash2 class="w-4 h-4" /></button>
                 </div>
               </td>
@@ -213,13 +191,21 @@
       </div>
 
       <!-- Pagination -->
-      <div v-if="channels?.links" class="flex items-center justify-between">
+      <div v-if="channels && channels.last_page > 1" class="flex items-center justify-between flex-wrap gap-3">
         <p class="text-gray-400 text-sm">Showing {{ channels.from }} to {{ channels.to }} of {{ channels.total }} channels</p>
         <div class="flex gap-2">
-          <Link v-for="page in channels.links" :key="page.label" :href="page.url || '#'" class="px-3 py-1 rounded-lg text-sm"
-            :class="page.active ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'" preserve-scroll>
+          <button
+            v-for="page in paginationItems"
+            :key="'p' + page.page + '-' + page.label"
+            @click="goToPage(page.page)"
+            :disabled="page.page === null || page.active"
+            class="px-3 py-1 rounded-lg text-sm transition disabled:cursor-not-allowed"
+            :class="page.active
+              ? 'bg-indigo-600 text-white cursor-default'
+              : 'bg-gray-700 text-gray-400 hover:bg-gray-600 cursor-pointer'"
+          >
             {{ page.label }}
-          </Link>
+          </button>
         </div>
       </div>
 
@@ -259,21 +245,23 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { Link, router } from '@inertiajs/vue3'
+import { debounce } from 'lodash'
 import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
 import QualityBadge from '@/Components/QualityBadge.vue'
 import HLSPlayer from '@/Components/Player/HLSPlayer.vue'
+import ChannelSources from '@/Components/ChannelSources.vue'
 import { Search, Plus, Upload, Tv, Pencil, Trash2, Power, LayoutGrid, List, ScanLine, RefreshCw, Square, Activity } from 'lucide-vue-next'
 
-const props = defineProps({ channels: Object, categories: Array })
+const props = defineProps({ channels: Object, categories: Array, filters: Object })
 
-const search = ref('')
-const filterType = ref('')
-const filterCategory = ref('')
-const filterStatus = ref('')
-const filterQuality = ref('')
+const search = ref(props.filters?.search || '')
+const filterType = ref(props.filters?.type || '')
+const filterCategory = ref(props.filters?.category_id ? String(props.filters.category_id) : '')
+const filterStatus = ref(props.filters?.status !== undefined && props.filters?.status !== '' ? String(props.filters.status) : '')
+const filterQuality = ref(props.filters?.quality || '')
 const viewMode = ref('grid')
 const selectedChannels = ref([])
 const deleteTarget = ref(null)
@@ -293,29 +281,56 @@ const toggleSelectAll = () => {
   else selectedChannels.value = filteredChannels.value.map(c => c.id)
 }
 
-const filteredChannels = computed(() => {
-  const data = props.channels?.data || []
-  return data.filter(channel => {
-    if (search.value) {
-      const q = search.value.toLowerCase()
-      if (!channel.name.toLowerCase().includes(q)) return false
-    }
-    if (filterType.value && channel.stream_type !== filterType.value) return false
-    if (filterCategory.value && !channel.categories?.some(c => c.id == filterCategory.value)) return false
-    if (filterStatus.value !== '' && String(channel.is_active) !== filterStatus.value) return false
-    if (filterQuality.value) {
-      if (filterQuality.value === 'unknown') {
-        if (channel.quality_level) return false
-      } else {
-        if (channel.quality_level !== filterQuality.value) return false
-      }
-    }
-    return true
+const filteredChannels = computed(() => (props.channels?.data || []))
+
+const buildParams = () => {
+  const params = {}
+  if (search.value) params.search = search.value
+  if (filterType.value) params.type = filterType.value
+  if (filterCategory.value) params.category_id = filterCategory.value
+  if (filterStatus.value !== '') params.status = filterStatus.value
+  if (filterQuality.value) params.quality = filterQuality.value
+  return params
+}
+
+const goToPage = (page) => {
+  if (!page) return
+  router.get(route('admin.channels.index', {}, false), { ...buildParams(), page }, {
+    preserveState: true,
+    preserveScroll: true,
+    only: ['channels', 'filters'],
   })
+}
+
+const applyFilters = () => {
+  router.get(route('admin.channels.index', {}, false), buildParams(), {
+    preserveState: true,
+    preserveScroll: true,
+    only: ['channels', 'filters'],
+  })
+}
+
+const debouncedSearch = debounce(applyFilters, 400)
+
+watch(search, debouncedSearch)
+watch([filterType, filterCategory, filterStatus, filterQuality], applyFilters)
+
+const paginationItems = computed(() => {
+  if (!props.channels || props.channels.last_page <= 1) return []
+  const { current_page, last_page } = props.channels
+  const items = []
+  items.push({ label: '‹ Prev', page: current_page > 1 ? current_page - 1 : null, active: false })
+  const start = Math.max(1, current_page - 2)
+  const end = Math.min(last_page, start + 4)
+  for (let p = start; p <= end; p++) {
+    items.push({ label: String(p), page: p, active: p === current_page })
+  }
+  items.push({ label: 'Next ›', page: current_page < last_page ? current_page + 1 : null, active: false })
+  return items
 })
 
 const toggleStatus = (channel) => {
-  router.post(route('admin.channels.toggle-status', channel.id), {}, { preserveScroll: true })
+  router.post(route('admin.channels.toggle-status', channel.id, false), {}, { preserveScroll: true })
 }
 
 const testChannel = (channel) => { testModal.value = channel }
@@ -324,37 +339,43 @@ const confirmDelete = (channel) => { deleteTarget.value = channel }
 
 const performDelete = () => {
   if (deleteTarget.value) {
-    router.delete(route('admin.channels.destroy', deleteTarget.value.id))
+    router.delete(route('admin.channels.destroy', deleteTarget.value.id, false))
     deleteTarget.value = null
   }
 }
 
 const bulkToggleStatus = (active) => {
-  selectedChannels.value.forEach(id => {
-    router.post(route('admin.channels.toggle-status', id), { is_active: active }, { preserveScroll: true })
+  if (selectedChannels.value.length === 0) return
+  router.post(route('admin.admin.channels.bulk-toggle-status'), { ids: selectedChannels.value, is_active: active }, {
+    preserveScroll: true,
+    onSuccess: () => {
+      selectedChannels.value = []
+    },
   })
-  selectedChannels.value = []
 }
 
 const bulkDelete = () => {
+  if (selectedChannels.value.length === 0) return
   if (confirm(`Delete ${selectedChannels.value.length} channels?`)) {
-    selectedChannels.value.forEach(id => {
-      router.delete(route('admin.channels.destroy', id), { preserveScroll: true })
+    router.post(route('admin.admin.channels.bulk-delete'), { ids: selectedChannels.value }, {
+      preserveScroll: true,
+      onSuccess: () => {
+        selectedChannels.value = []
+      },
     })
-    selectedChannels.value = []
   }
 }
 
 const scanAllQualities = () => {
   if (confirm('Scan quality for all channels? This may take a while.')) {
-    router.post(route('admin.quality.scan.all.channels'))
+    router.post(route('admin.quality.scan.all.channels', {}, false))
   }
 }
 
 const checkSource = async (channel) => {
   checkingChannels.value[channel.id] = true
   try {
-    const response = await fetch(route('admin.channels.check-source', channel.id), {
+    const response = await fetch(route('admin.channels.check-source', channel.id, false), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -364,10 +385,20 @@ const checkSource = async (channel) => {
     })
     const data = await response.json()
     if (data.success) {
-      sourceStatuses.value[channel.id] = data.data.status
-      channel.source_status = data.data.status
-      channel.source_last_checked_at = data.data.last_checked_at
-      channel.source_check_attempts = data.data.check_attempts
+      const d = data.data
+      sourceStatuses.value[channel.id] = {
+        source_status: d.status,
+        source_last_error: d.details?.error || null,
+        active_source_index: d.active_source_index ?? channel.active_source_index,
+        active_url_type: channel.active_url_type,
+      }
+      channel.source_status = d.status
+      channel.source_last_checked_at = d.last_checked_at
+      channel.source_check_attempts = d.check_attempts
+      channel.active_source_index = d.active_source_index ?? channel.active_source_index
+      if (Array.isArray(d.source_statuses)) {
+        channel.source_statuses = d.source_statuses
+      }
     }
   } catch (e) {
     console.error('Health check failed:', e)
@@ -376,10 +407,10 @@ const checkSource = async (channel) => {
   }
 }
 
-const refreshSource = async (channel) => {
-  refreshingChannels.value[channel.id] = true
+const probeSources = async (channel) => {
+  checkingChannels.value[channel.id] = true
   try {
-    const response = await fetch(route('admin.channels.refresh-source', channel.id), {
+    const response = await fetch(route('admin.channels.probe-sources', channel.id, false), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -389,10 +420,47 @@ const refreshSource = async (channel) => {
     })
     const data = await response.json()
     if (data.success) {
-      sourceStatuses.value[channel.id] = data.data.status
-      channel.source_status = data.data.status
-      channel.source_last_checked_at = data.data.last_checked_at
-      channel.source_check_attempts = data.data.check_attempts
+      const d = data.data
+      channel.source_status = d.status
+      channel.source_last_checked_at = d.last_checked_at
+      channel.sources_last_probed_at = d.last_checked_at
+      if (Array.isArray(d.source_statuses)) {
+        channel.source_statuses = d.source_statuses
+      }
+    }
+  } catch (e) {
+    console.error('Source probe failed:', e)
+  } finally {
+    checkingChannels.value[channel.id] = false
+  }
+}
+
+const refreshSource = async (channel) => {
+  refreshingChannels.value[channel.id] = true
+  try {
+    const response = await fetch(route('admin.channels.refresh-source', channel.id, false), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+      },
+    })
+    const data = await response.json()
+    if (data.success) {
+      const d = data.data
+      sourceStatuses.value[channel.id] = {
+        source_status: d.status,
+        source_last_error: null,
+        active_source_index: channel.active_source_index,
+        active_url_type: channel.active_url_type,
+      }
+      channel.source_status = d.status
+      channel.source_last_checked_at = d.last_checked_at
+      channel.source_check_attempts = d.check_attempts
+      if (Array.isArray(d.source_statuses)) {
+        channel.source_statuses = d.source_statuses
+      }
     }
   } catch (e) {
     console.error('Refresh failed:', e)
@@ -406,7 +474,7 @@ const switchingSource = ref({})
 const switchSource = async (channel, sourceIndex) => {
   switchingSource.value[channel.id] = true
   try {
-    const response = await fetch(route('admin.channels.switch-source', channel.id), {
+    const response = await fetch(route('admin.channels.switch-source', channel.id, false), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -420,6 +488,9 @@ const switchSource = async (channel, sourceIndex) => {
       channel.active_source_index = data.data.source_index
       channel.source_status = data.data.probe?.status || 'unknown'
       sourceStatuses.value[channel.id] = data.data.probe?.status || 'unknown'
+      if (Array.isArray(data.data.source_statuses)) {
+        channel.source_statuses = data.data.source_statuses
+      }
     }
   } catch (e) {
     console.error('Source switch failed:', e)
@@ -432,7 +503,7 @@ const stopSource = async (channel) => {
   if (!confirm(`Stop channel "${channel.name}"?`)) return
   stoppingChannels.value[channel.id] = true
   try {
-    const response = await fetch(route('admin.channels.stop-source', channel.id), {
+    const response = await fetch(route('admin.channels.stop-source', channel.id, false), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -452,46 +523,31 @@ const stopSource = async (channel) => {
   }
 }
 
-const getSourceStatusClass = (channel) => {
-  const status = sourceStatuses.value[channel.id] || channel.source_status
-  if (status === 'online') return 'bg-green-500/20 text-green-400'
-  if (status === 'offline') return 'bg-red-500/20 text-red-400'
-  return 'bg-gray-500/20 text-gray-400'
-}
-
-const getSourceStatusText = (channel) => {
-  const status = sourceStatuses.value[channel.id] || channel.source_status
-  const idx = channel.active_source_index ?? 0
-  const labels = ['Primary', 'Backup 1', 'Backup 2']
-  const label = labels[idx] || 'Primary'
-  if (status === 'online') return label
-  if (status === 'offline') return 'Offline'
-  return 'Unknown'
-}
-
-const getSourceLabel = (channel) => {
-  const idx = channel.active_source_index ?? 0
-  return ['Primary', 'Backup 1', 'Backup 2'][idx] || 'Primary'
-}
-
 const fetchSourceStatuses = async () => {
   const ids = (props.channels?.data || []).map(c => c.id)
   if (!ids.length) return
   try {
     const qs = ids.map(id => `ids[]=${id}`).join('&')
-    const resp = await fetch(route('admin.channels.source-statuses') + '?' + qs, {
+    const resp = await fetch(route('admin.channels.source-statuses', {}, false) + '?' + qs, {
       headers: { 'X-Requested-With': 'XMLHttpRequest' },
     })
     const json = await resp.json()
     if (json.data) {
       json.data.forEach(s => {
-        sourceStatuses.value[s.id] = s.source_status
+        sourceStatuses.value[s.id] = s
         const ch = (props.channels?.data || []).find(c => c.id === s.id)
         if (ch) {
           ch.source_status = s.source_status
           ch.source_last_checked_at = s.source_last_checked_at
           ch.source_check_attempts = s.source_check_attempts
           ch.active_source_index = s.active_source_index
+          ch.active_stream_url = s.active_stream_url
+          ch.active_url_type = s.active_url_type
+          ch.source_last_error = s.source_last_error
+          ch.sources_last_probed_at = s.sources_last_probed_at
+          if (Array.isArray(s.source_statuses)) {
+            ch.source_statuses = s.source_statuses
+          }
         }
       })
     }

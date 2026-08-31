@@ -18,6 +18,7 @@ class ScanMulticastChannels extends Command
         {--local-addr= : Local interface IP used to join the multicast group}
         {--import : Create a Channel row for every program found}
         {--select= : Comma-separated list of program IDs to import (use with --import; e.g. 3,7,12)}
+        {--name-map= : Comma-separated program_number=ChannelName overrides, e.g. \\"104=CRTV,1=RTS 1\\"}
         {--category= : Content category id assigned to imported channels}
         {--timeout=15 : Seconds to wait for the PAT/PMT before giving up}';
 
@@ -113,13 +114,22 @@ class ScanMulticastChannels extends Command
             $this->line(sprintf('Selected %d of %d program(s) for import.', count($programs), count($programIds)));
         }
 
-        $imported = 0;
+                        $imported = 0;
         $skipped = 0;
-        $nextChannelNumber = (int) Channel::max('channel_number') + 1;
+
+        // Build a program_number => ChannelName override map from --name-map.
+        // Any program not listed in the map still falls back to the service_name
+        // embedded in the TS, or "Multicast Program <pid>" if unnamed.
+        $nameMap = $this->parseNameMap((string) $this->option('name-map'));
 
         foreach ($programs as $program) {
             $programId = (int) $program['program_id'];
-            $name = trim($program['tags']['service_name'] ?? $program['tags']['service_provider'] ?? '')
+
+            // Prefer the caller-supplied name for this program, otherwise the
+            // service_name/service_provider tag embedded in the MPEG-TS, and
+            // finally a generic fallback.
+            $name = $nameMap[$programId]
+                ?? trim($program['tags']['service_name'] ?? $program['tags']['service_provider'] ?? '')
                 ?: 'Multicast Program ' . $programId;
 
             $existing = Channel::where('stream_url', $url)
@@ -133,8 +143,9 @@ class ScanMulticastChannels extends Command
             }
 
             // Push the UDP program into Flussonic and get back its HLS URL.
-            // The stream name is "ch-{channel_number}" — stable and human-readable.
-            $streamName = 'ch-' . $nextChannelNumber;
+            // The stream name embeds the MPEG-TS program (PAT) number for
+            // stable, human-readable identification in Flussonic.
+            $streamName = 'ch-' . $programId . '-' . Str::slug($name);
             $hlsUrl     = $url; // fallback: keep raw UDP if Flussonic is unreachable
 
             try {
@@ -147,7 +158,7 @@ class ScanMulticastChannels extends Command
             $channel = Channel::create([
                 'name'           => $name,
                 'slug'           => $this->uniqueSlug($name),
-                'channel_number' => $nextChannelNumber++,
+                'channel_number' => $programId,
                 'stream_url'     => $hlsUrl,
                 'stream_type'    => (str_starts_with($hlsUrl, 'udp://') || str_starts_with($hlsUrl, 'rtp://')) ? 'udp' : 'hls',
                 'program_number' => $programId,
@@ -172,6 +183,39 @@ class ScanMulticastChannels extends Command
         return self::SUCCESS;
     }
 
+    /**
+     * Parse a --name-map value like "104=CRTV,1=RTS 1" into a
+     * [program_number => ChannelName] array. Non-numeric keys are silently
+     * skipped so partial maps still work.
+     *
+     * @return array<int, string>
+     */
+    private function parseNameMap(string $map): array
+    {
+        $result = [];
+
+        if (trim($map) === '') {
+            return $result;
+        }
+
+        foreach (explode(',', $map) as $entry) {
+            $entry = trim($entry);
+
+            if ($entry === '' || ! str_contains($entry, '=')) {
+                continue;
+            }
+
+            [$key, $value] = explode('=', $entry, 2);
+            $key = trim($key);
+            $value = trim($value);
+
+            if (ctype_digit($key) && $value !== '') {
+                $result[(int) $key] = $value;
+            }
+        }
+
+        return $result;
+    }
     private function uniqueSlug(string $name): string
     {
         $slug = Str::slug($name);

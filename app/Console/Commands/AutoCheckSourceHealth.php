@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Http\Controllers\XtreamController;
 use App\Models\Channel;
 use App\Services\StreamingService\SourceHealthCheckService;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -64,6 +66,13 @@ class AutoCheckSourceHealth extends Command
             $statusLabel = "ch#{$channel->channel_number} {$channel->name}";
             $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
 
+            // Skip channels the admin has manually pinned to a backup source.
+            // Auto-health-check must not fight manual operator decisions.
+            if (Cache::has("channel:manual_override:{$channel->id}")) {
+                $this->line("  {$statusLabel} — skipped (manual override active)");
+                continue;
+            }
+
             // Probe the currently active source
             $result = $healthCheck->checkSource($channel);
             $fresh = $channel->fresh();
@@ -91,23 +100,16 @@ class AutoCheckSourceHealth extends Command
                 continue;
             }
 
-            // Only attempt auto-restart for UDP/multicast sources after
-            // 3 consecutive failures. HTTP/HLS sources that go offline
-            // are just logged — restarting the ingest won't fix an
-            // upstream outage.
+            // Try failover to backup URLs immediately on first offline detection.
+            // The watchdog (channels:watchdog) already enforces a 10s grace period
+            // before switching, so no additional attempt counter is needed here.
             $isAutoRestartable = $this->shouldAutoRestart($fresh, $sourceUrl);
 
-            if ($isAutoRestartable && $fresh->source_check_attempts >= 3) {
-                $this->line("    Auto-restarting UDP ingest (3 consecutive failures)...");
-                $restartResult = $healthCheck->manualRefresh($fresh);
-
-                if ($restartResult['success'] ?? false) {
-                    $this->info("    Restarted successfully");
-                    $restarted++;
-                    continue;
-                }
-
-                $this->warn("    Restart failed, trying backup sources...");
+            if ($isAutoRestartable) {
+                $this->line("    Force-restarting UDP group reader...");
+                app(XtreamController::class)->restartHlsStream($fresh);
+                $restarted++;
+                continue;
             }
 
             // Try failover to backup URLs (works for all source types)

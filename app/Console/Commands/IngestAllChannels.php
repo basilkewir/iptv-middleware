@@ -33,6 +33,21 @@ class IngestAllChannels extends Command
 
         foreach ($channels as $channel) {
             $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+
+            // UDP/RTP channels are ingested by Flussonic — skip local ffmpeg.
+            // active_stream_url will already point to Flussonic's HLS output
+            // after channels:push-udp-to-flussonic has run.
+            $rawUrl = $channel->stream_url ?? '';
+            if (str_starts_with($rawUrl, 'udp://') || str_starts_with($rawUrl, 'rtp://')) {
+                $this->line(sprintf(
+                    '  - channel %d (#%s) %s [skipped — Flussonic]',
+                    $channel->id,
+                    $channel->channel_number,
+                    $channel->name ?: '(no name)'
+                ));
+                continue;
+            }
+
             $xtream->ensureHlsStream(
                 (int) $channel->id,
                 $sourceUrl,

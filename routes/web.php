@@ -227,6 +227,12 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
         Route::put('/channels/admin/{channel}/my-channel/content/{content}', [AdminChannelController::class, 'updateContent'])->name('channels.my-channel.content.update');
         Route::delete('/channels/admin/{channel}/my-channel/content/{content}', [AdminChannelController::class, 'destroyContent'])->name('channels.my-channel.content.destroy');
 
+        // ─── My Channel Media Folders API ───────────────────────────────────
+        Route::get('/channels/admin/{channel}/my-channel/folders', [AdminChannelController::class, 'myChannelFolders'])->name('channels.my-channel.folders');
+        Route::post('/channels/admin/{channel}/my-channel/folders', [AdminChannelController::class, 'storeMyChannelFolder'])->name('channels.my-channel.folders.store');
+        Route::put('/channels/admin/{channel}/my-channel/folders/{folder}', [AdminChannelController::class, 'updateMyChannelFolder'])->name('channels.my-channel.folders.update');
+        Route::delete('/channels/admin/{channel}/my-channel/folders/{folder}', [AdminChannelController::class, 'destroyMyChannelFolder'])->name('channels.my-channel.folders.destroy');
+
         // ─── My Channel Playlist API ────────────────────────────────────────
         Route::get('/channels/admin/{channel}/my-channel/playlist', [AdminChannelController::class, 'getMyChannelPlaylist'])->name('channels.my-channel.playlist');
         Route::post('/channels/admin/{channel}/my-channel/playlist', [AdminChannelController::class, 'addToPlaylist'])->name('channels.my-channel.playlist.store');
@@ -262,18 +268,25 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
             ]);
         })->name('channels.import');
         Route::post('/channels/import', [ChannelController::class, 'bulkImport'])->name('channels.import.store');
+        Route::get('/channels/multicast-scan', [\App\Http\Controllers\Admin\MulticastScanController::class, 'index'])->name('channels.multicast-scan');
+        Route::post('/channels/multicast-scan/probe', [\App\Http\Controllers\Admin\MulticastScanController::class, 'scan'])->name('channels.multicast-scan.probe');
+        Route::post('/channels/multicast-scan/import', [\App\Http\Controllers\Admin\MulticastScanController::class, 'import'])->name('channels.multicast-scan.import');
         Route::get('/channels/{channel}/edit', [ChannelController::class, 'show'])->name('channels.edit');
         Route::post('/channels', [ChannelController::class, 'store'])->name('channels.store');
         Route::put('/channels/{channel}', [ChannelController::class, 'update'])->name('channels.update');
         Route::delete('/channels/{channel}', [ChannelController::class, 'destroy'])->name('channels.destroy');
+        Route::post('/channels/bulk-delete', [ChannelController::class, 'bulkDelete'])->name('channels.bulk-delete');
         Route::post('/channels/{channel}/toggle-status', [ChannelController::class, 'toggleStatus'])->name('channels.toggle-status');
         Route::post('/channels/{channel}/test-stream', [ChannelController::class, 'testStream'])->name('channels.test-stream');
+        Route::post('/channels/{channel}/verify-youtube', [ChannelController::class, 'verifyYouTube'])->name('channels.verify-youtube');
         Route::post('/channels/{channel}/check-source', [ChannelController::class, 'checkSource'])->name('channels.check-source');
+        Route::post('/channels/{channel}/probe-sources', [ChannelController::class, 'probeSources'])->name('channels.probe-sources');
         Route::post('/channels/{channel}/refresh-source', [ChannelController::class, 'refreshSource'])->name('channels.refresh-source');
         Route::post('/channels/{channel}/stop-source', [ChannelController::class, 'stopSource'])->name('channels.stop-source');
         Route::post('/channels/{channel}/switch-source', [ChannelController::class, 'switchSource'])->name('channels.switch-source');
         Route::get('/channels/source-statuses', [ChannelController::class, 'sourceStatuses'])->name('channels.source-statuses');
         Route::post('/channels/upload-logo', [ChannelController::class, 'uploadLogo'])->name('channels.upload-logo');
+        Route::post('/channels/{channel}/refresh-ingest', [\App\Http\Controllers\Admin\DashboardController::class, 'refreshIngest'])->name('channels.refresh-ingest');
 
         // ─── Categories ──────────────────────────────────────────────────
         Route::get('/categories', [CategoryController::class, 'index'])->name('categories.index');

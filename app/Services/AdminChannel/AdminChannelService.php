@@ -144,6 +144,7 @@ class AdminChannelService
                 'shuffle_mode' => $data['shuffle_mode'] ?? false,
                 'transition_type' => $data['transition_type'] ?? 'cut',
                 'transition_duration' => $data['transition_duration'] ?? 2,
+                'transcoding_device' => $data['transcoding_device'] ?? null,
                 'enable_ticker' => $data['enable_ticker'] ?? false,
                 'ticker_text' => $data['ticker_text'] ?? null,
                 'ticker_speed' => $data['ticker_speed'] ?? 30,

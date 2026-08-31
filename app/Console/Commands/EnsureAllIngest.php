@@ -50,7 +50,18 @@ class EnsureAllIngest extends Command
 
         foreach ($adminChannels as $channel) {
             if ($this->isPlayoutAlive($channel)) {
-                $this->line("  OK {$channel->channel_name}");
+                if ($hls->isStalled($channel) && $channel->broadcast_status === 'live') {
+                    $this->line("  RELAUNCH {$channel->channel_name} (stalled)");
+                    $hls->restartKeepingSegments($channel);
+                } else {
+                    $this->line("  OK {$channel->channel_name}");
+                }
+                continue;
+            }
+
+            // Respect explicit stop: don't auto-start a channel the admin ended.
+            if ($channel->broadcast_status !== 'live') {
+                $this->line("  SKIP {$channel->channel_name} (stopped)");
                 continue;
             }
 

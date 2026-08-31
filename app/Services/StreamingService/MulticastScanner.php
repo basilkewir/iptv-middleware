@@ -76,7 +76,10 @@ class MulticastScanner
 
         foreach ($programs as &$program) {
             $programId = (int) $program['program_id'];
-            $owned = array_values(array_filter(
+
+            // ffprobe nests streams inside each program object under 'streams';
+            // fall back to top-level streams filtered by program_id.
+            $owned = $program['streams'] ?? array_values(array_filter(
                 $streams,
                 fn ($s) => (int) ($s['program_id'] ?? -1) === $programId
             ));
@@ -89,8 +92,8 @@ class MulticastScanner
 
                 if ($type === 'video' && $video === null) {
                     $video = [
-                        'codec' => $stream['codec_name'] ?? null,
-                        'width' => isset($stream['width']) ? (int) $stream['width'] : null,
+                        'codec'  => $stream['codec_name'] ?? null,
+                        'width'  => isset($stream['width'])  ? (int) $stream['width']  : null,
                         'height' => isset($stream['height']) ? (int) $stream['height'] : null,
                     ];
                 } elseif ($type === 'audio') {
@@ -110,7 +113,7 @@ class MulticastScanner
         $input = escapeshellarg($this->buildInputUrl($url, $localAddress));
 
         $base = sprintf(
-            '%s -v quiet -print_format json -show_programs -show_streams -rw_timeout 30000000 -probesize 1M -analyzeduration 1M %s 2>&1',
+            '%s -v quiet -print_format json -show_programs -show_streams -rw_timeout 30000000 -probesize 5M -analyzeduration 5M %s 2>&1',
             escapeshellarg($this->ffprobe),
             $input
         );

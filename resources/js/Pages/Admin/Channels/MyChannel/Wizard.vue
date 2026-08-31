@@ -2,7 +2,7 @@
   <AdminLayout>
     <div class="p-6 max-w-4xl mx-auto">
       <div class="mb-6">
-        <Link :href="route('admin.admin.channels.index')" class="text-gray-400 hover:text-white text-sm flex items-center gap-1 mb-2">
+        <Link :href="route('admin.channels.index')" class="text-gray-400 hover:text-white text-sm flex items-center gap-1 mb-2">
           <ArrowLeft class="w-4 h-4" /> Back to My Channels
         </Link>
         <div class="flex items-center justify-between">
@@ -148,6 +148,8 @@ const form = useForm({
   package_ids: (props.channel?.packages || []).map(p => p.id),
   bouquet_ids: props.channel?.bouquets ? props.channel.bouquets.map(b => b.id) : [],
 
+  transcoding_device: props.channel?.transcoding_device || 'cpu',
+
   settings: {
     broadcast_mode: props.channel?.playlist_type === 'scheduled' ? 'scheduled' : '24_7',
     broadcast_timezone: props.channel?.timezone || 'UTC',
@@ -245,8 +247,7 @@ const removeUploaded = (index) => {
 
 const submit = () => {
   if (editing.value) {
-    const slug = props.channel.channel_slug || props.channel.id
-    form.put(`/admin/channels/admin/${slug}`)
+    form.put(route('admin.admin.channels.update', { channel: props.channel.channel_slug || props.channel.id }))
   } else {
     form.post(route('admin.admin.channels.store'))
   }

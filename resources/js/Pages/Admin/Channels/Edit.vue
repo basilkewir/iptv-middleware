@@ -91,6 +91,29 @@
           <div class="space-y-4">
             <div class="grid grid-cols-2 gap-4">
               <div class="col-span-2">
+                <label class="block text-sm font-medium text-gray-300 mb-2">Stream Source Type</label>
+                <select v-model="form.source_type" class="input-field" @change="onSourceTypeChange">
+                  <option value="stream">Direct Stream (HLS/RTMP/RTSP/UDP)</option>
+                  <option value="youtube">YouTube Live Channel</option>
+                </select>
+              </div>
+              <div v-if="form.source_type === 'youtube'" class="col-span-2">
+                <label class="block text-sm font-medium text-gray-300 mb-2">YouTube Channel URL</label>
+                <input v-model="form.youtube_url" type="url" class="input-field" placeholder="https://www.youtube.com/@channel or https://www.youtube.com/channel/..." />
+                <p v-if="form.errors.youtube_url" class="text-red-400 text-sm mt-1">{{ form.errors.youtube_url }}</p>
+                <button v-if="form.youtube_url && !form.youtube_verified" @click="verifyYouTube" class="mt-2 px-3 py-1 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg transition inline-flex items-center gap-1">
+                  <svg v-if="youtubeVerifying" class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M4 12a8 8 0 0 1 8-8"/></svg>
+                  {{ youtubeVerifying ? 'Verifying...' : 'Verify & Bypass Robot Check' }}
+                </button>
+                <p v-if="form.youtube_verified" class="text-emerald-400 text-sm mt-1">✓ YouTube verified — cookies stored for automatic bypass</p>
+                <p v-if="youtubeVerifyError" class="text-red-400 text-sm mt-1">{{ youtubeVerifyError }}</p>
+              </div>
+              <div v-if="form.source_type === 'youtube'" class="col-span-2">
+                <label class="block text-sm font-medium text-gray-300 mb-2">Stream URL (resolved)</label>
+                <input v-model="form.stream_url" type="text" class="input-field" placeholder="Resolved YouTube HLS stream URL" disabled />
+                <p class="text-xs text-gray-500 mt-1">Automatically resolved when YouTube URL is verified.</p>
+              </div>
+              <div v-if="form.source_type !== 'youtube'">
                 <label class="block text-sm font-medium text-gray-300 mb-2">Stream URL *</label>
                 <input v-model="form.stream_url" type="text" class="input-field" placeholder="https://... or udp://@239.0.0.1:32768" />
                 <p v-if="form.errors.stream_url" class="text-red-400 text-sm mt-1">{{ form.errors.stream_url }}</p>
@@ -133,12 +156,58 @@
             <div class="grid grid-cols-2 gap-4">
               <div>
                 <label class="block text-sm font-medium text-gray-300 mb-2">Backup URL 1</label>
-                <input v-model="form.backup_url_1" type="url" class="input-field" placeholder="http://..." />
+                <select v-model="backupState[1].type" @change="onBackupTypeChange(1)" class="input-field mb-2">
+                  <option value="stream">Direct Stream (HLS/RTMP/RTSP/UDP)</option>
+                  <option value="youtube">YouTube Live Channel</option>
+                </select>
+                <template v-if="backupState[1].type === 'youtube'">
+                  <input v-model="form.youtube_url_1" type="url" class="input-field" placeholder="https://www.youtube.com/@channel" />
+                  <button v-if="form.youtube_url_1 && !backupState[1].verified" @click="verifyBackupYouTube(1)" class="mt-2 px-3 py-1 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg transition inline-flex items-center gap-1">
+                    <svg v-if="backupState[1].verifying" class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M4 12a8 8 0 0 1 8-8"/></svg>
+                    {{ backupState[1].verifying ? 'Verifying...' : 'Verify & Bypass Robot Check' }}
+                  </button>
+                  <p v-if="backupState[1].verified" class="text-emerald-400 text-sm mt-1">✓ YouTube verified — cookies stored for automatic bypass</p>
+                  <p v-if="backupState[1].error" class="text-red-400 text-sm mt-1">{{ backupState[1].error }}</p>
+                  <p v-if="form.backup_url_1" class="text-xs text-gray-500 mt-1 break-all">Resolved stream: <span class="text-gray-400">{{ form.backup_url_1 }}</span></p>
+                </template>
+                <input v-else v-model="form.backup_url_1" type="url" class="input-field" placeholder="http://..." />
               </div>
               <div>
                 <label class="block text-sm font-medium text-gray-300 mb-2">Backup URL 2</label>
-                <input v-model="form.backup_url_2" type="url" class="input-field" placeholder="http://..." />
+                <select v-model="backupState[2].type" @change="onBackupTypeChange(2)" class="input-field mb-2">
+                  <option value="stream">Direct Stream (HLS/RTMP/RTSP/UDP)</option>
+                  <option value="youtube">YouTube Live Channel</option>
+                </select>
+                <template v-if="backupState[2].type === 'youtube'">
+                  <input v-model="form.youtube_url_2" type="url" class="input-field" placeholder="https://www.youtube.com/@channel" />
+                  <button v-if="form.youtube_url_2 && !backupState[2].verified" @click="verifyBackupYouTube(2)" class="mt-2 px-3 py-1 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg transition inline-flex items-center gap-1">
+                    <svg v-if="backupState[2].verifying" class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M4 12a8 8 0 0 1 8-8"/></svg>
+                    {{ backupState[2].verifying ? 'Verifying...' : 'Verify & Bypass Robot Check' }}
+                  </button>
+                  <p v-if="backupState[2].verified" class="text-emerald-400 text-sm mt-1">✓ YouTube verified — cookies stored for automatic bypass</p>
+                  <p v-if="backupState[2].error" class="text-red-400 text-sm mt-1">{{ backupState[2].error }}</p>
+                  <p v-if="form.backup_url_2" class="text-xs text-gray-500 mt-1 break-all">Resolved stream: <span class="text-gray-400">{{ form.backup_url_2 }}</span></p>
+                </template>
+                <input v-else v-model="form.backup_url_2" type="url" class="input-field" placeholder="http://..." />
               </div>
+            </div>
+            <div class="bg-gray-800/50 border border-gray-700 rounded-lg p-3">
+              <div class="flex items-center justify-between flex-wrap gap-2 mb-2">
+                <div class="flex items-center gap-2">
+                  <label class="block text-sm font-medium text-gray-300">Live Source Status</label>
+                  <span v-if="probing" class="inline-flex items-center gap-1 text-xs text-cyan-400">
+                    <svg class="w-3 h-3 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M4 12a8 8 0 0 1 8-8"/></svg>
+                    checking…
+                  </span>
+                  <span v-else class="text-xs text-gray-500">auto-refresh 30s · last probed {{ lastProbedLabel }}</span>
+                </div>
+              </div>
+              <ChannelSources
+                :channel="sourceStatusChannel"
+                :disabled="switchingSource"
+                @switch="(idx) => switchSource(idx)"
+              />
+              <p class="text-xs text-gray-500 mt-2">Status refreshes automatically every 30s. When the primary source is offline the system switches to a backup automatically and switches back to primary as soon as it recovers. ACTIVE marks the source currently on air.</p>
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-2">Bitrate (kbps)</label>
@@ -226,6 +295,14 @@
               <span class="text-gray-300">Enable Transcoding</span>
             </label>
             <div v-if="form.transcoding_enabled" class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">Transcoding Device</label>
+                <select v-model="form.transcoding_device" class="input-field">
+                  <option value="cpu">CPU (libx264)</option>
+                  <option value="gpu">GPU (h264_nvenc)</option>
+                </select>
+                <p class="text-xs text-gray-500 mt-1">GPU uses NVIDIA NVENC hardware encoder (faster, lower quality)</p>
+              </div>
               <div>
                 <label class="block text-sm font-medium text-gray-300 mb-2">Profile</label>
                 <select v-model="form.transcoding_profile" class="input-field">
@@ -423,11 +500,12 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import { useForm, Link } from '@inertiajs/vue3'
+import { ref, computed, reactive, onMounted, onUnmounted } from 'vue'
+import { useForm, Link, router } from '@inertiajs/vue3'
 import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
 import Modal from '@/Components/Common/Modal.vue'
+import ChannelSources from '@/Components/ChannelSources.vue'
 import { ArrowLeft } from 'lucide-vue-next'
 
 const props = defineProps({
@@ -447,6 +525,14 @@ const form = useForm({
   country: props.channel?.country || '',
   language: props.channel?.language || '',
   stream_url: props.channel?.stream_url || '',
+  source_type: props.channel?.source_type || 'stream',
+  youtube_url: props.channel?.youtube_url || '',
+  youtube_verified: props.channel?.youtube_verified || false,
+  youtube_cookies: props.channel?.youtube_cookies || null,
+  youtube_url_1: props.channel?.youtube_url_1 || '',
+  youtube_url_1_verified: props.channel?.youtube_url_1_verified || false,
+  youtube_url_2: props.channel?.youtube_url_2 || '',
+  youtube_url_2_verified: props.channel?.youtube_url_2_verified || false,
   stream_type: props.channel?.stream_type || 'hls',
   program_number: props.channel?.program_number ?? null,
   local_address: props.channel?.local_address || '',
@@ -461,6 +547,7 @@ const form = useForm({
   category_ids: (props.channel?.categories || []).map(c => c.id),
   bouquet_ids: (props.channel?.bouquets || []).map(b => b.id),
   transcoding_enabled: props.channel?.transcoding_enabled ?? false,
+  transcoding_device: props.channel?.transcoding_device || 'cpu',
   transcoding_profile: props.channel?.transcoding_profile || 'auto',
   transcoding_resolution: props.channel?.transcoding_resolution || '1080p',
   transcoding_video_codec: props.channel?.transcoding_video_codec || 'h264',
@@ -477,6 +564,170 @@ const form = useForm({
 const testing = ref(false)
 const showTestResult = ref(false)
 const testResult = ref(null)
+const youtubeVerifying = ref(false)
+const youtubeVerifyError = ref('')
+
+// ── Live source status ──
+const probing = ref(false)
+const switchingSource = ref(false)
+
+const sourceStatusChannel = ref({ ...props.channel })
+
+const lastProbedLabel = computed(() => {
+  const d = sourceStatusChannel.value?.sources_last_probed_at
+  if (!d) return 'never'
+  const date = new Date(d)
+  return isNaN(date.getTime()) ? 'never' : date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+})
+
+const applySourceStatuses = (list) => {
+  if (!Array.isArray(list)) return
+  sourceStatusChannel.value = { ...sourceStatusChannel.value, source_statuses: list }
+}
+
+const probeSources = async () => {
+  probing.value = true
+  try {
+    const response = await fetch(route('admin.channels.probe-sources', { channel: props.channel.id }), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+      },
+    })
+    const data = await response.json()
+    if (data.success) {
+      applySourceStatuses(data.data.source_statuses)
+      sourceStatusChannel.value.active_source_index = data.data.active_source_index
+      sourceStatusChannel.value.sources_last_probed_at = data.data.last_checked_at
+    }
+  } catch (e) {
+    console.error('Source probe failed:', e)
+  } finally {
+    probing.value = false
+  }
+}
+
+const switchSource = async (sourceIndex) => {
+  switchingSource.value = true
+  try {
+    const response = await fetch(route('admin.channels.switch-source', { channel: props.channel.id }), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+      },
+      body: JSON.stringify({ source_index: sourceIndex }),
+    })
+    const data = await response.json()
+    if (data.success) {
+      applySourceStatuses(data.data.source_statuses)
+      sourceStatusChannel.value.active_source_index = data.data.active_source_index
+    }
+  } catch (e) {
+    console.error('Source switch failed:', e)
+  } finally {
+    switchingSource.value = false
+  }
+}
+
+// Auto-refresh live source status every 30s.
+let statusInterval = null
+onMounted(() => {
+  probeSources()
+  statusInterval = setInterval(probeSources, 30000)
+})
+onUnmounted(() => {
+  if (statusInterval) clearInterval(statusInterval)
+})
+
+const onSourceTypeChange = () => {
+  if (form.source_type !== 'youtube') {
+    form.youtube_url = ''
+    youtubeVerifyError.value = ''
+  }
+}
+
+const verifyYouTube = async () => {
+  if (!form.youtube_url) return
+  youtubeVerifying.value = true
+  youtubeVerifyError.value = ''
+
+  try {
+    const response = await fetch(route('admin.channels.verify-youtube', { channel: props.channel.id }), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+      },
+      body: JSON.stringify({ youtube_url: form.youtube_url }),
+    })
+    const data = await response.json()
+    if (data.success) {
+      form.stream_url = data.data.stream_url
+      form.source_type = 'youtube'
+      form.youtube_url = data.data.channel_id ? `https://www.youtube.com/channel/${data.data.channel_id}` : form.youtube_url
+      form.youtube_verified = true
+    } else {
+      youtubeVerifyError.value = data.message || 'Verification failed'
+    }
+  } catch (e) {
+    youtubeVerifyError.value = 'Network error. Please try again.'
+  } finally {
+    youtubeVerifying.value = false
+  }
+}
+
+const backupState = reactive({
+  1: { type: props.channel?.youtube_url_1 ? 'youtube' : 'stream', verifying: false, verified: !!props.channel?.youtube_url_1_verified, error: '' },
+  2: { type: props.channel?.youtube_url_2 ? 'youtube' : 'stream', verifying: false, verified: !!props.channel?.youtube_url_2_verified, error: '' },
+})
+
+const onBackupTypeChange = (index) => {
+  const state = backupState[index]
+  state.verifying = false
+  state.verified = false
+  state.error = ''
+  if (state.type !== 'youtube') {
+    form[`youtube_url_${index}`] = ''
+  }
+}
+
+const verifyBackupYouTube = async (index) => {
+  const ytUrl = form[`youtube_url_${index}`]
+  if (!ytUrl) return
+  const state = backupState[index]
+  state.verifying = true
+  state.verified = false
+  state.error = ''
+
+  try {
+    const response = await fetch(route('admin.channels.verify-youtube', { channel: props.channel.id }), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+      },
+      body: JSON.stringify({ youtube_url: ytUrl }),
+    })
+    const data = await response.json()
+    if (data.success) {
+      form[`backup_url_${index}`] = data.data.stream_url
+      form[`youtube_url_${index}_verified`] = true
+      state.verified = true
+    } else {
+      state.error = data.message || 'Verification failed'
+    }
+  } catch (e) {
+    state.error = 'Network error. Please try again.'
+  } finally {
+    state.verifying = false
+  }
+}
 
 const testStream = async () => {
   if (!form.stream_url) return
@@ -490,7 +741,7 @@ const testStream = async () => {
         'X-Requested-With': 'XMLHttpRequest',
         'X-XSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.content || '',
       },
-      body: JSON.stringify({ url: form.stream_url }),
+      body: JSON.stringify({ url: form.stream_url, source_type: form.source_type, youtube_url: form.youtube_url }),
     })
     const data = await response.json()
     testResult.value = data.data || data
