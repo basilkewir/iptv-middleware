@@ -951,7 +951,66 @@ class XtreamController extends Controller
             }
         }
 
-        return redirect($streamUrl);
+        return $this->proxyExternalUrl($streamUrl);
+    }
+
+    /**
+     * Proxy an external URL through the middleware so the provider only
+     * sees 1 connection regardless of how many viewers are watching.
+     * Streams the response without buffering the entire file in memory.
+     */
+    private function proxyExternalUrl(string $url)
+    {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL            => $url,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADER         => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 5,
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT        => 0,
+            CURLOPT_NOSIGNAL       => true,
+            CURLOPT_RANGE          => $_SERVER['HTTP_RANGE'] ?? null,
+            CURLOPT_USERAGENT      => 'IPTV-Middleware/1.0',
+        ]);
+
+        $response = curl_exec($ch);
+        $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        if ($response === false || $statusCode === 0) {
+            abort(502, 'Upstream unreachable: ' . ($error ?: 'unknown error'));
+        }
+
+        $rawHeaders = substr($response, 0, $headerSize);
+        $body = substr($response, $headerSize);
+
+        $responseHeaders = [
+            'Content-Type'  => 'application/octet-stream',
+            'Accept-Ranges' => 'bytes',
+            'Cache-Control' => 'no-cache',
+        ];
+
+        foreach (explode("\r\n", $rawHeaders) as $header) {
+            if (preg_match('/^Content-Type:\s*(.+)/i', $header, $m)) {
+                $responseHeaders['Content-Type'] = trim($m[1]);
+            } elseif (preg_match('/^Content-Length:\s*(.+)/i', $header, $m)) {
+                $responseHeaders['Content-Length'] = trim($m[1]);
+            } elseif (preg_match('/^Content-Range:\s*(.+)/i', $header, $m)) {
+                $responseHeaders['Content-Range'] = trim($m[1]);
+            } elseif (preg_match('/^Accept-Ranges:\s*(.+)/i', $header, $m)) {
+                $responseHeaders['Accept-Ranges'] = trim($m[1]);
+            } elseif (preg_match('/^Content-Disposition:\s*(.+)/i', $header, $m)) {
+                $responseHeaders['Content-Disposition'] = trim($m[1]);
+            }
+        }
+
+        $status = $statusCode === 206 ? 206 : 200;
+
+        return response($body, $status, $responseHeaders);
     }
 
     // M3U playlist
