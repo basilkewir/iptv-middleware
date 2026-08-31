@@ -547,7 +547,7 @@ class XtreamController extends Controller
             // action, so we capture the actual bash PID (not the setsid parent
             // which exits immediately after forking).
             $wrapperWithPid = 'echo $$ > ' . escapeshellarg($pidFile) . '; '
-                . $this->ingestWrapperCommand($outputDir, $sourceUrl, $programNumber, $localAddress, $transcode, $transcodingDevice);
+                . $this->ingestWrapperCommand($outputDir, $sourceUrl, $programNumber, $localAddress, $transcode, $transcodingDevice, $channelId);
 
             $cmd = 'setsid bash -c ' . escapeshellarg($wrapperWithPid)
                 . ' < /dev/null > /dev/null 2>&1 &';
@@ -689,7 +689,7 @@ class XtreamController extends Controller
      * on the right NIC, and -map p:{N} keeps only the requested program so
      * this ingest's HLS playlist contains just that one channel.
      */
-    private function ingestWrapperCommand(string $outputDir, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false, ?string $transcodingDevice = null): string
+    private function ingestWrapperCommand(string $outputDir, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false, ?string $transcodingDevice = null, int $channelId = 0): string
     {
         $log = '/tmp/ingest_' . basename($outputDir) . '.log';
 
@@ -800,8 +800,12 @@ class XtreamController extends Controller
         // instant zapping: every channel has its ingest already running
         // and segments ready when the user switches to it.
 
+        $isYouTube = str_contains(strtolower($sourceUrl), 'youtube');
+        $ytInit = $isYouTube && $channelId > 0 ? 'SRC_URL=' . escapeshellarg($sourceUrl) . '; ' : '';
+
         return sprintf(
             'ODIR=%s; L=%s; DELAY=3; '
+            . $ytInit
             . 'echo "WRAPPER START $$ ppid=$PPID $(date +%%s)" >> "$L"; '
             . 'trap \'echo "WRAPPER EXIT rc=$? ppid=$PPID $(date +%%s)" >> "$L"; exec >> "$L" 2>&1\' EXIT; '
             . $networkWait
@@ -817,6 +821,9 @@ class XtreamController extends Controller
             .   '[ -f "$ODIR/.stop" ] && exit 0; '
             .   'HAS_SEGS=0; ls "$ODIR"/segment_*.ts > /dev/null 2>&1 && HAS_SEGS=1; '
             .   '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/segment_*.ts "$ODIR"/playlist.m3u8; '
+            .   ($channelId > 0 && str_contains(strtolower($sourceUrl), 'youtube')
+                ? 'NEW_URL=$(cd ' . base_path() . ' && php artisan youtube:refresh-url ' . $channelId . ' 2>/dev/null); if [ $? -eq 0 ] && [ -n "$NEW_URL" ]; then SRC_URL="$NEW_URL"; echo "YOUTUBE REFRESHED $SRC_URL" >> "$L"; fi; '
+                : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
             .   ($isMulticast ? '-hls_time 1 -hls_list_size 2 ' : '-hls_time 6 -hls_list_size 5 ')
             .   '-hls_flags delete_segments+temp_file+independent_segments+append_list '
@@ -841,6 +848,14 @@ class XtreamController extends Controller
             escapeshellarg($input),
             $programMap
         );
+
+        // For YouTube channels, replace the hardcoded resolved URL in the wrapper
+        // with the bash variable $SRC_URL so the wrapper can re-resolve on retry.
+        if ($isYouTube && $channelId > 0) {
+            $wrapper = str_replace('-i ' . escapeshellarg($input), '-i "$SRC_URL"', $wrapper);
+        }
+
+        return $wrapper;
     }
 
     /**

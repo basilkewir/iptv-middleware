@@ -710,7 +710,8 @@ class ChannelController extends Controller
 
     public function testStream(Request $request, Channel $channel): JsonResponse
     {
-        $streamUrl = $channel->source_url;
+        $streamUrl = $request->input('stream_url') ?: $channel->source_url;
+        $sourceType = $request->input('source_type', $channel->source_type);
         $startTime = microtime(true);
 
         if (empty($streamUrl)) {
@@ -728,7 +729,7 @@ class ChannelController extends Controller
         try {
             $detectedType = $channel->stream_type ?: $this->detectStreamType($streamUrl);
 
-            if ($channel->isYouTube()) {
+            if ($sourceType === 'youtube' || $channel->isYouTube()) {
                 $ytService = new \App\Services\YouTubeService();
                 if (!$ytService->isYtDlpAvailable()) {
                     return response()->json([
@@ -741,7 +742,7 @@ class ChannelController extends Controller
                         ],
                     ]);
                 }
-                $resolveResult = $ytService->resolveToStreamUrl($channel);
+                $resolveResult = $ytService->verifyUrl($streamUrl);
                 if (!$resolveResult['success']) {
                     return response()->json([
                         'success' => false,

@@ -741,7 +741,7 @@ const testStream = async () => {
         'X-Requested-With': 'XMLHttpRequest',
         'X-XSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.content || '',
       },
-      body: JSON.stringify({ url: form.stream_url, source_type: form.source_type, youtube_url: form.youtube_url }),
+      body: JSON.stringify({ stream_url: form.stream_url, source_type: form.source_type, youtube_url: form.youtube_url }),
     })
     const data = await response.json()
     testResult.value = data.data || data
