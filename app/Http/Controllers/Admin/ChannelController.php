@@ -727,8 +727,6 @@ class ChannelController extends Controller
         }
 
         try {
-            $detectedType = $channel->stream_type ?: $this->detectStreamType($streamUrl);
-
             if ($sourceType === 'youtube' || $channel->isYouTube()) {
                 $ytService = new \App\Services\YouTubeService();
                 if (!$ytService->isYtDlpAvailable()) {
@@ -757,18 +755,43 @@ class ChannelController extends Controller
                 $streamUrl = $resolveResult['stream_url'];
             }
 
+            $isMulticast = str_starts_with($streamUrl, 'udp://') || str_starts_with($streamUrl, 'rtp://');
+
+            if ($isMulticast) {
+                $multicast = app(\App\Services\StreamingService\MulticastIngestService::class);
+                $healthCheck = app(\App\Services\StreamingService\SourceHealthCheckService::class);
+                $status = $healthCheck->probeOnly($streamUrl, $channel);
+                $responseTime = round((microtime(true) - $startTime) * 1000);
+
+                return response()->json([
+                    'success' => $status === 'online',
+                    'data' => [
+                        'status' => $status,
+                        'http_code' => 0,
+                        'response_time' => $responseTime,
+                        'content_type' => null,
+                        'quality' => null,
+                        'detected_type' => 'udp',
+                        'codec' => null,
+                        'resolution' => null,
+                        'bitrate' => null,
+                        'fps' => null,
+                        'error' => $status === 'online' ? null : 'Multicast source unreachable — no active ingest',
+                    ],
+                ]);
+            }
+
+            $detectedType = $channel->stream_type ?: $this->detectStreamType($streamUrl);
             $probeResult = $this->probeStreamWithFfprobe($streamUrl, $detectedType);
 
             $responseTime = round((microtime(true) - $startTime) * 1000);
 
-            // Detect quality from stream URL patterns and probe data
             $quality = $this->detectStreamQuality(
                 $streamUrl,
                 $probeResult['content_type'] ?? null,
                 0
             );
 
-            // Override quality with ffprobe-detected resolution if available
             if (!empty($probeResult['height'])) {
                 $quality = $this->getQualityFromHeight($probeResult['height']);
             }

@@ -356,7 +356,7 @@ class AdminChannelController extends Controller
             ]);
         }
 
-        $probeResult = $this->probeStreamLocal($streamUrl);
+        $probeResult = $this->probeStreamLocal($streamUrl, $channel->id);
         $responseTime = round((microtime(true) - $startTime) * 1000);
 
         return response()->json([
@@ -373,27 +373,27 @@ class AdminChannelController extends Controller
         ]);
     }
 
-    private function probeStreamLocal(string $url): array
+    private function probeStreamLocal(string $url, ?int $channelId = null): array
     {
         $result = ['online' => false, 'error' => null];
 
         $isMulticast = str_starts_with($url, 'udp://') || str_starts_with($url, 'rtp://');
         $isHls = str_contains(strtolower($url), '.m3u8');
-        $timeout = $isMulticast ? 10 : 15;
 
         if ($isMulticast) {
-            $cmd = sprintf(
-                'timeout %d ffprobe -v error -show_streams -show_format -of json -analyzeduration 5M -probesize 5M %s 2>&1; echo "EXIT:$?"',
-                $timeout,
-                escapeshellarg($url)
-            );
-        } else {
-            $cmd = sprintf(
-                'timeout %d ffprobe -v error -show_streams -show_format -of json -analyzeduration 10M -probesize 1M -user_agent "IPTV-Middleware/1.0" %s 2>&1; echo "EXIT:$?"',
-                $timeout,
-                escapeshellarg($url)
-            );
+            return $this->probeMulticastLocal($url, $channelId);
         }
+
+        $timeout = 15;
+        $rwTimeout = $isHls ? '-rw_timeout 10000000' : '';
+        $inputUrl = escapeshellarg($url);
+
+        $cmd = sprintf(
+            'timeout %d ffprobe -v error -show_streams -show_format -of json -analyzeduration 10M -probesize 1M -user_agent "IPTV-Middleware/1.0" %s %s 2>&1; echo "EXIT:$?"',
+            $timeout,
+            $rwTimeout,
+            $inputUrl
+        );
 
         $output = shell_exec($cmd);
 
@@ -415,14 +415,94 @@ class AdminChannelController extends Controller
                 }
             }
 
-            $fmt = $data['format'] ?? [];
-            $result['detected_type'] = $isHls ? 'hls' : ($isMulticast ? 'udp' : 'http');
+            $result['detected_type'] = $isHls ? 'hls' : 'http';
         } else {
             $errorMsg = $data['error']['message'] ?? null;
             if (preg_match('/error.*?((?:Connection|HTTP|403|404|timeout|refused|No route).*)/i', $output, $em)) {
                 $errorMsg = $em[1];
             }
             $result['error'] = $errorMsg ?: 'Stream unreachable (exit=' . $exitCode . ')';
+        }
+
+        return $result;
+    }
+
+    private function probeMulticastLocal(string $url, ?int $channelId = null): array
+    {
+        $result = ['online' => false, 'error' => null, 'detected_type' => 'udp'];
+
+        // 1. Check a sibling channel with the same URL that has fresh segments
+        $query = \App\Models\Channel::where('stream_url', $url);
+        if ($channelId) {
+            $query->where('id', '!=', $channelId);
+        }
+        $siblings = $query->where('active_source_index', 0)->get();
+
+        foreach ($siblings as $sibling) {
+            $playlist = storage_path("app/streams/hls/{$sibling->id}/playlist.m3u8");
+            if (is_file($playlist) && (time() - @filemtime($playlist)) < 30) {
+                $result['online'] = true;
+                $result['source'] = 'ingest_sibling_' . $sibling->id;
+                return $result;
+            }
+        }
+
+        // 2. Check ingest PID file for this channel
+        if ($channelId) {
+            $outputDir = storage_path("app/streams/hls/{$channelId}");
+            $pidFile = $outputDir . '/ingest.pid';
+            $playlist = is_file($outputDir . '/index.m3u8') ? $outputDir . '/index.m3u8' : $outputDir . '/playlist.m3u8';
+
+            if (is_file($pidFile)) {
+                $pid = (int) trim((string) file_get_contents($pidFile));
+                if ($pid > 0 && @file_exists("/proc/{$pid}")) {
+                    if (is_file($playlist)) {
+                        $age = time() - (int) @filemtime($playlist);
+                        if ($age < 30) {
+                            $result['online'] = true;
+                            $result['source'] = 'ingest_local';
+                            return $result;
+                        }
+                    } else {
+                        $startTime = @filectime("/proc/{$pid}");
+                        if ($startTime !== false && (time() - $startTime) < 30) {
+                            $result['online'] = true;
+                            $result['source'] = 'ingest_starting';
+                            return $result;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Try ffprobe as last resort (may fail for multicast)
+        $cmd = sprintf(
+            'timeout 10 ffprobe -v error -show_streams -show_format -of json -analyzeduration 5M -probesize 5M %s 2>&1; echo "EXIT:$?"',
+            escapeshellarg($url)
+        );
+
+        $output = shell_exec($cmd);
+
+        $exitCode = 1;
+        if (preg_match('/EXIT:(\d+)\s*$/', $output, $m)) {
+            $exitCode = (int) $m[1];
+            $output = preg_replace('/EXIT:\d+\s*$/', '', $output);
+        }
+
+        $data = json_decode(trim($output), true);
+
+        if ($exitCode === 0 && $data && isset($data['streams'])) {
+            $result['online'] = true;
+            $result['source'] = 'ffprobe';
+
+            foreach ($data['streams'] as $stream) {
+                if (($stream['codec_type'] ?? '') === 'video' && ! isset($result['codec'])) {
+                    $result['codec'] = $stream['codec_name'] ?? null;
+                    $result['resolution'] = ($stream['width'] ?? 0) . 'x' . ($stream['height'] ?? 0);
+                }
+            }
+        } else {
+            $result['error'] = 'Multicast unreachable — no ingest process and ffprobe failed';
         }
 
         return $result;

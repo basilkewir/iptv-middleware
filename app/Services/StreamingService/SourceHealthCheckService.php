@@ -636,6 +636,27 @@ class SourceHealthCheckService
                     return 'online';
                 }
             }
+
+            // Check this channel's own ingest PID file + playlist
+            $outputDir = storage_path("app/streams/hls/{$channel->id}");
+            $pidFile   = $outputDir . '/ingest.pid';
+            $playlist  = is_file($outputDir . '/index.m3u8')
+                ? $outputDir . '/index.m3u8'
+                : $outputDir . '/playlist.m3u8';
+
+            if (is_file($pidFile)) {
+                $pid = (int) trim((string) file_get_contents($pidFile));
+                if ($pid > 0 && @file_exists("/proc/{$pid}")) {
+                    if (is_file($playlist) && (time() - @filemtime($playlist)) < 30) {
+                        return 'online';
+                    }
+                    $startTime = @filectime("/proc/{$pid}");
+                    if ($startTime !== false && (time() - $startTime) < 30) {
+                        return 'online';
+                    }
+                }
+            }
+
             // No healthy sibling — check the group reader pid file directly
             $multicast = app(MulticastIngestService::class);
             $tempChannel = clone $channel;
