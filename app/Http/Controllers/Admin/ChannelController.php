@@ -451,15 +451,15 @@ class ChannelController extends Controller
         if (is_file($pidFile)) {
             $pid = (int) trim((string) file_get_contents($pidFile));
             if ($pid > 0) {
-                @exec('pkill -TERM -f ' . escapeshellarg("ingest_{$channelId}") . ' 2>/dev/null');
-                @posix_kill($pid, SIGTERM);
+                // Kill by pid via shell kill (SIGTERM then SIGKILL). Avoid
+                // posix_kill + bare SIGTERM/SIGKILL constants, which crash with
+                // "Undefined constant" when the pcntl extension is not loaded.
+                @exec('kill -TERM ' . (int) $pid . ' 2>/dev/null');
                 usleep(500000);
-                @posix_kill($pid, SIGKILL);
+                @exec('kill -KILL ' . (int) $pid . ' 2>/dev/null');
             }
             @unlink($pidFile);
         }
-
-        @exec('pkill -TERM -f ' . escapeshellarg("segment_*.ts") . ' 2>/dev/null');
     }
 
     private function cleanHlsDir(int $channelId): void
