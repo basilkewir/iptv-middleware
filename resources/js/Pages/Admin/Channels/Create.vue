@@ -108,6 +108,12 @@
                 <option value="youtube">YouTube Live Channel</option>
               </select>
             </div>
+            <div v-if="form.source_type !== 'youtube'" class="md:col-span-2">
+              <label class="block text-sm font-medium text-gray-300 mb-2">Stream URL <span class="text-red-500">*</span></label>
+              <input v-model="form.stream_url" type="text" placeholder="https://... or udp://@239.0.0.1:32768"
+                class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500" />
+              <p v-if="form.errors.stream_url" class="text-red-400 text-sm mt-1">{{ form.errors.stream_url }}</p>
+            </div>
             <div v-if="form.source_type === 'youtube'" class="md:col-span-2">
               <label class="block text-sm font-medium text-gray-300 mb-2">YouTube Channel URL <span class="text-red-500">*</span></label>
               <input v-model="form.youtube_url" type="url" placeholder="https://www.youtube.com/@channel or https://www.youtube.com/channel/..."
