@@ -484,6 +484,22 @@ class ChannelController extends Controller
         ]);
     }
 
+    public function bulkToggleStatus(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'ids' => 'required|array',
+            'ids.*' => 'exists:channels,id',
+            'is_active' => 'required|boolean',
+        ]);
+
+        $count = Channel::whereIn('id', $validated['ids'])
+            ->update(['is_active' => $validated['is_active']]);
+
+        return response()->json([
+            'message' => $count . ' channel(s) updated.',
+        ]);
+    }
+
     /**
      * Return all channels (regular + admin) merged and sorted by channel_number.
      */

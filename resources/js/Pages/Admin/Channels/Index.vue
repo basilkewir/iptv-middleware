@@ -346,7 +346,7 @@ const performDelete = () => {
 
 const bulkToggleStatus = (active) => {
   if (selectedChannels.value.length === 0) return
-  router.post(route('admin.admin.channels.bulk-toggle-status'), { ids: selectedChannels.value, is_active: active }, {
+  router.post(route('admin.channels.bulk-toggle-status'), { ids: selectedChannels.value, is_active: active }, {
     preserveScroll: true,
     onSuccess: () => {
       selectedChannels.value = []
@@ -357,7 +357,7 @@ const bulkToggleStatus = (active) => {
 const bulkDelete = () => {
   if (selectedChannels.value.length === 0) return
   if (confirm(`Delete ${selectedChannels.value.length} channels?`)) {
-    router.post(route('admin.admin.channels.bulk-delete'), { ids: selectedChannels.value }, {
+    router.post(route('admin.channels.bulk-delete'), { ids: selectedChannels.value }, {
       preserveScroll: true,
       onSuccess: () => {
         selectedChannels.value = []

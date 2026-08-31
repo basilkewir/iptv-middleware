@@ -276,6 +276,7 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
         Route::put('/channels/{channel}', [ChannelController::class, 'update'])->name('channels.update');
         Route::delete('/channels/{channel}', [ChannelController::class, 'destroy'])->name('channels.destroy');
         Route::post('/channels/bulk-delete', [ChannelController::class, 'bulkDelete'])->name('channels.bulk-delete');
+        Route::post('/channels/bulk-toggle-status', [ChannelController::class, 'bulkToggleStatus'])->name('channels.bulk-toggle-status');
         Route::post('/channels/{channel}/toggle-status', [ChannelController::class, 'toggleStatus'])->name('channels.toggle-status');
         Route::post('/channels/{channel}/test-stream', [ChannelController::class, 'testStream'])->name('channels.test-stream');
         Route::post('/channels/{channel}/verify-youtube', [ChannelController::class, 'verifyYouTube'])->name('channels.verify-youtube');
