@@ -2,6 +2,17 @@
 
 These steps show how to upload and run the middleware on the Ubuntu server (user: kotelhms).
 
+0) **Before deploying, configure the kernel UDP receive buffer** (required for HD/multi-program UDP ingest):
+
+The middleware requests a 32 MB socket receive buffer (`buffer_size=33554432`) on every UDP ingest. The kernel silently clamps it to `net.core.rmem_max` — if that is small (Linux defaults to ~213 KB), a 7 Mbps HD mux overflows the socket during bursts and the channel plays ~1 s then stalls ~5 s repeatedly. Set it once on the server:
+
+```bash
+echo "net.core.rmem_max = 33554432" | sudo tee /etc/sysctl.d/90-iptv-udp.conf
+sudo sysctl --system
+```
+
+Verify it took effect: `sysctl net.core.rmem_max` should print `33554432`.
+
 1) From your local machine, create an archive of the workspace (exclude large vendor dirs):
 
 ```bash

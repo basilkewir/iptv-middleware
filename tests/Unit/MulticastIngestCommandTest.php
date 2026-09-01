@@ -27,6 +27,12 @@ class MulticastIngestCommandTest extends TestCase
 
         $this->assertStringContainsString('udp://@239.0.0.1:32768?localaddr=192.168.1.50', $cmd);
         $this->assertStringContainsString(' -map p:3 -map_chapters -1 -ignore_unknown', $cmd);
+        $this->assertStringContainsString('+genpts+discardcorrupt+nobuffer', $cmd);
+        $this->assertStringContainsString('-flags low_delay', $cmd);
+        $this->assertStringContainsString('-probesize 1M -analyzeduration 500000', $cmd);
+        $this->assertStringContainsString('-rw_timeout 5000000 -timeout 5000000', $cmd);
+        $this->assertStringContainsString('-hls_time 0.5 -hls_list_size 2', $cmd);
+        $this->assertStringContainsString('-muxdelay 0 -muxpreload 0', $cmd);
         $this->assertStringNotContainsString('-reconnect', $cmd);
         $this->assertStringNotContainsString(' -re -i', $cmd);
     }
@@ -41,7 +47,7 @@ class MulticastIngestCommandTest extends TestCase
         $this->assertStringNotContainsString('-map p:', $cmd);
         $this->assertStringNotContainsString('localaddr=', $cmd);
         $this->assertStringContainsString('http://example.com/live.m3u8', $cmd);
-        $this->assertStringContainsString('-reconnect 1 -reconnect_streamed 0 -reconnect_delay_max 5', $cmd);
+        $this->assertStringContainsString('-reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5', $cmd);
     }
 
     public function test_wrapper_ignores_zero_or_null_program(): void

@@ -23,6 +23,12 @@ class XtreamController extends Controller
 
     public const INGEST_STALE_SECONDS = 90;
     private const FFMPEG_READ_TIMEOUT_US = 30000000;
+
+    // UDP multicast is a local, continuous socket — a feed that goes silent
+    // is dead and must be detected fast (a 30s read timeout made a frozen
+    // source look "buffered" for 30s). Give multicast its own short timeout.
+    private const FFMPEG_UDP_TIMEOUT_US = 5000000;
+
     private const INGEST_RESTART_BACKOFF_SECONDS = 10;
 
     // ffmpeg thread count per process. 1 thread per process is optimal for
@@ -478,6 +484,23 @@ class XtreamController extends Controller
         // The wrapper checks this file — if nobody requests for 120s, it exits.
         @touch($heartbeat);
 
+        // Multi-program UDP/RTP multicast muxes MUST go through the shared group
+        // reader — one ffmpeg reads the mux ONCE and fans out per-program HLS.
+        // A per-channel ingest here would independently read the WHOLE high-bitrate
+        // mux (all HD programs) just to keep one program via -map p:N. At 7 Mbps ×
+        // N programs the UDP receive socket overflows during bursts, packets drop,
+        // and the client sees the classic "plays ~1s, stalls ~5s" dropout. Routing
+        // multicast to the group reader fixes it: the mux is read once regardless
+        // of how many HD channels are being watched.
+        $isMulticast = str_starts_with($sourceUrl, 'udp://') || str_starts_with($sourceUrl, 'rtp://');
+        if ($isMulticast && $programNumber !== null && $programNumber > 0 && $channelId > 0) {
+            $channel = Channel::find($channelId);
+            if ($channel) {
+                app(MulticastIngestService::class)->ensureGroupReader($channel);
+                return;
+            }
+        }
+
         $lock = Cache::lock("ffmpeg:ingest:{$channelId}", 60);
 
         if (! $lock->get()) {
@@ -738,8 +761,14 @@ class XtreamController extends Controller
         // +discardcorrupt drops damaged packets, -err_detect ignore_err skips
         // corrupt frames without stalling, -avoid_negative_ts make_zero fixes
         // DTS jumps that freeze the HLS muxer (the main cause of stalling).
+        // +nobuffer tells the demuxer not to read ahead on the socket and
+        // -flags low_delay disables B-frame reordering delay — together with a
+        // small -probesize/-analyzeduration they slash feed-to-screen latency.
+        // MC_TIMEOUT is a short read/socket timeout so a dead multicast feed is
+        // noticed in ~3s instead of appearing frozen and "buffered" for 30s.
+        $mcTimeout = $isMulticast ? self::FFMPEG_UDP_TIMEOUT_US : self::FFMPEG_READ_TIMEOUT_US;
         $inputOpts = $isMulticast
-            ? '-fflags +genpts+discardcorrupt -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -rw_timeout %d -timeout %d -i %s'
+            ? '-fflags +genpts+discardcorrupt+nobuffer -flags low_delay -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -probesize 1M -analyzeduration 500000 -rw_timeout %d -timeout %d -i %s'
             : ($isLiveHttp
                 ? '-fflags +genpts+discardcorrupt -max_interleave_delta 0 -reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d ' . $userAgent . ' -i %s'
                 : '-reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d -re -i %s');
@@ -825,8 +854,9 @@ class XtreamController extends Controller
                 ? 'NEW_URL=$(cd ' . base_path() . ' && php artisan youtube:refresh-url ' . $channelId . ' 2>/dev/null); if [ $? -eq 0 ] && [ -n "$NEW_URL" ]; then SRC_URL="$NEW_URL"; echo "YOUTUBE REFRESHED $SRC_URL" >> "$L"; fi; '
                 : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
-            .   ($isMulticast ? '-hls_time 1 -hls_list_size 2 ' : '-hls_time 6 -hls_list_size 5 ')
+            .   ($isMulticast ? '-hls_time 0.5 -hls_list_size 2 ' : '-hls_time 6 -hls_list_size 5 ')
             .   '-hls_flags delete_segments+temp_file+independent_segments+append_list '
+            .   '-muxdelay 0 -muxpreload 0 '
             .   '-hls_segment_filename "$ODIR"/segment_%%04d.ts '
             .   '"$ODIR"/playlist.m3u8 2>>"$L"; '
             .   'NEW_SEGS=0; ls "$ODIR"/segment_*.ts > /dev/null 2>&1 && NEW_SEGS=1; '
@@ -843,8 +873,8 @@ class XtreamController extends Controller
             . 'done',
             escapeshellarg($outputDir),
             escapeshellarg($log),
-            self::FFMPEG_READ_TIMEOUT_US,
-            self::FFMPEG_READ_TIMEOUT_US,
+            $mcTimeout,
+            $mcTimeout,
             escapeshellarg($input),
             $programMap
         );

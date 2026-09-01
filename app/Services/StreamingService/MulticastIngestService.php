@@ -491,9 +491,10 @@ class MulticastIngestService
                 . '%s'
                 . ' -max_muxing_queue_size 65536'
                 . '%s%s'
-                . ' -f hls -hls_time 1 -hls_list_size 2'
-                . ' -hls_flags delete_segments+temp_file+independent_segments'
-                . ' -hls_segment_filename %s/segment_%%04d.ts'
+            .   ' -f hls -hls_time 0.5 -hls_list_size 2'
+            .   ' -hls_flags delete_segments+temp_file+independent_segments'
+            .   ' -muxdelay 0 -muxpreload 0'
+            .   ' -hls_segment_filename %s/segment_%%04d.ts'
                 . ' %s/playlist.m3u8',
                 $programNumber,
                 $videoCodec,
@@ -523,7 +524,7 @@ class MulticastIngestService
             . 'done; '
 . 'while true; do '
             .   ('nice -n ' . self::NICE_LEVEL . ' ffmpeg -threads ' . self::FFMPEG_THREADS
-            .   ' -fflags +genpts+discardcorrupt+igndts -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -flush_packets 1 -rw_timeout 30000000 -timeout 30000000 -i %s')
+            .   ' -fflags +genpts+discardcorrupt+igndts+nobuffer -flags low_delay -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -flush_packets 1 -probesize 1M -analyzeduration 500000 -rw_timeout 5000000 -timeout 5000000 -i %s')
             .   " \\\n%s \\\n"
             .   '2>>"$L"; '
             .   'echo "GROUP READER RESTART $(date +%%s)" >> "$L"; '
