@@ -229,8 +229,11 @@ class User extends Authenticatable
         } elseif (in_array('reseller', $names, true)) {
             $this->is_admin = false;
             $this->is_reseller = true;
-        } elseif (in_array('moderator', $names, true)) {
-            $this->is_admin = true;
+        } else {
+            // Restricted roles (moderator, support, channel_manager, ...) are
+            // NOT admins: no legacy admin flag, panel access is role-based via
+            // hasAdminPanelAccess().
+            $this->is_admin = false;
             $this->is_reseller = false;
         }
 

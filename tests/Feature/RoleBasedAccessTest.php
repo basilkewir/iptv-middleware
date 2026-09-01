@@ -137,6 +137,33 @@ class RoleBasedAccessTest extends TestCase
         $this->assertNotContains('Not Assigned', $names);
     }
 
+    public function test_moderator_is_not_an_admin_and_only_sees_assigned_channels(): void
+    {
+        $role = $this->makeRole('moderator', ['my_channels', 'content_management']);
+        $moderator = User::factory()->create(['role' => 'moderator']);
+        $moderator->roles()->attach($role->id);
+        $moderator->updateFlagsFromRoles();
+
+        $this->assertFalse($moderator->is_admin);
+        $this->assertFalse($moderator->canManageAllMyChannels());
+        $this->assertTrue($moderator->hasAdminPanelAccess());
+
+        $assigned = $this->makeChannel('Mod Assigned');
+        $other    = $this->makeChannel('Mod Not Assigned');
+        $moderator->managedChannels()->sync([$assigned->id]);
+
+        $response = $this->actingAs($moderator)
+            ->getJson('/admin/channels/admin')
+            ->assertOk();
+
+        $names = collect($response->json('data.data') ?? $response->json('data') ?? [])
+            ->pluck('channel_name')
+            ->all();
+
+        $this->assertContains('Mod Assigned', $names);
+        $this->assertNotContains('Mod Not Assigned', $names);
+    }
+
     public function test_route_binding_blocks_unassigned_channel_for_non_full_access_user(): void
     {
         $role = $this->makeRole('channel_manager', ['my_channels']);
