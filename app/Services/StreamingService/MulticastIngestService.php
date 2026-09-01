@@ -490,7 +490,7 @@ class MulticastIngestService
                 ' -map 0:p:%d -map_chapters -1 -ignore_unknown'
                 . '%s'
                 . ' -max_muxing_queue_size 65536'
-                . '%s%s'
+                . '%s'
             .   ' -f hls -hls_time 0.5 -hls_list_size 2'
             .   ' -hls_flags delete_segments+temp_file+independent_segments'
             .   ' -muxdelay 0 -muxpreload 0'
