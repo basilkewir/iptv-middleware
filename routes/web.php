@@ -112,7 +112,15 @@ Route::middleware(['web', 'guest', 'license.check'])->group(function () {
 
         $defaultLanding = $user->canManageAllMyChannels() ? '/admin/dashboard' : '/admin/channels/admin';
 
-        return redirect()->intended($defaultLanding);
+        $intended = $request->session()->get('url.intended');
+
+        // Restricted panel users may only deep-link to their own module;
+        // any other intended URL (e.g. a stale /admin/dashboard) is ignored.
+        if (! $user->canManageAllMyChannels() && ! str_starts_with((string) $intended, '/admin/channels/admin')) {
+            $intended = null;
+        }
+
+        return $intended ? redirect()->intended($defaultLanding) : redirect($defaultLanding);
     });
 });
 

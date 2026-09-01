@@ -81,9 +81,9 @@ class AdminModuleAccessTest extends TestCase
             ->assertOk();
     }
 
-    public function test_moderator_is_blocked_from_other_admin_modules(): void
+    public function test_moderator_is_redirected_to_my_channels_from_other_admin_modules(): void
     {
-        $forbidden = [
+        $redirected = [
             '/admin/dashboard',
             '/admin/users',
             '/admin/clients',
@@ -94,11 +94,52 @@ class AdminModuleAccessTest extends TestCase
             '/admin/settings',
         ];
 
-        foreach ($forbidden as $path) {
+        foreach ($redirected as $path) {
             $this->actingAs($this->moderator)
                 ->get($path)
-                ->assertForbidden();
+                ->assertRedirect('/admin/channels/admin');
         }
+    }
+
+    public function test_moderator_is_forbidden_with_json_from_other_admin_modules(): void
+    {
+        $this->actingAs($this->moderator)
+            ->getJson('/admin/dashboard')
+            ->assertForbidden();
+    }
+
+    public function test_moderator_login_always_lands_on_my_channels(): void
+    {
+        $this->from('/admin/dashboard')
+            ->post('/login', [
+                'username' => $this->moderator->username,
+                'password' => 'password',
+            ])
+            ->assertRedirect('/admin/channels/admin')
+            ->assertSessionHasNoErrors();
+
+        $this->assertAuthenticatedAs($this->moderator);
+    }
+
+    public function test_moderator_login_honors_deep_link_to_my_channels(): void
+    {
+        $this->from('/admin/channels/admin')
+            ->post('/login', [
+                'username' => $this->moderator->username,
+                'password' => 'password',
+            ])
+            ->assertRedirect('/admin/channels/admin');
+
+        $this->assertAuthenticatedAs($this->moderator);
+    }
+
+    public function test_admin_login_lands_on_dashboard(): void
+    {
+        $this->post('/login', [
+            'username' => $this->admin->username,
+            'password' => 'password',
+        ])
+            ->assertRedirect('/admin/dashboard');
     }
 
     public function test_moderator_can_open_an_assigned_channel_but_not_other_admin_channels(): void

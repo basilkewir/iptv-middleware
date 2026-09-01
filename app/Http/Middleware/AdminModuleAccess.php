@@ -29,6 +29,10 @@ class AdminModuleAccess
             return $next($request);
         }
 
-        abort(403, 'You do not have permission to access this module.');
+        if ($request->expectsJson()) {
+            return response()->json(['message' => 'You do not have permission to access this module.'], 403);
+        }
+
+        return redirect('/admin/channels/admin');
     }
 }
