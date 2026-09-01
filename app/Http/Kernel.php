@@ -77,6 +77,7 @@ class Kernel extends HttpKernel
 
         // Custom IPTV Middleware
         'admin'            => \App\Http\Middleware\AdminMiddleware::class,
+        'admin.module'     => \App\Http\Middleware\AdminModuleAccess::class,
         'license.check'    => \App\Http\Middleware\CheckLicenseRequired::class,
         'subscription'     => \App\Http\Middleware\VerifySubscription::class,
         'rate.limit'       => \App\Http\Middleware\RateLimiter::class,

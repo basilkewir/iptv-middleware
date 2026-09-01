@@ -110,7 +110,9 @@ Route::middleware(['web', 'guest', 'license.check'])->group(function () {
         \Illuminate\Support\Facades\Auth::login($user, $request->boolean('remember'));
         $request->session()->regenerate();
 
-        return redirect()->intended('/admin/dashboard');
+        $defaultLanding = $user->canManageAllMyChannels() ? '/admin/dashboard' : '/admin/channels/admin';
+
+        return redirect()->intended($defaultLanding);
     });
 });
 
@@ -123,7 +125,7 @@ Route::middleware(['auth:web', 'license.check'])->group(function () {
 Route::middleware('auth:web')->get('/dashboard', fn () => redirect()->route('admin.dashboard'));
 
 // ─── Admin Panel ───────────────────────────────────────────────────────────────
-Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddleware::class])
+Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddleware::class, \App\Http\Middleware\AdminModuleAccess::class])
     ->prefix('admin')
     ->name('admin.')
     ->group(function () {

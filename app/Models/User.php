@@ -201,6 +201,20 @@ class User extends Authenticatable
         return $this->is_admin || $this->hasPermission('full_access');
     }
 
+    public function permissionsList(): array
+    {
+        if ($this->is_admin) {
+            return ['full_access'];
+        }
+
+        return $this->roles
+            ->pluck('permissions')
+            ->flatten()
+            ->unique()
+            ->values()
+            ->all();
+    }
+
     public function scopeAdminUsers($query)
     {
         return $query->where(function ($q) {

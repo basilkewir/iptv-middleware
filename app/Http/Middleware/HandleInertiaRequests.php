@@ -29,6 +29,21 @@ class HandleInertiaRequests
                 ...(new Ziggy)->toArray(),
                 'location' => $request->url(),
             ],
+            'auth' => [
+                'user' => fn () => $request->user() ? [
+                    'id'              => $request->user()->id,
+                    'username'        => $request->user()->username,
+                    'email'           => $request->user()->email,
+                    'first_name'      => $request->user()->first_name,
+                    'last_name'       => $request->user()->last_name,
+                    'role'            => $request->user()->roleName(),
+                    'role_label'      => $request->user()->roleLabel(),
+                    'is_admin'        => $request->user()->is_admin,
+                    'is_reseller'     => $request->user()->is_reseller,
+                    'can_manage_all'  => $request->user()->canManageAllMyChannels(),
+                    'permissions'     => $request->user()->permissionsList(),
+                ] : null,
+            ],
         ]);
 
         return $next($request);

@@ -2,7 +2,7 @@
   <div class="min-h-screen bg-gray-950 flex">
     <aside class="w-64 bg-gray-900 border-r border-gray-800 flex flex-col fixed h-full z-30">
       <div class="p-5 border-b border-gray-800">
-        <Link :href="'/admin/dashboard'" class="flex items-center gap-3">
+        <Link :href="landing" class="flex items-center gap-3">
           <div class="w-9 h-9 bg-indigo-600 rounded-lg flex items-center justify-center">
             <span class="text-white font-bold text-sm">A</span>
           </div>
@@ -12,7 +12,7 @@
 
       <nav class="flex-1 p-4 space-y-1 overflow-y-auto">
         <Link
-          v-for="item in navItems"
+          v-for="item in visibleItems"
           :key="item.href"
           :href="item.href"
           class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors"
@@ -22,10 +22,10 @@
           {{ item.label }}
         </Link>
 
-        <div class="pt-4 mt-4 border-t border-gray-800">
+        <div v-if="visibleManagementItems.length" class="pt-4 mt-4 border-t border-gray-800">
           <p class="px-3 text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Management</p>
           <Link
-            v-for="item in managementItems"
+            v-for="item in visibleManagementItems"
             :key="item.href"
             :href="item.href"
             class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors"
@@ -48,7 +48,7 @@
           Sign Out
         </button>
         <Link
-          :href="'/admin/dashboard'"
+          :href="landing"
           class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
         >
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
@@ -74,6 +74,20 @@ import { route } from '@/Composables/useRoute'
 
 const page = usePage()
 
+const authUser = page.props.auth?.user
+
+const landing = authUser && !authUser.can_manage_all ? '/admin/channels/admin' : '/admin/dashboard'
+
+// Non-admin panel users only get the My Channels module; admins see everything.
+const canSee = (item) => {
+  if (!authUser) return false
+  if (authUser.can_manage_all) return true
+  return item.permissions === 'my_channels' && authUser.permissions?.includes('my_channels')
+}
+
+const visibleItems = navItems.filter(canSee)
+const visibleManagementItems = managementItems.filter(canSee)
+
 const signout = () => {
   router.post(route('logout'))
 }
@@ -97,7 +111,7 @@ const navItems = [
   { href: '/admin/clients', label: 'Clients', icon: icon('M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z') },
   { href: '/admin/channels', label: 'Channels', icon: icon('M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z') },
   { href: '/admin/channels/order', label: 'Channel Order', icon: icon('M3 4h18M3 8h18M3 12h18M3 16h18M3 20h18') },
-  { href: '/admin/channels/admin', label: 'My Channels', icon: icon('M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10') },
+  { href: '/admin/channels/admin', label: 'My Channels', permissions: 'my_channels', icon: icon('M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10') },
   { href: '/admin/vod', label: 'VOD', icon: icon('M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z') },
   { href: '/admin/epg', label: 'EPG', icon: icon('M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z') },
   { href: '/admin/resellers', label: 'Resellers', icon: icon('M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z') },
