@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Models\UserProfile;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
@@ -116,20 +117,42 @@ class AuthController extends Controller
         }
     }
 
-    public function logout(Request $request): JsonResponse
+    public function logout(Request $request): JsonResponse|RedirectResponse
     {
         try {
-            $request->user()->currentAccessToken()->delete();
+            $user = $request->user();
 
-            return response()->json([
-                'success' => true,
-                'message' => 'Logged out successfully.',
-            ], 200);
+            if ($user) {
+                $token = $user->currentAccessToken();
+                if ($token) {
+                    $token->delete();
+                }
+            }
+
+            Auth::guard('web')->logout();
+
+            if ($request->hasSession()) {
+                $request->session()->invalidate();
+                $request->session()->regenerateToken();
+            }
+
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Logged out successfully.',
+                ], 200);
+            }
+
+            return redirect('/');
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'An error occurred during logout.',
-            ], 500);
+            if ($request->expectsJson()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'An error occurred during logout.',
+                ], 500);
+            }
+
+            return redirect('/');
         }
     }
 

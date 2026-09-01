@@ -37,7 +37,16 @@
         </div>
       </nav>
 
-      <div class="p-4 border-t border-gray-800">
+      <div class="p-4 border-t border-gray-800 space-y-1">
+        <button
+          @click="signout"
+          class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-400 hover:text-red-400 hover:bg-gray-800 transition-colors"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+          </svg>
+          Sign Out
+        </button>
         <Link
           :href="'/admin/dashboard'"
           class="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-400 hover:text-white hover:bg-gray-800 transition-colors"
@@ -60,9 +69,14 @@
 
 <script setup>
 import { h } from 'vue'
-import { Link, usePage } from '@inertiajs/vue3'
+import { Link, router, usePage } from '@inertiajs/vue3'
+import { route } from '@/Composables/useRoute'
 
 const page = usePage()
+
+const signout = () => {
+  router.post(route('logout'))
+}
 
 const isActive = (href) => {
   const current = page.url
