@@ -1,0 +1,10 @@
+[Unit]
+Description=IPTV Middleware - Purge orphaned/duplicate/stopped ffmpeg ingests
+After=iptv-ingest.service
+
+[Service]
+Type=oneshot
+User=kotelhms
+WorkingDirectory=/home/kotelhms/middleware
+ExecStart=/usr/bin/php artisan channels:purge-ffmpeg
+TimeoutStartSec=120

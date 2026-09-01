@@ -56,6 +56,12 @@ class Kernel extends ConsoleKernel
         $schedule->command('channels:probe-sources')
             ->everyThreeMinutes()
             ->withoutOverlapping();
+
+        // Purge orphaned/duplicate/stopped/unused ffmpeg ingests while protecting
+        // multicast group readers and admin playouts. Runs every 5 minutes.
+        $schedule->command('channels:purge-ffmpeg')
+            ->everyFiveMinutes()
+            ->withoutOverlapping();
     }
 
     protected function commands(): void
