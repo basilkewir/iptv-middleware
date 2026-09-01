@@ -34,7 +34,7 @@
           draggable="true"
           @dragstart="dragStart(index)"
           @dragover.prevent="dragOver(index)"
-          @drop="drop"
+          @drop="drop(index)"
           @dragend="dragEnd"
           class="flex items-center gap-4 p-4 bg-gray-800 rounded-xl border border-gray-700 cursor-grab active:cursor-grabbing hover:border-gray-600 transition select-none"
           :class="{
@@ -119,8 +119,13 @@ function dragOver(index) {
 
 function drop(index) {
   if (dragIndex.value === null || dragIndex.value === index) return
-  const item = ordered.value.splice(dragIndex.value, 1)[0]
-  ordered.value.splice(index, 0, item)
+
+  const from = dragIndex.value
+  const item = ordered.value.splice(from, 1)[0]
+  // When moving downward, removing the item shifts the target index down by one.
+  const target = index > from ? index - 1 : index
+  ordered.value.splice(target, 0, item)
+
   dragIndex.value = null
   overIndex.value = null
   checkChanges()
