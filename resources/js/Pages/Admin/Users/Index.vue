@@ -122,6 +122,9 @@
                     <Link :href="route('admin.users.activity', user.id)" class="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-gray-600">
                       <Activity class="w-4 h-4" /> View Activity
                     </Link>
+                    <Link :href="route('admin.users.channels', user.id)" class="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-gray-600">
+                      <Tv class="w-4 h-4" /> Manage Channels
+                    </Link>
                     <button @click="resetPassword(user)" class="flex items-center gap-2 px-4 py-2 text-sm text-gray-300 hover:bg-gray-600 w-full text-left">
                       <Key class="w-4 h-4" /> Reset Password
                     </button>
@@ -202,7 +205,7 @@ import { ref, computed } from 'vue'
 import { Link, router } from '@inertiajs/vue3'
 import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
-import { Search, UserPlus, Upload, Pencil, Trash2, MoreVertical, Activity, Key, UserX, UserCheck, List, LayoutGrid } from 'lucide-vue-next'
+import { Search, UserPlus, Upload, Pencil, Trash2, MoreVertical, Activity, Key, UserX, UserCheck, List, LayoutGrid, Tv } from 'lucide-vue-next'
 
 const props = defineProps({
   users: { type: Object, default: () => ({ data: [], links: [], from: 0, to: 0, total: 0 }) },
@@ -233,6 +236,7 @@ const userFullName = (user) => {
 }
 
 const userRole = (user) => {
+  if (user.resolved_role) return user.resolved_role
   if (user.role) return user.role.charAt(0).toUpperCase() + user.role.slice(1)
   if (user.is_admin) return 'Admin'
   if (user.is_reseller) return 'Reseller'
@@ -240,7 +244,7 @@ const userRole = (user) => {
 }
 
 const roleClass = (user) => {
-  const role = user.role || (user.is_admin ? 'admin' : user.is_reseller ? 'reseller' : 'client')
+  const role = (user.resolved_role || user.role || (user.is_admin ? 'admin' : user.is_reseller ? 'reseller' : 'client')).toLowerCase()
   const map = { super_admin: 'bg-red-500/20 text-red-400', admin: 'bg-purple-500/20 text-purple-400', reseller: 'bg-blue-500/20 text-blue-400', client: 'bg-gray-500/20 text-gray-400', moderator: 'bg-yellow-500/20 text-yellow-400', support: 'bg-cyan-500/20 text-cyan-400' }
   return map[role] || map.client
 }

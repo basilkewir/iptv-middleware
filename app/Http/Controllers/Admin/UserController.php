@@ -17,7 +17,7 @@ class UserController extends Controller
 {
     public function index(Request $request): InertiaResponse|JsonResponse
     {
-        $query = User::query();
+        $query = User::query()->with('roles');
 
         if ($search = $request->input('search')) {
             $query->where(function ($q) use ($search) {
@@ -33,10 +33,18 @@ class UserController extends Controller
         }
 
         if ($role = $request->input('role')) {
-            $query->where('role', $role);
+            $query->where(function ($q) use ($role) {
+                $q->where('role', $role)
+                    ->orWhereHas('roles', fn ($r) => $r->where('name', $role));
+            });
         }
 
         $users = $query->latest()->paginate($request->input('per_page', 15));
+
+        $users->getCollection()->transform(function (User $user) {
+            $user->setAttribute('resolved_role', $user->roleLabel());
+            return $user;
+        });
 
         if ($request->expectsJson()) {
             return response()->json(['data' => $users]);
@@ -47,7 +55,7 @@ class UserController extends Controller
 
     public function show(Request $request, User $user): InertiaResponse|JsonResponse
     {
-        $user->load(['subscriptions.subscriptionPackage', 'watchHistory', 'bouquets']);
+        $user->load(['subscriptions.subscriptionPackage', 'watchHistory', 'bouquets', 'roles']);
 
         if ($request->expectsJson()) {
             return response()->json(['data' => $user]);
@@ -55,6 +63,7 @@ class UserController extends Controller
 
         return Inertia::render('Admin/Users/Edit', [
             'user' => $user,
+            'roles' => \App\Models\Role::orderBy('id')->get(),
             'packages' => \App\Models\SubscriptionPackage::where('is_active', true)->get(),
             'resellers' => User::where('is_reseller', true)->where('is_active', true)->get(),
             'bouquets' => \App\Models\Bouquet::where('is_active', true)->get(),
@@ -91,6 +100,8 @@ class UserController extends Controller
             'package_id' => 'nullable|exists:subscription_packages,id',
             'expiry_date' => 'nullable|date',
             'bouquet_ids' => 'nullable|array',
+            'role_ids' => 'nullable|array',
+            'role_ids.*' => 'exists:roles,id',
         ]);
 
         $validated['password'] = Hash::make($validated['password']);
@@ -100,14 +111,20 @@ class UserController extends Controller
         $validated['role'] = $validated['role'] ?? 'client';
 
         $bouquetIds = $validated['bouquet_ids'] ?? [];
+        $roleIds = $validated['role_ids'] ?? [];
         $packageId = $validated['package_id'] ?? null;
         $expiryDate = $validated['expiry_date'] ?? null;
-        unset($validated['bouquet_ids'], $validated['package_id'], $validated['expiry_date']);
+        unset($validated['bouquet_ids'], $validated['role_ids'], $validated['package_id'], $validated['expiry_date']);
 
         $user = User::create($validated);
 
         if (!empty($bouquetIds)) {
             $user->bouquets()->sync($bouquetIds);
+        }
+
+        if (!empty($roleIds)) {
+            $user->roles()->sync($roleIds);
+            $user->updateFlagsFromRoles();
         }
 
         if ($packageId && $expiryDate) {
@@ -143,6 +160,8 @@ class UserController extends Controller
             'country' => 'sometimes|nullable|string|max:100',
             'reseller_id' => 'sometimes|nullable|exists:users,id',
             'bouquet_ids' => 'sometimes|array',
+            'role_ids' => 'sometimes|array',
+            'role_ids.*' => 'exists:roles,id',
         ]);
 
         if (empty($validated['password'])) {
@@ -152,12 +171,18 @@ class UserController extends Controller
         }
 
         $bouquetIds = $validated['bouquet_ids'] ?? null;
-        unset($validated['bouquet_ids']);
+        $roleIds = $validated['role_ids'] ?? null;
+        unset($validated['bouquet_ids'], $validated['role_ids']);
 
         $user->update($validated);
 
         if ($bouquetIds !== null) {
             $user->bouquets()->sync($bouquetIds);
+        }
+
+        if ($roleIds !== null) {
+            $user->roles()->sync($roleIds);
+            $user->updateFlagsFromRoles();
         }
 
         return redirect()->route('admin.users.index')

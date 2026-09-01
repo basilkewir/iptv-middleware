@@ -124,6 +124,26 @@ class AdminChannel extends Model
         return 'channel_slug';
     }
 
+    /**
+     * Scope route-model binding so non-admin users can only reach the
+     * my-channels explicitly assigned to them.
+     */
+    public function resolveRouteBinding($value, $field = null)
+    {
+        $query = $this->resolveRouteBindingQuery($this->newQuery(), $value, $field);
+
+        $user = request()?->user();
+        if ($user && ! $user->canManageAllMyChannels()) {
+            $query->whereIn('id', function ($q) use ($user) {
+                $q->select('admin_channel_id')
+                    ->from('admin_channel_user')
+                    ->where('user_id', $user->id);
+            });
+        }
+
+        return $query->firstOrFail();
+    }
+
     public function bouquets(): BelongsToMany
     {
         return $this->belongsToMany(\App\Models\Bouquet::class, 'admin_channel_bouquet', 'admin_channel_id', 'bouquet_id');

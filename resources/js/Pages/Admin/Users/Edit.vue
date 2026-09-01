@@ -16,6 +16,9 @@
           <span class="ml-auto px-3 py-1 text-sm rounded-full" :class="user.is_active ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'">
             {{ user.is_active ? 'Active' : 'Inactive' }}
           </span>
+          <Link :href="route('admin.users.channels', user.id)" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center gap-2">
+            <Tv class="w-4 h-4" /> Manage Channels
+          </Link>
         </div>
       </div>
 
@@ -56,15 +59,11 @@
             <input v-model="profileForm.phone" type="tel" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500" />
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-300 mb-2">Role</label>
-            <select v-model="profileForm.role" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500">
-              <option value="super_admin">Super Admin</option>
-              <option value="admin">Admin</option>
-              <option value="reseller">Reseller</option>
-              <option value="moderator">Moderator</option>
-              <option value="support">Support</option>
-              <option value="client">Client</option>
+            <label class="block text-sm font-medium text-gray-300 mb-2">Roles</label>
+            <select v-model="profileForm.role_ids" multiple class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500 min-h-[120px]">
+              <option v-for="role in roles" :key="role.id" :value="role.id">{{ role.label || role.name }}</option>
             </select>
+            <p class="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple. Role permissions gate what this user can see and manage.</p>
           </div>
         </div>
         <div class="flex items-center gap-6">
@@ -248,7 +247,7 @@ import { ref, computed } from 'vue'
 import { Link, router, useForm } from '@inertiajs/vue3'
 import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
-import { ArrowLeft, Activity, Play } from 'lucide-vue-next'
+import { ArrowLeft, Activity, Play, Tv } from 'lucide-vue-next'
 
 const props = defineProps({
   user: { type: Object, required: true },
@@ -257,6 +256,7 @@ const props = defineProps({
   bouquets: { type: Array, default: () => [] },
   activityLog: { type: Array, default: () => [] },
   watchHistory: { type: Array, default: () => [] },
+  roles: { type: Array, default: () => [] },
 })
 
 const activeTab = ref('profile')
@@ -282,6 +282,7 @@ const profileForm = useForm({
   last_name: props.user.last_name || '',
   phone: props.user.phone || '',
   role: props.user.role || 'client',
+  role_ids: props.user.roles?.map(r => r.id) || [],
   is_active: props.user.is_active ?? true,
   is_admin: props.user.is_admin ?? false,
   is_reseller: props.user.is_reseller ?? false,

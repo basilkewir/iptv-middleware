@@ -80,6 +80,16 @@ class AdminChannelService
             $query->where('playout_mode', $filters['playout_mode']);
         }
 
+        // Restrict to the my-channels assigned to a specific user. Admins /
+        // full-access users pass `assigned_only => false` (or omit it) to get all.
+        if (!empty($filters['assigned_only']) && !empty($filters['assigned_user_id'])) {
+            $query->whereIn('id', function ($q) use ($filters) {
+                $q->select('admin_channel_id')
+                    ->from('admin_channel_user')
+                    ->where('user_id', $filters['assigned_user_id']);
+            });
+        }
+
         $allowedSortColumns = ['created_at', 'channel_name', 'channel_number', 'broadcast_status', 'featured_order'];
         $sortBy = in_array($filters['sort_by'] ?? '', $allowedSortColumns) ? $filters['sort_by'] : 'created_at';
         $sortDirection = ($filters['sort_direction'] ?? 'desc') === 'asc' ? 'asc' : 'desc';

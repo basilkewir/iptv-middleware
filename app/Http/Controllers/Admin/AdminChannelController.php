@@ -41,6 +41,12 @@ class AdminChannelController extends Controller
 
     public function index(Request $request): InertiaResponse|JsonResponse
     {
+        $user = $request->user();
+
+        // Non-admins / non-full-access users only see the my-channels assigned
+        // to them by an admin (via the user → my-channel assignment page).
+        $assignedOnly = ! $user?->canManageAllMyChannels();
+
         $filters = [
             'search' => $request->input('search'),
             'is_active' => $request->input('is_active'),
@@ -56,6 +62,8 @@ class AdminChannelController extends Controller
             'sort_by' => $request->input('sort_by', 'created_at'),
             'sort_direction' => $request->input('sort_direction', 'desc'),
             'per_page' => $request->input('per_page', 20),
+            'assigned_only' => $assignedOnly,
+            'assigned_user_id' => $assignedOnly ? $user?->id : null,
         ];
 
         $channels = $this->adminChannelService->getAllChannels($filters);

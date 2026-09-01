@@ -63,11 +63,9 @@
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-2">Role *</label>
-              <select v-model="form.role" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500">
-                <option value="super_admin">Super Admin</option>
-                <option value="admin">Admin</option>
-                <option value="moderator">Moderator</option>
-                <option value="support">Support</option>
+              <select v-model="form.role_id" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500">
+                <option value="">Select role</option>
+                <option v-for="role in adminRoleOptions" :key="role.id" :value="role.id">{{ role.label || role.name }}</option>
               </select>
             </div>
           </div>
@@ -227,7 +225,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useForm, Link } from '@inertiajs/vue3'
 import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
@@ -237,6 +235,7 @@ const props = defineProps({
   packages: { type: Array, default: () => [] },
   resellers: { type: Array, default: () => [] },
   bouquets: { type: Array, default: () => [] },
+  roles: { type: Array, default: () => [] },
 })
 
 const activeTab = ref('client')
@@ -254,6 +253,11 @@ const adminPermissions = [
   { key: 'reseller_management', label: 'Reseller Management' },
   { key: 'view_only', label: 'View Only' },
 ]
+
+const adminRoleOptions = computed(() => {
+  const names = new Set(props.roles.map(r => r.name))
+  return props.roles.filter(r => ['super_admin', 'admin', 'moderator', 'support'].includes(r.name) || names.has(r.name))
+})
 
 const resellerFeatures = [
   { key: 'allow_sub_resellers', label: 'Allow sub-resellers' },
@@ -275,6 +279,7 @@ const form = useForm({
   last_name: '',
   phone: '',
   role: 'client',
+  role_id: '',
   is_active: true,
   permissions: [],
   company_name: '',
@@ -297,17 +302,23 @@ const form = useForm({
   ip_restrict: '',
   country: '',
   bouquet_ids: [],
+  role_ids: [],
 })
 
 const submit = () => {
   if (activeTab.value === 'admin') {
-    form.role = form.role || 'admin'
+    const selected = props.roles.find(r => r.id === form.role_id)
+    form.role = selected?.name || form.role || 'admin'
     form.is_admin = true
+    form.role_ids = form.role_id ? [form.role_id] : []
   } else if (activeTab.value === 'reseller') {
     form.role = 'reseller'
     form.is_reseller = true
+    const resellerRole = props.roles.find(r => r.name === 'reseller')
+    form.role_ids = resellerRole ? [resellerRole.id] : []
   } else {
     form.role = 'client'
+    form.role_ids = []
   }
   form.post(route('admin.users.store'))
 }

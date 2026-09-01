@@ -149,4 +149,91 @@ class User extends Authenticatable
             })
             ->exists();
     }
+
+    public function roles(): BelongsToMany
+    {
+        return $this->belongsToMany(Role::class, 'role_user', 'user_id', 'role_id')
+            ->withTimestamps();
+    }
+
+    public function managedChannels(): BelongsToMany
+    {
+        return $this->belongsToMany(AdminChannel\AdminChannel::class, 'admin_channel_user', 'user_id', 'admin_channel_id')
+            ->withTimestamps();
+    }
+
+    public function hasRole(string $role): bool
+    {
+        return $this->roles()
+            ->whereIn('name', [$role, 'admin', 'super_admin'])
+            ->exists();
+    }
+
+    public function roleName(): string
+    {
+        $role = $this->roles()->value('name');
+        return $role ?: ($this->role ?? 'client');
+    }
+
+    public function roleLabel(): string
+    {
+        $role = $this->roles()->first();
+        return $role?->label ?: ucfirst($this->roleName());
+    }
+
+    public function hasPermission(string $permission): bool
+    {
+        foreach ($this->roles as $role) {
+            $perms = $role->permissions ?? [];
+            if (in_array('full_access', $perms, true)) {
+                return true;
+            }
+            if (in_array($permission, $perms, true)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function canManageAllMyChannels(): bool
+    {
+        return $this->is_admin || $this->hasPermission('full_access');
+    }
+
+    public function scopeAdminUsers($query)
+    {
+        return $query->where(function ($q) {
+            $q->where('is_admin', true)
+                ->orWhere('is_reseller', true)
+                ->orWhereHas('roles', fn ($r) => $r->where('name', '!=', 'client'));
+        });
+    }
+
+    public function hasAdminPanelAccess(): bool
+    {
+        if ($this->is_admin || $this->is_reseller) {
+            return true;
+        }
+
+        return $this->roles()->where('name', '!=', 'client')->exists();
+    }
+
+    public function updateFlagsFromRoles(): void
+    {
+        $names = $this->roles()->pluck('roles.name')->toArray();
+
+        if (array_intersect(['super_admin', 'admin'], $names)) {
+            $this->is_admin = true;
+            $this->is_reseller = false;
+        } elseif (in_array('reseller', $names, true)) {
+            $this->is_admin = false;
+            $this->is_reseller = true;
+        } elseif (in_array('moderator', $names, true)) {
+            $this->is_admin = true;
+            $this->is_reseller = false;
+        }
+
+        $this->save();
+    }
 }

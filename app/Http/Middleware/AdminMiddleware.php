@@ -20,7 +20,11 @@ class AdminMiddleware
 
         $user = Auth::user();
 
-        if (! $user->is_admin && ! $user->is_reseller) {
+        // A user is granted admin-panel access either through the legacy
+        // boolean flags or by holding a role that implies management duties
+        // (any role other than the plain `client` role). Holding a role does
+        // not grant full rights — channel access is still scoped per user.
+        if (! $user->is_admin && ! $user->is_reseller && ! $user->hasAdminPanelAccess()) {
             Auth::logout();
             if ($request->expectsJson()) {
                 return response()->json(['message' => 'Forbidden. Admin or reseller access required.'], 403);

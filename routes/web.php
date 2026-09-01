@@ -8,10 +8,12 @@ use App\Http\Controllers\Admin\DashboardController;
 use App\Http\Controllers\Admin\EpgController;
 use App\Http\Controllers\Admin\NotificationController;
 use App\Http\Controllers\Admin\PackageController;
+use App\Http\Controllers\Admin\RoleController;
 use App\Http\Controllers\Admin\ServerController;
 use App\Http\Controllers\Admin\QualityDetectionController;
 use App\Http\Controllers\Admin\SettingsController;
 use App\Http\Controllers\Admin\TranscodingController;
+use App\Http\Controllers\Admin\UserChannelAccessController;
 use App\Http\Controllers\Admin\UserController;
 use App\Http\Controllers\Admin\VODController;
 use App\Http\Controllers\HlsController;
@@ -99,7 +101,7 @@ Route::middleware(['web', 'guest', 'license.check'])->group(function () {
             ]);
         }
 
-        if (! $user->is_admin && ! $user->is_reseller) {
+        if (! $user->is_admin && ! $user->is_reseller && ! $user->hasAdminPanelAccess()) {
             throw \Illuminate\Validation\ValidationException::withMessages([
                 'general' => 'Access restricted to administrators and resellers only.',
             ]);
@@ -133,6 +135,7 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
             'packages' => SubscriptionPackage::where('is_active', true)->get(),
             'resellers' => \App\Models\User::where('is_reseller', true)->where('is_active', true)->get(),
             'bouquets' => \App\Models\Bouquet::where('is_active', true)->get(),
+            'roles' => \App\Models\Role::orderBy('id')->get(),
         ]))->name('users.create');
         Route::get('/users/bulk', fn () => Inertia::render('Admin/Users/BulkImport', [
             'packages' => SubscriptionPackage::where('is_active', true)->get(),
@@ -156,6 +159,16 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
         Route::post('/users/bulk-activate', [UserController::class, 'bulkActivate'])->name('users.bulk-activate');
         Route::post('/users/bulk-suspend', [UserController::class, 'bulkSuspend'])->name('users.bulk-suspend');
         Route::post('/users/bulk-delete', [UserController::class, 'bulkDelete'])->name('users.bulk-delete');
+
+        // ─── Roles ─────────────────────────────────────────────────────────
+        Route::get('/roles', [RoleController::class, 'index'])->name('roles.index');
+        Route::post('/roles', [RoleController::class, 'store'])->name('roles.store');
+        Route::put('/roles/{role}', [RoleController::class, 'update'])->name('roles.update');
+        Route::delete('/roles/{role}', [RoleController::class, 'destroy'])->name('roles.destroy');
+
+        // ─── User → My-Channel assignment ──────────────────────────────────
+        Route::get('/users/{user}/channels', [UserChannelAccessController::class, 'edit'])->name('users.channels');
+        Route::put('/users/{user}/channels', [UserChannelAccessController::class, 'update'])->name('users.channels.update');
 
         // ─── Clients ──────────────────────────────────────────────────────
         Route::get('/clients', [\App\Http\Controllers\Admin\ClientController::class, 'index'])->name('clients.index');
