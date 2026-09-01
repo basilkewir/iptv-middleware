@@ -43,13 +43,13 @@ class RoleBasedAccessTest extends TestCase
         ]);
     }
 
-    private function makeChannel(string $name): AdminChannel
+    private function makeChannel(string $name, bool $isMyChannel = true): AdminChannel
     {
         return AdminChannel::create([
             'channel_name'   => $name,
             'channel_slug'   => Str::slug($name) . '-' . uniqid(),
             'channel_type'   => 'admin',
-            'is_my_channel'  => true,
+            'is_my_channel'  => $isMyChannel,
             'stream_type'    => 'hls',
             'created_by'     => $this->admin->id,
         ]);
@@ -114,16 +114,17 @@ class RoleBasedAccessTest extends TestCase
         $this->assertTrue($client->canManageAllMyChannels());
     }
 
-    public function test_non_full_access_user_only_sees_assigned_channels(): void
+    public function test_non_full_access_user_sees_all_admin_my_channels(): void
     {
         $role = $this->makeRole('channel_manager', ['my_channels']);
         $manager = User::factory()->create(['role' => 'client']);
         $manager->roles()->attach($role->id);
         $manager->updateFlagsFromRoles();
 
-        $assigned = $this->makeChannel('Assigned One');
-        $other    = $this->makeChannel('Not Assigned');
-        $manager->managedChannels()->sync([$assigned->id]);
+        $this->assertFalse($manager->canManageAllMyChannels());
+
+        $a = $this->makeChannel('My Channel A');
+        $b = $this->makeChannel('My Channel B');
 
         $response = $this->actingAs($manager)
             ->getJson('/admin/channels/admin')
@@ -133,11 +134,11 @@ class RoleBasedAccessTest extends TestCase
             ->pluck('channel_name')
             ->all();
 
-        $this->assertContains('Assigned One', $names);
-        $this->assertNotContains('Not Assigned', $names);
+        $this->assertContains('My Channel A', $names);
+        $this->assertContains('My Channel B', $names);
     }
 
-    public function test_moderator_is_not_an_admin_and_only_sees_assigned_channels(): void
+    public function test_moderator_is_not_an_admin_but_manages_all_my_channels(): void
     {
         $role = $this->makeRole('moderator', ['my_channels', 'content_management']);
         $moderator = User::factory()->create(['role' => 'moderator']);
@@ -148,9 +149,8 @@ class RoleBasedAccessTest extends TestCase
         $this->assertFalse($moderator->canManageAllMyChannels());
         $this->assertTrue($moderator->hasAdminPanelAccess());
 
-        $assigned = $this->makeChannel('Mod Assigned');
-        $other    = $this->makeChannel('Mod Not Assigned');
-        $moderator->managedChannels()->sync([$assigned->id]);
+        $this->makeChannel('Mod Channel One');
+        $this->makeChannel('Mod Channel Two');
 
         $response = $this->actingAs($moderator)
             ->getJson('/admin/channels/admin')
@@ -160,27 +160,31 @@ class RoleBasedAccessTest extends TestCase
             ->pluck('channel_name')
             ->all();
 
-        $this->assertContains('Mod Assigned', $names);
-        $this->assertNotContains('Mod Not Assigned', $names);
+        $this->assertContains('Mod Channel One', $names);
+        $this->assertContains('Mod Channel Two', $names);
     }
 
-    public function test_route_binding_blocks_unassigned_channel_for_non_full_access_user(): void
+    public function test_route_binding_allows_any_my_channel_but_blocks_other_channel_types(): void
     {
         $role = $this->makeRole('channel_manager', ['my_channels']);
         $manager = User::factory()->create(['role' => 'client']);
         $manager->roles()->attach($role->id);
         $manager->updateFlagsFromRoles();
 
-        $assigned = $this->makeChannel('Assigned One');
-        $other    = $this->makeChannel('Not Assigned');
-        $manager->managedChannels()->sync([$assigned->id]);
+        $one = $this->makeChannel('My Channel One');
+        $two = $this->makeChannel('My Channel Two');
+        $regular = $this->makeChannel('Regular Channel', false);
 
         $this->actingAs($manager)
-            ->getJson($this->channelUrl($assigned))
+            ->getJson($this->channelUrl($one))
             ->assertOk();
 
         $this->actingAs($manager)
-            ->getJson($this->channelUrl($other))
+            ->getJson($this->channelUrl($two))
+            ->assertOk();
+
+        $this->actingAs($manager)
+            ->getJson($this->channelUrl($regular))
             ->assertNotFound();
     }
 
@@ -217,15 +221,15 @@ class RoleBasedAccessTest extends TestCase
         $this->assertFalse($client->managedChannels()->whereKey($b->id)->exists());
     }
 
-    public function test_role_permission_gates_managed_channel_access(): void
+    public function test_view_only_user_can_open_my_channels_but_not_regular_channels(): void
     {
         $role = $this->makeRole('viewer', ['view_only']);
         $viewer = User::factory()->create(['role' => 'client']);
         $viewer->roles()->attach($role->id);
         $viewer->updateFlagsFromRoles();
 
-        $channel = $this->makeChannel('Vip Channel');
-        $viewer->managedChannels()->sync([$channel->id]);
+        $channel  = $this->makeChannel('Vip Channel');
+        $regular  = $this->makeChannel('Regular Channel', false);
 
         $this->assertFalse($viewer->canManageAllMyChannels());
 
@@ -234,7 +238,7 @@ class RoleBasedAccessTest extends TestCase
             ->assertOk();
 
         $this->actingAs($viewer)
-            ->getJson($this->channelUrl($this->makeChannel('Other')))
+            ->getJson($this->channelUrl($regular))
             ->assertNotFound();
     }
 }

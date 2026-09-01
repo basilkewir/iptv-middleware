@@ -44,13 +44,13 @@ class AdminModuleAccessTest extends TestCase
         $this->withoutMiddleware(\App\Http\Middleware\VerifyCsrfToken::class);
     }
 
-    private function makeChannel(string $name): AdminChannel
+    private function makeChannel(string $name, bool $isMyChannel = true): AdminChannel
     {
         return AdminChannel::create([
             'channel_name'  => $name,
             'channel_slug'  => Str::slug($name) . '-' . uniqid(),
             'channel_type'  => 'admin',
-            'is_my_channel' => true,
+            'is_my_channel' => $isMyChannel,
             'stream_type'   => 'hls',
             'created_by'    => $this->admin->id,
         ]);
@@ -142,10 +142,11 @@ class AdminModuleAccessTest extends TestCase
             ->assertRedirect('/admin/dashboard');
     }
 
-    public function test_moderator_can_open_an_assigned_channel_but_not_other_admin_channels(): void
+    public function test_moderator_can_manage_all_admin_created_my_channels(): void
     {
-        $assigned = $this->makeChannel('Mod Assigned');
-        $other    = $this->makeChannel('Mod Other');
+        $assigned = $this->makeChannel('Mod Channel A');
+        $other    = $this->makeChannel('Mod Channel B');
+        $regular  = $this->makeChannel('Regular', false);
         $this->moderator->managedChannels()->sync([$assigned->id]);
 
         $this->actingAs($this->moderator)
@@ -154,6 +155,10 @@ class AdminModuleAccessTest extends TestCase
 
         $this->actingAs($this->moderator)
             ->get("/admin/channels/admin/{$other->channel_slug}")
+            ->assertOk();
+
+        $this->actingAs($this->moderator)
+            ->get("/admin/channels/admin/{$regular->channel_slug}")
             ->assertNotFound();
     }
 }

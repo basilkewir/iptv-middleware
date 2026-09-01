@@ -125,8 +125,8 @@ class AdminChannel extends Model
     }
 
     /**
-     * Scope route-model binding so non-admin users can only reach the
-     * my-channels explicitly assigned to them.
+     * Scope route-model binding so non-admin users stay within the My Channels
+     * module: they can reach any my-channel (created by admins), but nothing else.
      */
     public function resolveRouteBinding($value, $field = null)
     {
@@ -134,11 +134,7 @@ class AdminChannel extends Model
 
         $user = request()?->user();
         if ($user && ! $user->canManageAllMyChannels()) {
-            $query->whereIn('id', function ($q) use ($user) {
-                $q->select('admin_channel_id')
-                    ->from('admin_channel_user')
-                    ->where('user_id', $user->id);
-            });
+            $query->where('is_my_channel', true);
         }
 
         return $query->firstOrFail();

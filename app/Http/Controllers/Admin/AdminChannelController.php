@@ -43,10 +43,9 @@ class AdminChannelController extends Controller
     {
         $user = $request->user();
 
-        // Non-admins / non-full-access users only see the my-channels assigned
-        // to them by an admin (via the user → my-channel assignment page).
-        $assignedOnly = ! $user?->canManageAllMyChannels();
-
+        // The My Channels module lists every admin-created my-channel. Whoever
+        // reaches this page (admin or moderator) manages that set; the module
+        // gate above keeps non-admins out of every other admin section.
         $filters = [
             'search' => $request->input('search'),
             'is_active' => $request->input('is_active'),
@@ -62,8 +61,8 @@ class AdminChannelController extends Controller
             'sort_by' => $request->input('sort_by', 'created_at'),
             'sort_direction' => $request->input('sort_direction', 'desc'),
             'per_page' => $request->input('per_page', 20),
-            'assigned_only' => $assignedOnly,
-            'assigned_user_id' => $assignedOnly ? $user?->id : null,
+            'assigned_only' => false,
+            'assigned_user_id' => null,
         ];
 
         $channels = $this->adminChannelService->getAllChannels($filters);
