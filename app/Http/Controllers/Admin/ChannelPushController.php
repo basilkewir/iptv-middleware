@@ -21,7 +21,12 @@ class ChannelPushController extends Controller
     {
         $channels = Channel::where('is_active', true)
             ->orderBy('channel_number')
-            ->get(['id', 'name', 'channel_number', 'stream_url', 'stream_type', 'active_stream_url']);
+            ->with(['categories', 'bouquets'])
+            ->get([
+                'id', 'name', 'channel_number', 'stream_url', 'stream_type',
+                'active_stream_url', 'logo_url', 'quality_level',
+                'is_active', 'source_status',
+            ]);
 
         $destinations = PushDestination::orderBy('name')->get();
 

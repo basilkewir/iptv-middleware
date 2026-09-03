@@ -49,7 +49,7 @@
                 {{ push.protocol.toUpperCase() }}
               </span>
             </div>
-            <p class="text-gray-400 text-xs mb-3">→ {{ push.destination }}</p>
+            <p class="text-gray-400 text-xs mb-3">&rarr; {{ push.destination }}</p>
             <div class="flex items-center justify-between">
               <span class="text-gray-500 text-xs">{{ formatTime(push.started_at) }}</span>
               <button
@@ -67,24 +67,53 @@
       <div class="bg-gray-800 rounded-xl border border-indigo-500/30 p-6">
         <h2 class="text-lg font-semibold text-white mb-4">Push Channel to External Server</h2>
 
-        <div v-if="destinations.length === 0 || channels.length === 0" class="text-center py-8 text-gray-500 text-sm">
-          {{ destinations.length === 0 ? 'Add a push destination below first.' : 'No active channels available.' }}
+        <div v-if="destinations.length === 0" class="text-center py-8 text-gray-500 text-sm">
+          Add a push destination below first.
         </div>
 
         <div v-else class="space-y-4">
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <!-- Channel Picker -->
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-1">Channel <span class="text-red-400">*</span></label>
-              <select
-                v-model="selectedChannelId"
-                class="w-full px-4 py-2.5 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+              <button
+                @click="showChannelPicker = true"
+                class="w-full px-4 py-2.5 bg-gray-700 border border-gray-600 rounded-lg text-left focus:outline-none focus:border-indigo-500 transition hover:border-gray-500"
               >
-                <option value="">Select a channel signal…</option>
-                <option v-for="ch in channels" :key="ch.id" :value="ch.id">
-                  #{{ ch.channel_number }} — {{ ch.name }} ({{ ch.stream_type?.toUpperCase() || '—' }})
-                </option>
-              </select>
+                <div v-if="selectedChannel" class="flex items-center gap-3">
+                  <img
+                    v-if="selectedChannel.logo_url"
+                    :src="selectedChannel.logo_url"
+                    :alt="selectedChannel.name"
+                    class="w-8 h-8 rounded object-cover bg-gray-600"
+                  />
+                  <div v-else class="w-8 h-8 rounded bg-gray-600 flex items-center justify-center">
+                    <Tv class="w-4 h-4 text-gray-400" />
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <p class="text-white text-sm font-medium truncate">{{ selectedChannel.name }}</p>
+                    <p class="text-gray-400 text-xs">
+                      #{{ selectedChannel.channel_number }}
+                      &middot; {{ selectedChannel.stream_type?.toUpperCase() || '—' }}
+                    </p>
+                  </div>
+                  <span
+                    class="px-2 py-0.5 text-xs rounded-full shrink-0"
+                    :class="selectedChannel.source_status === 'online' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'"
+                  >
+                    {{ selectedChannel.source_status === 'online' ? 'Online' : 'Offline' }}
+                  </span>
+                </div>
+                <div v-else class="flex items-center gap-3">
+                  <div class="w-8 h-8 rounded bg-gray-600 flex items-center justify-center">
+                    <Tv class="w-4 h-4 text-gray-400" />
+                  </div>
+                  <span class="text-gray-400 text-sm">Click to choose a channel…</span>
+                </div>
+              </button>
             </div>
+
+            <!-- Destination -->
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-1">Destination <span class="text-red-400">*</span></label>
               <select
@@ -99,27 +128,30 @@
             </div>
           </div>
 
-          <div v-if="selectedChannelId && selectedDestId" class="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+          <!-- Push Confirmation -->
+          <div v-if="selectedChannel && selectedDestId" class="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-3">
-                <div class="w-8 h-8 bg-green-500/20 rounded-full flex items-center justify-center">
-                  <Play class="w-4 h-4 text-green-400" />
+                <div class="w-10 h-10 bg-green-500/20 rounded-full flex items-center justify-center">
+                  <Play class="w-5 h-5 text-green-400" />
                 </div>
                 <div>
                   <p class="text-white text-sm font-medium">
-                    {{ getChannelName(selectedChannelId) }}
+                    {{ selectedChannel.name }}
                     <span class="text-gray-400 mx-1">&rarr;</span>
                     {{ getDestName(selectedDestId) }}
                   </p>
                   <p class="text-gray-400 text-xs">
                     {{ getDestProtocol(selectedDestId).toUpperCase() }}
                     <span v-if="getDestAuth(selectedDestId)"> &mdash; Authenticated</span>
+                    <span class="mx-1">&middot;</span>
+                    {{ selectedChannel.stream_type?.toUpperCase() || '—' }} source
                   </p>
                 </div>
               </div>
               <button
-                v-if="isPushing(selectedChannelId, selectedDestId)"
-                @click="stopPush(selectedChannelId, selectedDestId)"
+                v-if="isPushing(selectedChannel.id, selectedDestId)"
+                @click="stopPush(selectedChannel.id, selectedDestId)"
                 :disabled="loadingSingle"
                 class="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-sm rounded-lg transition flex items-center gap-2"
               >
@@ -129,8 +161,8 @@
               </button>
               <button
                 v-else
-                @click="startPush(selectedChannelId, selectedDestId)"
-                :disabled="loadingSingle"
+                @click="startPush(selectedChannel.id, selectedDestId)"
+                :disabled="loadingSingle || !selectedChannel.active_stream_url"
                 class="px-5 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition flex items-center gap-2"
               >
                 <Loader2 v-if="loadingSingle" class="w-4 h-4 animate-spin" />
@@ -187,7 +219,7 @@
                   <span v-if="dest.username" class="text-green-400 text-xs flex items-center gap-1">
                     <Lock class="w-3 h-3" /> {{ dest.username }}
                   </span>
-                  <span v-else class="text-gray-600 text-xs">—</span>
+                  <span v-else class="text-gray-600 text-xs">&mdash;</span>
                 </td>
                 <td class="py-3 pr-4">
                   <span
@@ -241,63 +273,151 @@
 
         <div v-else class="overflow-x-auto">
           <table class="w-full text-sm">
-                <thead>
-                  <tr class="border-b border-gray-700 text-left">
-                    <th class="pb-3 pr-4 w-8 text-gray-400 font-medium">#</th>
-                    <th class="pb-3 pr-4 text-gray-400 font-medium">Channel</th>
-                    <th class="pb-3 pr-4 text-gray-400 font-medium">Type</th>
-                    <th
-                      v-for="dest in activeDestinations"
-                      :key="dest.id"
-                      class="pb-3 px-2 text-gray-400 font-medium text-center min-w-[120px]"
-                    >
-                      <div class="flex flex-col items-center">
-                        <span>{{ dest.name }}</span>
-                        <span class="text-xs text-gray-500">{{ dest.protocol.toUpperCase() }}</span>
-                      </div>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody class="divide-y divide-gray-700/50">
-                  <tr v-for="ch in filteredChannels" :key="ch.id" class="hover:bg-gray-700/30 transition">
-                    <td class="py-3 pr-4 text-gray-500 font-mono">{{ ch.channel_number }}</td>
-                    <td class="py-3 pr-4">
-                      <span class="text-white font-medium">{{ ch.name }}</span>
-                    </td>
-                    <td class="py-3 pr-4">
-                      <span class="text-gray-400 text-xs font-mono">{{ ch.stream_type?.toUpperCase() || '—' }}</span>
-                    </td>
-                    <td
-                      v-for="dest in activeDestinations"
-                      :key="dest.id"
-                      class="py-3 px-2 text-center"
-                    >
-                      <button
-                        v-if="isPushing(ch.id, dest.id)"
-                        @click="stopPush(ch.id, dest.id)"
-                        :disabled="loadingPush[`${ch.id}-${dest.id}`]"
-                        class="px-3 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 text-xs rounded transition inline-flex items-center gap-1"
-                      >
-                        <Loader2 v-if="loadingPush[`${ch.id}-${dest.id}`]" class="w-3 h-3 animate-spin" />
-                        <Square v-else class="w-3 h-3" />
-                        Stop
-                      </button>
-                      <button
-                        v-else
-                        @click="startPush(ch.id, dest.id)"
-                        :disabled="loadingPush[`${ch.id}-${dest.id}`] || !ch.active_stream_url"
-                        class="px-3 py-1 bg-green-600/20 hover:bg-green-600/40 text-green-400 text-xs rounded transition inline-flex items-center gap-1 disabled:opacity-40"
-                      >
-                        <Loader2 v-if="loadingPush[`${ch.id}-${dest.id}`]" class="w-3 h-3 animate-spin" />
-                        <Play v-else class="w-3 h-3" />
-                        Push
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+            <thead>
+              <tr class="border-b border-gray-700 text-left">
+                <th class="pb-3 pr-4 w-8 text-gray-400 font-medium">#</th>
+                <th class="pb-3 pr-4 text-gray-400 font-medium">Channel</th>
+                <th class="pb-3 pr-4 text-gray-400 font-medium">Type</th>
+                <th
+                  v-for="dest in activeDestinations"
+                  :key="dest.id"
+                  class="pb-3 px-2 text-gray-400 font-medium text-center min-w-[120px]"
+                >
+                  <div class="flex flex-col items-center">
+                    <span>{{ dest.name }}</span>
+                    <span class="text-xs text-gray-500">{{ dest.protocol.toUpperCase() }}</span>
+                  </div>
+                </th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-700/50">
+              <tr v-for="ch in filteredChannels" :key="ch.id" class="hover:bg-gray-700/30 transition">
+                <td class="py-3 pr-4 text-gray-500 font-mono">{{ ch.channel_number }}</td>
+                <td class="py-3 pr-4">
+                  <div class="flex items-center gap-2">
+                    <img v-if="ch.logo_url" :src="ch.logo_url" :alt="ch.name" class="w-6 h-6 rounded object-cover bg-gray-600" />
+                    <span class="text-white font-medium">{{ ch.name }}</span>
+                  </div>
+                </td>
+                <td class="py-3 pr-4">
+                  <span class="text-gray-400 text-xs font-mono">{{ ch.stream_type?.toUpperCase() || '—' }}</span>
+                </td>
+                <td
+                  v-for="dest in activeDestinations"
+                  :key="dest.id"
+                  class="py-3 px-2 text-center"
+                >
+                  <button
+                    v-if="isPushing(ch.id, dest.id)"
+                    @click="stopPush(ch.id, dest.id)"
+                    :disabled="loadingPush[`${ch.id}-${dest.id}`]"
+                    class="px-3 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 text-xs rounded transition inline-flex items-center gap-1"
+                  >
+                    <Loader2 v-if="loadingPush[`${ch.id}-${dest.id}`]" class="w-3 h-3 animate-spin" />
+                    <Square v-else class="w-3 h-3" />
+                    Stop
+                  </button>
+                  <button
+                    v-else
+                    @click="startPush(ch.id, dest.id)"
+                    :disabled="loadingPush[`${ch.id}-${dest.id}`] || !ch.active_stream_url"
+                    class="px-3 py-1 bg-green-600/20 hover:bg-green-600/40 text-green-400 text-xs rounded transition inline-flex items-center gap-1 disabled:opacity-40"
+                  >
+                    <Loader2 v-if="loadingPush[`${ch.id}-${dest.id}`]" class="w-3 h-3 animate-spin" />
+                    <Play v-else class="w-3 h-3" />
+                    Push
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
+
+      <!-- Channel Picker Modal -->
+      <Teleport to="body">
+        <div
+          v-if="showChannelPicker"
+          class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          @click.self="showChannelPicker = false"
+        >
+          <div class="bg-gray-800 rounded-xl border border-gray-700 w-full max-w-2xl max-h-[80vh] flex flex-col shadow-2xl">
+            <div class="flex items-center justify-between p-4 border-b border-gray-700">
+              <h3 class="text-lg font-semibold text-white">Select Channel</h3>
+              <button @click="showChannelPicker = false" class="text-gray-400 hover:text-white">
+                <X class="w-5 h-5" />
+              </button>
+            </div>
+            <div class="p-4 border-b border-gray-700">
+              <div class="relative">
+                <Search class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+                <input
+                  v-model="pickerSearch"
+                  type="text"
+                  placeholder="Search by name or channel number…"
+                  class="w-full pl-10 pr-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-indigo-500"
+                  ref="pickerSearchInput"
+                />
+              </div>
+            </div>
+            <div class="flex-1 overflow-y-auto p-4 space-y-2">
+              <div v-if="pickerChannels.length === 0" class="text-center py-8 text-gray-500 text-sm">
+                No channels found.
+              </div>
+              <button
+                v-for="ch in pickerChannels"
+                :key="ch.id"
+                @click="selectChannel(ch)"
+                class="w-full flex items-center gap-3 p-3 rounded-lg border transition text-left"
+                :class="selectedChannel?.id === ch.id
+                  ? 'bg-indigo-600/20 border-indigo-500/50'
+                  : 'bg-gray-700/30 border-gray-600 hover:bg-gray-700/60 hover:border-gray-500'"
+              >
+                <img
+                  v-if="ch.logo_url"
+                  :src="ch.logo_url"
+                  :alt="ch.name"
+                  class="w-10 h-10 rounded object-cover bg-gray-600"
+                />
+                <div v-else class="w-10 h-10 rounded bg-gray-600 flex items-center justify-center shrink-0">
+                  <Tv class="w-5 h-5 text-gray-400" />
+                </div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="text-white font-medium truncate">{{ ch.name }}</span>
+                    <span class="text-gray-500 text-xs">#{{ ch.channel_number }}</span>
+                  </div>
+                  <div class="flex items-center gap-2 mt-0.5">
+                    <span class="text-gray-400 text-xs font-mono">{{ ch.stream_type?.toUpperCase() || '—' }}</span>
+                    <span
+                      class="px-1.5 py-0.5 text-xs rounded-full"
+                      :class="ch.source_status === 'online' ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'"
+                    >
+                      {{ ch.source_status === 'online' ? 'Online' : 'Offline' }}
+                    </span>
+                  </div>
+                </div>
+                <Check v-if="selectedChannel?.id === ch.id" class="w-5 h-5 text-indigo-400 shrink-0" />
+              </button>
+            </div>
+            <div class="flex justify-end gap-3 p-4 border-t border-gray-700">
+              <button
+                @click="showChannelPicker = false"
+                class="px-4 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded-lg transition text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                @click="showChannelPicker = false"
+                :disabled="!selectedChannel"
+                class="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg transition text-sm"
+              >
+                Select
+              </button>
+            </div>
+          </div>
+        </div>
+      </Teleport>
 
       <!-- Destination Modal -->
       <Teleport to="body">
@@ -438,9 +558,9 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, nextTick, watch } from 'vue'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
-import { Radio, Plus, Loader2, Square, Play, X, Lock } from 'lucide-vue-next'
+import { Radio, Plus, Loader2, Square, Play, X, Lock, Tv, Search, Check } from 'lucide-vue-next'
 
 const props = defineProps({
   channels:      { type: Array, default: () => [] },
@@ -450,14 +570,18 @@ const props = defineProps({
 })
 
 const search = ref('')
+const selectedChannel = ref(null)
 const selectedChannelId = ref('')
 const selectedDestId = ref('')
 const showDestModal = ref(false)
+const showChannelPicker = ref(false)
+const pickerSearch = ref('')
 const editingDest = ref(null)
 const savingDest = ref(false)
 const stoppingAll = ref(false)
 const loadingSingle = ref(false)
 const loadingPush = reactive({})
+const pickerSearchInput = ref(null)
 
 const destForm = reactive({
   name: '',
@@ -480,6 +604,27 @@ const filteredChannels = computed(() => {
   )
 })
 
+const pickerChannels = computed(() => {
+  if (!pickerSearch.value.trim()) return props.channels
+  const q = pickerSearch.value.toLowerCase()
+  return props.channels.filter(
+    ch => ch.name.toLowerCase().includes(q) || String(ch.channel_number).includes(q)
+  )
+})
+
+watch(showChannelPicker, (val) => {
+  if (val) {
+    pickerSearch.value = ''
+    nextTick(() => pickerSearchInput.value?.focus())
+  }
+})
+
+const selectChannel = (ch) => {
+  selectedChannel.value = ch
+  selectedChannelId.value = ch.id
+  showChannelPicker.value = false
+}
+
 const isPushing = (channelId, destinationId) => {
   return props.pushMap[channelId] && props.pushMap[channelId][destinationId]
 }
@@ -487,11 +632,6 @@ const isPushing = (channelId, destinationId) => {
 const findDestinationId = (name) => {
   const dest = props.destinations.find(d => d.name === name)
   return dest ? dest.id : null
-}
-
-const getChannelName = (id) => {
-  const ch = props.channels.find(c => c.id === id)
-  return ch ? ch.name : ''
 }
 
 const getDestName = (id) => {
