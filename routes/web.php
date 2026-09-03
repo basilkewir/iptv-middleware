@@ -1,23 +1,22 @@
 <?php
 
+use App\Http\Controllers\Admin\AdminChannelController;
 use App\Http\Controllers\Admin\BouquetController;
 use App\Http\Controllers\Admin\CategoryController;
 use App\Http\Controllers\Admin\ChannelController;
-use App\Http\Controllers\Admin\AdminChannelController;
 use App\Http\Controllers\Admin\DashboardController;
 use App\Http\Controllers\Admin\EpgController;
 use App\Http\Controllers\Admin\NotificationController;
 use App\Http\Controllers\Admin\PackageController;
+use App\Http\Controllers\Admin\QualityDetectionController;
 use App\Http\Controllers\Admin\RoleController;
 use App\Http\Controllers\Admin\ServerController;
-use App\Http\Controllers\Admin\QualityDetectionController;
 use App\Http\Controllers\Admin\SettingsController;
 use App\Http\Controllers\Admin\TranscodingController;
 use App\Http\Controllers\Admin\UserChannelAccessController;
 use App\Http\Controllers\Admin\UserController;
 use App\Http\Controllers\Admin\VODController;
 use App\Http\Controllers\HlsController;
-
 use App\Models\Channel;
 use App\Models\ContentCategory;
 use App\Models\Notification;
@@ -52,26 +51,56 @@ Route::middleware('web')->group(function () {
             'license_key' => 'required|string',
         ]);
 
-        $license = \App\Models\License::where('license_key', trim($validated['license_key']))->first();
+        $licenseKey = trim($validated['license_key']);
 
-        if (! $license) {
-            throw \Illuminate\Validation\ValidationException::withMessages([
-                'license_key' => 'This license key is invalid, expired, or inactive.',
-            ]);
+        // First, check local database
+        $license = \App\Models\License::where('license_key', $licenseKey)->first();
+
+        if ($license && $license->isValid()) {
+            if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
+                $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
+            }
+
+            return redirect()->route('login')->with('success', 'License activated successfully. You can now sign in.');
         }
 
-        // A suspended license can be recovered by re-entering its correct key.
-        if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
-            $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
+        // Not found locally or not valid — validate against kewirdev.com
+        $kewirService = app(\App\Services\KewirDevLicenseService::class);
+        $result = $kewirService->validateLicense($licenseKey, [
+            'device_id' => gethostname() ?: 'web-'.php_uname('n'),
+            'device_type' => 'admin_panel',
+            'device_name' => 'IPTV Middleware Admin',
+        ]);
+
+        if (! empty($result['success'])) {
+            // Remote validation passed — sync to local DB
+            $features = $result['features'] ?? ['*'];
+            $expiresAt = $result['expires_at'] ?? now()->addYear();
+
+            if ($license) {
+                $license->update([
+                    'status' => 'active',
+                    'features' => $features,
+                    'expires_at' => $expiresAt,
+                ]);
+            } else {
+                \App\Models\License::create([
+                    'license_key' => $licenseKey,
+                    'status' => 'active',
+                    'license_type' => 'enterprise',
+                    'hotel_name' => $result['hotel_name'] ?? 'Licensed',
+                    'max_devices' => $result['max_devices'] ?? 50,
+                    'expires_at' => $expiresAt,
+                    'features' => $features,
+                ]);
+            }
+
+            return redirect()->route('login')->with('success', 'License activated via kewirdev.com. You can now sign in.');
         }
 
-        if (! $license->isValid()) {
-            throw \Illuminate\Validation\ValidationException::withMessages([
-                'license_key' => 'This license key is invalid, expired, or inactive.',
-            ]);
-        }
-
-        return redirect()->route('login')->with('success', 'License activated successfully. You can now sign in.');
+        throw \Illuminate\Validation\ValidationException::withMessages([
+            'license_key' => 'This license key is invalid, expired, or inactive.',
+        ]);
     })->name('license.activate');
 });
 
@@ -424,6 +453,7 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
         Route::get('/subscriptions/packages', [PackageController::class, 'index'])->name('subscriptions.packages');
         Route::get('/subscriptions/manage', function () {
             $subscriptions = \App\Models\Subscription::with(['user', 'subscriptionPackage'])->latest()->paginate(20);
+
             return Inertia::render('Admin/Subscriptions/Manage', [
                 'subscriptions' => $subscriptions,
                 'packages' => SubscriptionPackage::where('is_active', true)->get(),
@@ -444,12 +474,14 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
             ]);
             $subscription->end_date = $subscription->end_date->addDays($validated['days']);
             $subscription->save();
-            return back()->with('success', 'Subscription extended by ' . $validated['days'] . ' days.');
+
+            return back()->with('success', 'Subscription extended by '.$validated['days'].' days.');
         })->name('subscriptions.extend');
         Route::post('/subscriptions/{subscription}/cancel', function (\Illuminate\Http\Request $request, \App\Models\Subscription $subscription) {
             $subscription->status = 'cancelled';
             $subscription->cancelled_at = now();
             $subscription->save();
+
             return back()->with('success', 'Subscription cancelled.');
         })->name('subscriptions.cancel');
         Route::put('/subscriptions/{subscription}', function (\Illuminate\Http\Request $request, \App\Models\Subscription $subscription) {
@@ -458,6 +490,7 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
                 'end_date' => 'nullable|date',
                 'status' => 'nullable|in:active,suspended,expired',
             ]));
+
             return back()->with('success', 'Subscription updated.');
         })->name('subscriptions.update');
 
@@ -476,6 +509,7 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
                 'uptime' => $server->uptime ?? '0d',
                 'events' => \App\Models\SystemLog::latest()->take(10)->get() ?? [],
             ] : [];
+
             return Inertia::render('Admin/Servers/Monitor', [
                 'server' => $server,
                 'stats' => $stats,
@@ -601,21 +635,21 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
 
 // ─── Xtream Codes API (Public - for IPTV player clients) ──────────────────────
 Route::get('/player_api.php', function (Request $request) {
-    $xtream = new \App\Http\Controllers\XtreamController();
+    $xtream = new \App\Http\Controllers\XtreamController;
     $action = $request->input('action', '');
 
     return match ($action) {
-        'auth'                 => $xtream->auth($request),
-        'get_live_streams'     => $xtream->liveStreams($request),
-        'get_vod_streams'      => $xtream->vodStreams($request),
-        'get_series'           => $xtream->series($request),
-        'get_live_categories'  => $xtream->liveCategories($request),
-        'get_vod_categories'   => $xtream->vodCategories($request),
-        'get_series_categories'=> $xtream->seriesCategories($request),
-        'get_epg_streams'      => $xtream->epg($request),
-        'get_vod_info'         => $xtream->vodInfo($request),
-        'get_series_info'      => $xtream->seriesInfo($request),
-        default                => $xtream->auth($request),
+        'auth' => $xtream->auth($request),
+        'get_live_streams' => $xtream->liveStreams($request),
+        'get_vod_streams' => $xtream->vodStreams($request),
+        'get_series' => $xtream->series($request),
+        'get_live_categories' => $xtream->liveCategories($request),
+        'get_vod_categories' => $xtream->vodCategories($request),
+        'get_series_categories' => $xtream->seriesCategories($request),
+        'get_epg_streams' => $xtream->epg($request),
+        'get_vod_info' => $xtream->vodInfo($request),
+        'get_series_info' => $xtream->seriesInfo($request),
+        default => $xtream->auth($request),
     };
 });
 
@@ -681,4 +715,4 @@ Route::get('/series/{username}/{password}/{streamId}', [\App\Http\Controllers\Xt
 // ─── Catch-all ─────────────────────────────────────────────────────────────────
 Route::get('/{any}', fn () => redirect()->route('login'))->where('any', '.*');
 
-        Route::get("/channels/admin/{channel}/sweep", [AdminChannelController::class, "scanMulticast"])->name("admin.channels.scan-multicast");
+Route::get('/channels/admin/{channel}/sweep', [AdminChannelController::class, 'scanMulticast'])->name('admin.channels.scan-multicast');

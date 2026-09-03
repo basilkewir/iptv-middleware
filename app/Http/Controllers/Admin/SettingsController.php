@@ -14,13 +14,14 @@ class SettingsController extends Controller
     protected function updateSettings(Request $request, string $group): RedirectResponse
     {
         $settings = $request->input('settings');
-        if (!is_array($settings)) {
+        if (! is_array($settings)) {
             $settings = $request->except(['_token', '_method']);
         }
         foreach ($settings as $key => $value) {
             SystemSetting::set($key, is_string($value) ? $value : json_encode($value), $group);
         }
-        return back()->with('success', ucfirst($group) . ' settings updated successfully.');
+
+        return back()->with('success', ucfirst($group).' settings updated successfully.');
     }
 
     public function index(): Response
@@ -63,7 +64,7 @@ class SettingsController extends Controller
             'backup', 'api', 'integrations', 'variables', 'cronjobs', 'domains',
         ];
 
-        if (!in_array($section, $sections)) {
+        if (! in_array($section, $sections)) {
             abort(404);
         }
 
@@ -162,7 +163,7 @@ class SettingsController extends Controller
             'license' => $license ? [
                 'id' => $license->id,
                 'license_key' => $license->license_key,
-                'masked_key' => substr($license->license_key, 0, 4) . str_repeat('•', max(0, strlen($license->license_key) - 8)) . substr($license->license_key, -4),
+                'masked_key' => substr($license->license_key, 0, 4).str_repeat('•', max(0, strlen($license->license_key) - 8)).substr($license->license_key, -4),
                 'hotel_id' => $license->hotel_id,
                 'hotel_name' => $license->hotel_name,
                 'license_type' => $license->license_type,
@@ -179,7 +180,7 @@ class SettingsController extends Controller
                     'name' => $d->device_name,
                     'type' => $d->device_type,
                     'model' => $d->device_model,
-                    'os' => trim(($d->device_os ?? '') . ' ' . ($d->device_os_version ?? '')),
+                    'os' => trim(($d->device_os ?? '').' '.($d->device_os_version ?? '')),
                     'ip_address' => $d->ip_address,
                     'status' => $d->status,
                     'last_seen_at' => $d->last_seen_at?->toISOString(),
@@ -195,26 +196,55 @@ class SettingsController extends Controller
             'license_key' => 'required|string',
         ]);
 
-        $license = \App\Models\License::where('license_key', trim($validated['license_key']))->first();
+        $licenseKey = trim($validated['license_key']);
 
-        if (! $license) {
-            return back()->withErrors([
-                'license_key' => 'This license key is invalid, expired, or inactive.',
-            ]);
+        // First, check local database
+        $license = \App\Models\License::where('license_key', $licenseKey)->first();
+
+        if ($license && $license->isValid()) {
+            if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
+                $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
+            }
+
+            return back()->with('success', "License {$license->license_key} is active. System is licensed.");
         }
 
-        // A suspended license can be recovered by re-entering its correct key.
-        if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
-            $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
+        // Not found locally or not valid — validate against kewirdev.com
+        $kewirService = app(\App\Services\KewirDevLicenseService::class);
+        $result = $kewirService->validateLicense($licenseKey, [
+            'device_id' => gethostname() ?: 'web-'.php_uname('n'),
+            'device_type' => 'admin_panel',
+            'device_name' => 'IPTV Middleware Admin',
+        ]);
+
+        if (! empty($result['success'])) {
+            $features = $result['features'] ?? ['*'];
+            $expiresAt = $result['expires_at'] ?? now()->addYear();
+
+            if ($license) {
+                $license->update([
+                    'status' => 'active',
+                    'features' => $features,
+                    'expires_at' => $expiresAt,
+                ]);
+            } else {
+                \App\Models\License::create([
+                    'license_key' => $licenseKey,
+                    'status' => 'active',
+                    'license_type' => 'enterprise',
+                    'hotel_name' => $result['hotel_name'] ?? 'Licensed',
+                    'max_devices' => $result['max_devices'] ?? 50,
+                    'expires_at' => $expiresAt,
+                    'features' => $features,
+                ]);
+            }
+
+            return back()->with('success', "License {$licenseKey} validated via kewirdev.com. System is licensed.");
         }
 
-        if (! $license->isValid()) {
-            return back()->withErrors([
-                'license_key' => 'This license key is invalid, expired, or inactive.',
-            ]);
-        }
-
-        return back()->with('success', "License {$license->license_key} is active. System is licensed.");
+        return back()->withErrors([
+            'license_key' => 'This license key is invalid, expired, or inactive.',
+        ]);
     }
 
     public function deactivateLicense(): RedirectResponse
@@ -438,21 +468,24 @@ class SettingsController extends Controller
             $user->api_key = \Illuminate\Support\Str::random(40);
             $user->save();
         }
+
         return back()->with('success', 'All API keys have been regenerated.');
     }
 
     public function runBackup(Request $request): RedirectResponse
     {
-        $filename = 'backup_' . now()->format('Y-m-d_His') . '.sql';
+        $filename = 'backup_'.now()->format('Y-m-d_His').'.sql';
         $path = storage_path('app/backups');
-        if (!is_dir($path)) mkdir($path, 0755, true);
+        if (! is_dir($path)) {
+            mkdir($path, 0755, true);
+        }
 
         $db = config('database.connections.mysql');
         $cmd = sprintf('mysqldump -h %s -u %s %s > %s 2>&1',
             escapeshellarg($db['host']),
             escapeshellarg($db['username']),
             escapeshellarg($db['database']),
-            escapeshellarg($path . '/' . $filename)
+            escapeshellarg($path.'/'.$filename)
         );
         if (isset($db['password']) && $db['password']) {
             $cmd = sprintf('mysqldump -h %s -u %s -p%s %s > %s 2>&1',
@@ -460,13 +493,14 @@ class SettingsController extends Controller
                 escapeshellarg($db['username']),
                 escapeshellarg($db['password']),
                 escapeshellarg($db['database']),
-                escapeshellarg($path . '/' . $filename)
+                escapeshellarg($path.'/'.$filename)
             );
         }
         exec($cmd, $output, $returnVar);
         if ($returnVar !== 0) {
-            return back()->with('error', 'Backup failed: ' . implode("\n", $output));
+            return back()->with('error', 'Backup failed: '.implode("\n", $output));
         }
+
         return back()->with('success', "Backup created: {$filename}");
     }
 
@@ -475,8 +509,8 @@ class SettingsController extends Controller
         $validated = $request->validate([
             'filename' => 'required|string',
         ]);
-        $path = storage_path('app/backups/' . $validated['filename']);
-        if (!file_exists($path)) {
+        $path = storage_path('app/backups/'.$validated['filename']);
+        if (! file_exists($path)) {
             return back()->with('error', 'Backup file not found.');
         }
         $db = config('database.connections.mysql');
@@ -497,14 +531,16 @@ class SettingsController extends Controller
         }
         exec($cmd, $output, $returnVar);
         if ($returnVar !== 0) {
-            return back()->with('error', 'Restore failed: ' . implode("\n", $output));
+            return back()->with('error', 'Restore failed: '.implode("\n", $output));
         }
+
         return back()->with('success', 'Database restored successfully.');
     }
 
     public function clearCache(Request $request): RedirectResponse
     {
         \Illuminate\Support\Facades\Cache::flush();
+
         return back()->with('success', 'Cache cleared successfully.');
     }
 
@@ -533,6 +569,7 @@ class SettingsController extends Controller
             default:
                 return back()->with('error', "Unknown task: {$task}");
         }
+
         return back()->with('success', "Cron job \"{$task}\" triggered successfully.");
     }
 
@@ -543,15 +580,16 @@ class SettingsController extends Controller
         ]);
         try {
             \Illuminate\Support\Facades\Mail::raw(
-                "This is a test email from IPTV Middleware.\n\nSent at: " . now()->toDateTimeString(),
+                "This is a test email from IPTV Middleware.\n\nSent at: ".now()->toDateTimeString(),
                 function ($message) use ($validated) {
                     $message->to($validated['email'])
                         ->subject('IPTV Middleware - Test Email');
                 }
             );
+
             return back()->with('success', "Test email sent to {$validated['email']}.");
         } catch (\Exception $e) {
-            return back()->with('error', 'Failed to send email: ' . $e->getMessage());
+            return back()->with('error', 'Failed to send email: '.$e->getMessage());
         }
     }
 
@@ -567,6 +605,7 @@ class SettingsController extends Controller
                 $logs = array_slice($lines, -200);
             }
         }
+
         return Inertia::render('Admin/Settings/Logging', [
             'settings' => SystemSetting::getGroup('logging'),
             'logContent' => implode('', $logs),
@@ -579,9 +618,10 @@ class SettingsController extends Controller
         if (is_dir($logPath)) {
             $files = collect(scandir($logPath))->filter(fn ($f) => str_ends_with($f, '.log'));
             foreach ($files as $file) {
-                \Illuminate\Support\Facades\File::put($logPath . '/' . $file, '');
+                \Illuminate\Support\Facades\File::put($logPath.'/'.$file, '');
             }
         }
+
         return back()->with('success', 'All logs have been cleared.');
     }
 }
