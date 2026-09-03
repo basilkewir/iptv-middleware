@@ -39,18 +39,24 @@ class ChannelPushService
         $command = $this->buildFFmpegCommand($sourceUrl, $outputUrl, $destination->protocol);
         $pid = $this->executeFFmpeg($command, $channel->id, $destination->id);
 
-        $record = $existing ?? new ChannelPushDestination([
-            'channel_id' => $channel->id,
-            'push_destination_id' => $destination->id,
-        ]);
-
-        $record->update([
-            'status' => 'pushing',
-            'ffmpeg_pid' => $pid,
-            'started_at' => now(),
-            'stopped_at' => null,
-            'last_error' => null,
-        ]);
+        if ($existing) {
+            $existing->update([
+                'status' => 'pushing',
+                'ffmpeg_pid' => $pid,
+                'started_at' => now(),
+                'stopped_at' => null,
+                'last_error' => null,
+            ]);
+            $record = $existing->fresh();
+        } else {
+            $record = ChannelPushDestination::create([
+                'channel_id' => $channel->id,
+                'push_destination_id' => $destination->id,
+                'status' => 'pushing',
+                'ffmpeg_pid' => $pid,
+                'started_at' => now(),
+            ]);
+        }
 
         Log::info('Channel push started', [
             'channel_id' => $channel->id,
@@ -60,7 +66,7 @@ class ChannelPushService
             'pid' => $pid,
         ]);
 
-        return $record->fresh();
+        return $record;
     }
 
     public function stopPush(ChannelPushDestination $push): void
