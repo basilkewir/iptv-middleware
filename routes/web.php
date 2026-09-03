@@ -52,20 +52,9 @@ Route::middleware('web')->group(function () {
         ]);
 
         $licenseKey = trim($validated['license_key']);
-
-        // First, check local database
-        $license = \App\Models\License::where('license_key', $licenseKey)->first();
-
-        if ($license && $license->isValid()) {
-            if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
-                $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
-            }
-
-            return redirect()->route('login')->with('success', 'License activated successfully. You can now sign in.');
-        }
-
-        // Not found locally or not valid — validate against kewirdev.com
         $kewirService = app(\App\Services\KewirDevLicenseService::class);
+
+        // Validate against kewirdev.com first
         $result = $kewirService->validateLicense($licenseKey, [
             'device_id' => gethostname() ?: 'web-'.php_uname('n'),
             'device_type' => 'admin_panel',
@@ -73,9 +62,9 @@ Route::middleware('web')->group(function () {
         ]);
 
         if (! empty($result['success'])) {
-            // Remote validation passed — sync to local DB
             $features = $result['features'] ?? ['*'];
             $expiresAt = $result['expires_at'] ?? now()->addYear();
+            $license = \App\Models\License::where('license_key', $licenseKey)->first();
 
             if ($license) {
                 $license->update([
@@ -96,6 +85,16 @@ Route::middleware('web')->group(function () {
             }
 
             return redirect()->route('login')->with('success', 'License activated via kewirdev.com. You can now sign in.');
+        }
+
+        // Fallback: check local DB (offline mode)
+        $license = \App\Models\License::where('license_key', $licenseKey)->first();
+        if ($license && $license->isValid()) {
+            if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
+                $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
+            }
+
+            return redirect()->route('login')->with('success', 'License activated (offline). You can now sign in.');
         }
 
         throw \Illuminate\Validation\ValidationException::withMessages([

@@ -197,20 +197,9 @@ class SettingsController extends Controller
         ]);
 
         $licenseKey = trim($validated['license_key']);
-
-        // First, check local database
-        $license = \App\Models\License::where('license_key', $licenseKey)->first();
-
-        if ($license && $license->isValid()) {
-            if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
-                $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
-            }
-
-            return back()->with('success', "License {$license->license_key} is active. System is licensed.");
-        }
-
-        // Not found locally or not valid — validate against kewirdev.com
         $kewirService = app(\App\Services\KewirDevLicenseService::class);
+
+        // Validate against kewirdev.com first
         $result = $kewirService->validateLicense($licenseKey, [
             'device_id' => gethostname() ?: 'web-'.php_uname('n'),
             'device_type' => 'admin_panel',
@@ -220,6 +209,7 @@ class SettingsController extends Controller
         if (! empty($result['success'])) {
             $features = $result['features'] ?? ['*'];
             $expiresAt = $result['expires_at'] ?? now()->addYear();
+            $license = \App\Models\License::where('license_key', $licenseKey)->first();
 
             if ($license) {
                 $license->update([
@@ -240,6 +230,16 @@ class SettingsController extends Controller
             }
 
             return back()->with('success', "License {$licenseKey} validated via kewirdev.com. System is licensed.");
+        }
+
+        // Fallback: check local DB (offline mode)
+        $license = \App\Models\License::where('license_key', $licenseKey)->first();
+        if ($license && $license->isValid()) {
+            if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
+                $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
+            }
+
+            return back()->with('success', "License {$license->license_key} is active (offline). System is licensed.");
         }
 
         return back()->withErrors([
