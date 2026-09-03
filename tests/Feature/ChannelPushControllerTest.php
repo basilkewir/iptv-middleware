@@ -41,17 +41,35 @@ class ChannelPushControllerTest extends TestCase
                 'protocol' => 'rtmp',
                 'url' => 'rtmp://cdn.example.com/live',
                 'stream_key' => 'my_key',
+                'username' => 'push_user',
+                'password' => 'secret_pass',
             ]);
 
         $response->assertOk()
             ->assertJsonPath('destination.name', 'CDN Primary')
-            ->assertJsonPath('destination.protocol', 'rtmp');
+            ->assertJsonPath('destination.protocol', 'rtmp')
+            ->assertJsonPath('destination.username', 'push_user');
 
         $this->assertDatabaseHas('push_destinations', [
             'name' => 'CDN Primary',
             'protocol' => 'rtmp',
             'stream_key' => 'my_key',
+            'username' => 'push_user',
         ]);
+    }
+
+    public function test_store_destination_with_auth_builds_authenticated_url(): void
+    {
+        $dest = \App\Models\PushDestination::create([
+            'name' => 'Auth RTMP',
+            'protocol' => 'rtmp',
+            'url' => 'rtmp://cdn.example.com/live',
+            'stream_key' => 'mykey',
+            'username' => 'user1',
+            'password' => 'pass1',
+        ]);
+
+        $this->assertStringContainsString('user1:pass1@', $dest->authenticated_url);
     }
 
     public function test_store_destination_validates_required_fields(): void

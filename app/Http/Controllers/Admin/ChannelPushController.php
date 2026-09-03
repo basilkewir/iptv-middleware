@@ -47,6 +47,8 @@ class ChannelPushController extends Controller
             'protocol' => 'required|in:rtmp,srt',
             'url' => 'required|string|max:500',
             'stream_key' => 'nullable|string|max:500',
+            'username' => 'nullable|string|max:255',
+            'password' => 'nullable|string|max:255',
             'notes' => 'nullable|string|max:1000',
         ]);
 
@@ -54,7 +56,7 @@ class ChannelPushController extends Controller
 
         return response()->json([
             'message' => 'Destination created.',
-            'destination' => $destination,
+            'destination' => $destination->makeVisible(['username']),
         ]);
     }
 
@@ -67,6 +69,8 @@ class ChannelPushController extends Controller
             'protocol' => 'required|in:rtmp,srt',
             'url' => 'required|string|max:500',
             'stream_key' => 'nullable|string|max:500',
+            'username' => 'nullable|string|max:255',
+            'password' => 'nullable|string|max:255',
             'is_active' => 'sometimes|boolean',
             'notes' => 'nullable|string|max:1000',
         ]);
@@ -75,7 +79,7 @@ class ChannelPushController extends Controller
 
         return response()->json([
             'message' => 'Destination updated.',
-            'destination' => $destination,
+            'destination' => $destination->makeVisible(['username']),
         ]);
     }
 

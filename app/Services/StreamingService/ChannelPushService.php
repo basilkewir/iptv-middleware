@@ -123,7 +123,7 @@ class ChannelPushService
 
     public function buildOutputUrl(PushDestination $destination): string
     {
-        return $destination->full_url;
+        return $destination->authenticated_url;
     }
 
     public function buildFFmpegCommand(string $inputUrl, string $outputUrl, string $protocol): string

@@ -83,6 +83,7 @@
                 <th class="pb-3 pr-4 text-gray-400 font-medium">Name</th>
                 <th class="pb-3 pr-4 text-gray-400 font-medium">Protocol</th>
                 <th class="pb-3 pr-4 text-gray-400 font-medium">URL</th>
+                <th class="pb-3 pr-4 text-gray-400 font-medium">Auth</th>
                 <th class="pb-3 pr-4 text-gray-400 font-medium">Status</th>
                 <th class="pb-3 text-gray-400 font-medium text-right">Actions</th>
               </tr>
@@ -102,6 +103,12 @@
                 </td>
                 <td class="py-3 pr-4">
                   <span class="text-gray-400 font-mono text-xs truncate block max-w-xs">{{ dest.url }}</span>
+                </td>
+                <td class="py-3 pr-4">
+                  <span v-if="dest.username" class="text-green-400 text-xs flex items-center gap-1">
+                    <Lock class="w-3 h-3" /> {{ dest.username }}
+                  </span>
+                  <span v-else class="text-gray-600 text-xs">—</span>
                 </td>
                 <td class="py-3 pr-4">
                   <span
@@ -133,85 +140,154 @@
         </div>
       </div>
 
-      <!-- Channel Push Matrix -->
+      <!-- Push Channel -->
       <div class="bg-gray-800 rounded-xl border border-gray-700 p-6">
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-lg font-semibold text-white">Push Channels</h2>
-          <div class="flex items-center gap-3">
-            <input
-              v-model="search"
-              type="text"
-              placeholder="Search channels…"
-              class="px-3 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-56"
-            />
+        <h2 class="text-lg font-semibold text-white mb-4">Push Channel</h2>
+
+        <div v-if="destinations.length === 0 || channels.length === 0" class="text-center py-8 text-gray-500 text-sm">
+          {{ destinations.length === 0 ? 'Add a push destination above first.' : 'No active channels available.' }}
+        </div>
+
+        <div v-else class="space-y-4">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-300 mb-1">Select Channel <span class="text-red-400">*</span></label>
+              <select
+                v-model="selectedChannelId"
+                class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+              >
+                <option value="">Choose a channel…</option>
+                <option v-for="ch in channels" :key="ch.id" :value="ch.id">
+                  #{{ ch.channel_number }} — {{ ch.name }} ({{ ch.stream_type?.toUpperCase() || '—' }})
+                </option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-300 mb-1">Push To <span class="text-red-400">*</span></label>
+              <select
+                v-model="selectedDestId"
+                class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+              >
+                <option value="">Choose a destination…</option>
+                <option v-for="dest in activeDestinations" :key="dest.id" :value="dest.id">
+                  {{ dest.name }} ({{ dest.protocol.toUpperCase() }}){{ dest.username ? ' — Auth' : '' }}
+                </option>
+              </select>
+            </div>
           </div>
-        </div>
 
-        <div v-if="destinations.length === 0" class="text-center py-8 text-gray-500 text-sm">
-          Add a push destination above first.
-        </div>
+          <div v-if="selectedChannelId && selectedDestId" class="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 bg-green-500/20 rounded-full flex items-center justify-center">
+                  <Play class="w-4 h-4 text-green-400" />
+                </div>
+                <div>
+                  <p class="text-white text-sm font-medium">
+                    {{ getChannelName(selectedChannelId) }}
+                    <span class="text-gray-400 mx-1">→</span>
+                    {{ getDestName(selectedDestId) }}
+                  </p>
+                  <p class="text-gray-400 text-xs">
+                    {{ getDestProtocol(selectedDestId).toUpperCase() }}
+                    <span v-if="getDestAuth(selectedDestId)"> — Authenticated</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                v-if="isPushing(selectedChannelId, selectedDestId)"
+                @click="stopPush(selectedChannelId, selectedDestId)"
+                :disabled="loadingSingle"
+                class="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-sm rounded-lg transition flex items-center gap-2"
+              >
+                <Loader2 v-if="loadingSingle" class="w-4 h-4 animate-spin" />
+                <Square v-else class="w-4 h-4" />
+                Stop Push
+              </button>
+              <button
+                v-else
+                @click="startPush(selectedChannelId, selectedDestId)"
+                :disabled="loadingSingle"
+                class="px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white text-sm rounded-lg transition flex items-center gap-2"
+              >
+                <Loader2 v-if="loadingSingle" class="w-4 h-4 animate-spin" />
+                <Play v-else class="w-4 h-4" />
+                Start Push
+              </button>
+            </div>
+          </div>
 
-        <div v-else-if="filteredChannels.length === 0" class="text-center py-8 text-gray-500 text-sm">
-          No active channels found.
-        </div>
+          <!-- Quick push buttons table -->
+          <div>
+            <div class="flex items-center justify-between mb-3">
+              <p class="text-sm text-gray-400">Quick Push — all channels and destinations</p>
+              <input
+                v-model="search"
+                type="text"
+                placeholder="Search channels…"
+                class="px-3 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-56"
+              />
+            </div>
 
-        <div v-else class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-gray-700 text-left">
-                <th class="pb-3 pr-4 w-8 text-gray-400 font-medium">#</th>
-                <th class="pb-3 pr-4 text-gray-400 font-medium">Channel</th>
-                <th class="pb-3 pr-4 text-gray-400 font-medium">Source</th>
-                <th
-                  v-for="dest in destinations"
-                  :key="dest.id"
-                  class="pb-3 px-2 text-gray-400 font-medium text-center min-w-[100px]"
-                >
-                  <div class="flex flex-col items-center">
-                    <span>{{ dest.name }}</span>
-                    <span class="text-xs text-gray-500">{{ dest.protocol.toUpperCase() }}</span>
-                  </div>
-                </th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-700/50">
-              <tr v-for="ch in filteredChannels" :key="ch.id" class="hover:bg-gray-700/30 transition">
-                <td class="py-3 pr-4 text-gray-500 font-mono">{{ ch.channel_number }}</td>
-                <td class="py-3 pr-4">
-                  <span class="text-white font-medium">{{ ch.name }}</span>
-                </td>
-                <td class="py-3 pr-4">
-                  <span class="text-gray-400 text-xs font-mono truncate block max-w-[200px]">{{ ch.stream_type?.toUpperCase() || '—' }}</span>
-                </td>
-                <td
-                  v-for="dest in destinations"
-                  :key="dest.id"
-                  class="py-3 px-2 text-center"
-                >
-                  <button
-                    v-if="isPushing(ch.id, dest.id)"
-                    @click="stopPush(ch.id, dest.id)"
-                    :disabled="loadingPush[`${ch.id}-${dest.id}`]"
-                    class="px-3 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 text-xs rounded transition inline-flex items-center gap-1"
-                  >
-                    <Loader2 v-if="loadingPush[`${ch.id}-${dest.id}`]" class="w-3 h-3 animate-spin" />
-                    <Square v-else class="w-3 h-3" />
-                    Stop
-                  </button>
-                  <button
-                  v-else
-                    @click="startPush(ch.id, dest.id)"
-                    :disabled="loadingPush[`${ch.id}-${dest.id}`] || !ch.active_stream_url"
-                    class="px-3 py-1 bg-green-600/20 hover:bg-green-600/40 text-green-400 text-xs rounded transition inline-flex items-center gap-1 disabled:opacity-40"
-                  >
-                    <Loader2 v-if="loadingPush[`${ch.id}-${dest.id}`]" class="w-3 h-3 animate-spin" />
-                    <Play v-else class="w-3 h-3" />
-                    Push
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="border-b border-gray-700 text-left">
+                    <th class="pb-3 pr-4 w-8 text-gray-400 font-medium">#</th>
+                    <th class="pb-3 pr-4 text-gray-400 font-medium">Channel</th>
+                    <th class="pb-3 pr-4 text-gray-400 font-medium">Type</th>
+                    <th
+                      v-for="dest in activeDestinations"
+                      :key="dest.id"
+                      class="pb-3 px-2 text-gray-400 font-medium text-center min-w-[120px]"
+                    >
+                      <div class="flex flex-col items-center">
+                        <span>{{ dest.name }}</span>
+                        <span class="text-xs text-gray-500">{{ dest.protocol.toUpperCase() }}</span>
+                      </div>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-gray-700/50">
+                  <tr v-for="ch in filteredChannels" :key="ch.id" class="hover:bg-gray-700/30 transition">
+                    <td class="py-3 pr-4 text-gray-500 font-mono">{{ ch.channel_number }}</td>
+                    <td class="py-3 pr-4">
+                      <span class="text-white font-medium">{{ ch.name }}</span>
+                    </td>
+                    <td class="py-3 pr-4">
+                      <span class="text-gray-400 text-xs font-mono">{{ ch.stream_type?.toUpperCase() || '—' }}</span>
+                    </td>
+                    <td
+                      v-for="dest in activeDestinations"
+                      :key="dest.id"
+                      class="py-3 px-2 text-center"
+                    >
+                      <button
+                        v-if="isPushing(ch.id, dest.id)"
+                        @click="stopPush(ch.id, dest.id)"
+                        :disabled="loadingPush[`${ch.id}-${dest.id}`]"
+                        class="px-3 py-1 bg-red-600/20 hover:bg-red-600/40 text-red-400 text-xs rounded transition inline-flex items-center gap-1"
+                      >
+                        <Loader2 v-if="loadingPush[`${ch.id}-${dest.id}`]" class="w-3 h-3 animate-spin" />
+                        <Square v-else class="w-3 h-3" />
+                        Stop
+                      </button>
+                      <button
+                        v-else
+                        @click="startPush(ch.id, dest.id)"
+                        :disabled="loadingPush[`${ch.id}-${dest.id}`] || !ch.active_stream_url"
+                        class="px-3 py-1 bg-green-600/20 hover:bg-green-600/40 text-green-400 text-xs rounded transition inline-flex items-center gap-1 disabled:opacity-40"
+                      >
+                        <Loader2 v-if="loadingPush[`${ch.id}-${dest.id}`]" class="w-3 h-3 animate-spin" />
+                        <Play v-else class="w-3 h-3" />
+                        Push
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -291,6 +367,33 @@
                 />
               </div>
 
+              <div class="border-t border-gray-700 pt-4">
+                <p class="text-xs text-gray-500 uppercase tracking-wider mb-3 font-semibold">Authentication</p>
+                <div class="grid grid-cols-2 gap-4">
+                  <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-1">Username</label>
+                    <input
+                      v-model="destForm.username"
+                      type="text"
+                      placeholder="RTMP auth username"
+                      class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-sm font-medium text-gray-300 mb-1">Password</label>
+                    <input
+                      v-model="destForm.password"
+                      type="password"
+                      placeholder="RTMP auth password"
+                      class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+                <p class="text-xs text-gray-500 mt-1">
+                  {{ destForm.protocol === 'srt' ? 'Password used as SRT passphrase.' : 'Embedded as user:pass@host in RTMP URL.' }}
+                </p>
+              </div>
+
               <div>
                 <label class="block text-sm font-medium text-gray-300 mb-1">Notes</label>
                 <textarea
@@ -329,7 +432,7 @@
 <script setup>
 import { ref, computed, reactive } from 'vue'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
-import { ArrowLeft, Radio, Plus, Loader2, Square, Play, X } from 'lucide-vue-next'
+import { Radio, Plus, Loader2, Square, Play, X, Lock } from 'lucide-vue-next'
 
 const props = defineProps({
   channels:      { type: Array, default: () => [] },
@@ -339,10 +442,13 @@ const props = defineProps({
 })
 
 const search = ref('')
+const selectedChannelId = ref('')
+const selectedDestId = ref('')
 const showDestModal = ref(false)
 const editingDest = ref(null)
 const savingDest = ref(false)
 const stoppingAll = ref(false)
+const loadingSingle = ref(false)
 const loadingPush = reactive({})
 
 const destForm = reactive({
@@ -350,9 +456,13 @@ const destForm = reactive({
   protocol: 'rtmp',
   url: '',
   stream_key: '',
+  username: '',
+  password: '',
   is_active: true,
   notes: '',
 })
+
+const activeDestinations = computed(() => props.destinations.filter(d => d.is_active))
 
 const filteredChannels = computed(() => {
   if (!search.value.trim()) return props.channels
@@ -369,6 +479,26 @@ const isPushing = (channelId, destinationId) => {
 const findDestinationId = (name) => {
   const dest = props.destinations.find(d => d.name === name)
   return dest ? dest.id : null
+}
+
+const getChannelName = (id) => {
+  const ch = props.channels.find(c => c.id === id)
+  return ch ? ch.name : ''
+}
+
+const getDestName = (id) => {
+  const dest = props.destinations.find(d => d.id === id)
+  return dest ? dest.name : ''
+}
+
+const getDestProtocol = (id) => {
+  const dest = props.destinations.find(d => d.id === id)
+  return dest ? dest.protocol : ''
+}
+
+const getDestAuth = (id) => {
+  const dest = props.destinations.find(d => d.id === id)
+  return dest && dest.username
 }
 
 const csrfToken = () => decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || '')
@@ -391,7 +521,10 @@ const api = async (url, method = 'GET', body = null) => {
 
 const startPush = async (channelId, destinationId) => {
   const key = `${channelId}-${destinationId}`
-  loadingPush[key] = true
+  const isMatrix = !(channelId === selectedChannelId.value && destinationId === selectedDestId.value)
+  if (isMatrix) loadingPush[key] = true
+  else loadingSingle.value = true
+
   try {
     await api(route('admin.channels.push.start'), 'POST', {
       channel_id: channelId,
@@ -402,12 +535,16 @@ const startPush = async (channelId, destinationId) => {
     alert(e.message)
   } finally {
     loadingPush[key] = false
+    loadingSingle.value = false
   }
 }
 
 const stopPush = async (channelId, destinationId) => {
   const key = `${channelId}-${destinationId}`
-  loadingPush[key] = true
+  const isMatrix = !(channelId === selectedChannelId.value && destinationId === selectedDestId.value)
+  if (isMatrix) loadingPush[key] = true
+  else loadingSingle.value = true
+
   try {
     await api(route('admin.channels.push.stop'), 'POST', {
       channel_id: channelId,
@@ -418,6 +555,7 @@ const stopPush = async (channelId, destinationId) => {
     alert(e.message)
   } finally {
     loadingPush[key] = false
+    loadingSingle.value = false
   }
 }
 
@@ -439,6 +577,8 @@ const editDestination = (dest) => {
   destForm.protocol = dest.protocol
   destForm.url = dest.url
   destForm.stream_key = dest.stream_key || ''
+  destForm.username = dest.username || ''
+  destForm.password = ''
   destForm.is_active = dest.is_active
   destForm.notes = dest.notes || ''
   showDestModal.value = true
@@ -451,6 +591,8 @@ const closeDestModal = () => {
   destForm.protocol = 'rtmp'
   destForm.url = ''
   destForm.stream_key = ''
+  destForm.username = ''
+  destForm.password = ''
   destForm.is_active = true
   destForm.notes = ''
 }
@@ -463,6 +605,8 @@ const saveDestination = async () => {
       protocol: destForm.protocol,
       url: destForm.url,
       stream_key: destForm.stream_key || null,
+      username: destForm.username || null,
+      password: destForm.password || null,
       is_active: destForm.is_active,
       notes: destForm.notes || null,
     }
