@@ -180,37 +180,35 @@ class ChannelPushService
         ?int $videoBitrate = null,
         ?int $audioBitrate = null,
     ): string {
-        $inputFlag = str_starts_with($inputUrl, 'rtmp://') ? '-i' : '-re -i';
-
         $videoKbps = $videoBitrate ? ($videoBitrate . 'k') : null;
         $audioKbps = $audioBitrate ? ($audioBitrate . 'k') : null;
 
-        if ($videoKbps && $audioKbps) {
-            $vCodec = "-c:v libx264 -b:v {$videoKbps} -preset veryfast -profile:v main";
-            $aCodec = "-c:a aac -b:a {$audioKbps}";
-        } elseif ($videoKbps) {
-            $vCodec = "-c:v libx264 -b:v {$videoKbps} -preset veryfast -profile:v main";
-            $aCodec = '-c:a aac';
-        } elseif ($audioKbps) {
-            $vCodec = '-c:v copy';
-            $aCodec = "-c:a aac -b:a {$audioKbps}";
-        } else {
-            $vCodec = '-c:v copy';
-            $aCodec = '-c:a aac';
+        $videoCodec = $videoKbps
+            ? "-c:v libx264 -b:v {$videoKbps} -preset veryfast -profile:v main"
+            : '-c:v copy';
+        $audioCodec = $audioKbps ? "-c:a aac -b:a {$audioKbps}" : '-c:a aac -b:a 128k';
+
+        $inputOpts = [];
+        if (str_starts_with($inputUrl, 'http://') || str_starts_with($inputUrl, 'https://')) {
+            $inputOpts[] = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_on_network_error 1';
+        } elseif (str_starts_with($inputUrl, 'rtsp://')) {
+            $inputOpts[] = '-rtsp_transport tcp -stimeout 10000000';
         }
+
+        $outputOpts = '-flush_packets 1 -max_muxing_queue_size 1024';
 
         $format = $protocol === 'srt' ? 'mpegts' : 'flv';
 
-        return sprintf(
-            '%s %s %s %s %s -f %s "%s"',
-            $this->ffmpegPath,
-            $inputFlag,
-            escapeshellarg($inputUrl),
-            $vCodec,
-            $aCodec,
-            $format,
-            $outputUrl,
-        );
+        $parts = [$this->ffmpegPath];
+        if ($inputOpts) $parts[] = implode(' ', $inputOpts);
+        $parts[] = '-i ' . escapeshellarg($inputUrl);
+        $parts[] = $videoCodec;
+        $parts[] = $audioCodec;
+        $parts[] = $outputOpts;
+        $parts[] = '-f ' . $format;
+        $parts[] = '"' . $outputUrl . '"';
+
+        return implode(' ', $parts);
     }
 
     private function executeFFmpeg(string $command, int $channelId, int $destinationId): int
@@ -227,6 +225,12 @@ class ChannelPushService
 
         $pid = (int) end($output);
         Cache::put($processKey, $pid, 86400);
+
+        usleep(500000);
+        if (!$this->processExists($pid)) {
+            $log = @file_get_contents($logFile);
+            throw new \RuntimeException('FFmpeg exited immediately. Log: ' . substr($log ?? 'empty', 0, 500));
+        }
 
         Log::info('FFmpeg started', [
             'command' => $command,
