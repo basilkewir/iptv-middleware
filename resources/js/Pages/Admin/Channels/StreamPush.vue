@@ -184,7 +184,7 @@
                 <input
                   v-model="pushStreamKey"
                   type="text"
-                  :placeholder="selectedChannel.slug || 'e.g. canal-plus-2'"
+                  placeholder="e.g. canal-plus-2"
                   class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500"
                 />
               </div>
@@ -529,16 +529,6 @@
                 />
               </div>
 
-              <div>
-                <label class="block text-sm font-medium text-gray-300 mb-1">Stream Key</label>
-                <input
-                  v-model="destForm.stream_key"
-                  type="text"
-                  placeholder="Appended to URL as /stream_key"
-                  class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500"
-                />
-              </div>
-
               <div class="border-t border-gray-700 pt-4">
                 <p class="text-xs text-gray-500 uppercase tracking-wider mb-3 font-semibold">Authentication</p>
                 <div class="grid grid-cols-2 gap-4">
@@ -635,7 +625,6 @@ const destForm = reactive({
   name: '',
   protocol: 'rtmp',
   url: '',
-  stream_key: '',
   username: '',
   password: '',
   is_active: true,
@@ -735,7 +724,7 @@ const startPush = async (channelId, destinationId) => {
       destination_id: destinationId,
     }
     if (!isMatrix) {
-      const streamKey = pushStreamKey.value.trim() || selectedChannel.value?.slug || null
+      const streamKey = pushStreamKey.value.trim() || null
       if (streamKey) body.stream_key = streamKey
       if (pushVideoBitrate.value) body.video_bitrate = pushVideoBitrate.value
       if (pushAudioBitrate.value) body.audio_bitrate = pushAudioBitrate.value
@@ -787,7 +776,6 @@ const editDestination = (dest) => {
   destForm.name = dest.name
   destForm.protocol = dest.protocol
   destForm.url = dest.url
-  destForm.stream_key = dest.stream_key || ''
   destForm.username = dest.username || ''
   destForm.password = ''
   destForm.is_active = dest.is_active
@@ -801,7 +789,6 @@ const closeDestModal = () => {
   destForm.name = ''
   destForm.protocol = 'rtmp'
   destForm.url = ''
-  destForm.stream_key = ''
   destForm.username = ''
   destForm.password = ''
   destForm.is_active = true
@@ -815,7 +802,6 @@ const saveDestination = async () => {
       name: destForm.name,
       protocol: destForm.protocol,
       url: destForm.url,
-      stream_key: destForm.stream_key || null,
       username: destForm.username || null,
       password: destForm.password || null,
       is_active: destForm.is_active,

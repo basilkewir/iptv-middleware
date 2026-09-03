@@ -148,9 +148,10 @@ class ChannelPushService
     {
         $base = rtrim($destination->url, '/');
 
-        $key = $streamKey ?? $destination->stream_key;
-        if (! empty($key)) {
-            $base .= '/' . ltrim($key, '/');
+        if (! empty($streamKey)) {
+            $base .= '/' . ltrim($streamKey, '/');
+        } elseif (! empty($destination->stream_key)) {
+            $base .= '/' . ltrim($destination->stream_key, '/');
         }
 
         if (! empty($destination->username) && ! empty($destination->password) && $destination->protocol === 'rtmp') {
