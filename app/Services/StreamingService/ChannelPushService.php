@@ -21,7 +21,7 @@ class ChannelPushService
 
     public function startPush(Channel $channel, PushDestination $destination): ChannelPushDestination
     {
-        $sourceUrl = $channel->active_source_url;
+        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
 
         if (empty($sourceUrl)) {
             throw new \RuntimeException('Channel has no active source URL.');
