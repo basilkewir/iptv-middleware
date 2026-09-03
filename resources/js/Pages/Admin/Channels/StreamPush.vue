@@ -49,7 +49,14 @@
                 {{ push.protocol.toUpperCase() }}
               </span>
             </div>
-            <p class="text-gray-400 text-xs mb-3">&rarr; {{ push.destination }}</p>
+            <p class="text-gray-400 text-xs mb-1">&rarr; {{ push.destination }}</p>
+            <p v-if="push.stream_key" class="text-gray-500 text-xs font-mono mb-1">Key: {{ push.stream_key }}</p>
+            <p v-if="push.video_bitrate || push.audio_bitrate" class="text-gray-500 text-xs mb-3">
+              <span v-if="push.video_bitrate">V: {{ push.video_bitrate }}k</span>
+              <span v-if="push.video_bitrate && push.audio_bitrate" class="mx-1">&middot;</span>
+              <span v-if="push.audio_bitrate">A: {{ push.audio_bitrate }}k</span>
+            </p>
+            <p v-else class="text-gray-600 text-xs mb-3">&nbsp;</p>
             <div class="flex items-center justify-between">
               <span class="text-gray-500 text-xs">{{ formatTime(push.started_at) }}</span>
               <button
@@ -129,7 +136,7 @@
           </div>
 
           <!-- Push Confirmation -->
-          <div v-if="selectedChannel && selectedDestId" class="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+          <div v-if="selectedChannel && selectedDestId" class="bg-gray-700/50 rounded-lg p-4 border border-gray-600 space-y-4">
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-3">
                 <div class="w-10 h-10 bg-green-500/20 rounded-full flex items-center justify-center">
@@ -170,6 +177,43 @@
                 Start Push
               </button>
             </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1">Stream Key <span class="text-red-400">*</span></label>
+                <input
+                  v-model="pushStreamKey"
+                  type="text"
+                  :placeholder="selectedChannel.slug || 'e.g. canal-plus-2'"
+                  class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1">Video Bitrate (kbps)</label>
+                <input
+                  v-model.number="pushVideoBitrate"
+                  type="number"
+                  min="100"
+                  max="50000"
+                  placeholder="e.g. 2500"
+                  class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+              <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1">Audio Bitrate (kbps)</label>
+                <input
+                  v-model.number="pushAudioBitrate"
+                  type="number"
+                  min="32"
+                  max="320"
+                  placeholder="e.g. 128"
+                  class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+            <p class="text-xs text-gray-500">
+              Output: <span class="font-mono text-gray-400">{{ getDestUrl(selectedDestId) }}/{{ pushStreamKey || selectedChannel?.slug || '…' }}</span>
+            </p>
           </div>
         </div>
       </div>
@@ -574,6 +618,9 @@ const search = ref('')
 const selectedChannel = ref(null)
 const selectedChannelId = ref('')
 const selectedDestId = ref('')
+const pushStreamKey = ref('')
+const pushVideoBitrate = ref(null)
+const pushAudioBitrate = ref(null)
 const showDestModal = ref(false)
 const showChannelPicker = ref(false)
 const pickerSearch = ref('')
@@ -623,6 +670,9 @@ watch(showChannelPicker, (val) => {
 const selectChannel = (ch) => {
   selectedChannel.value = ch
   selectedChannelId.value = ch.id
+  pushStreamKey.value = ch.slug || ''
+  pushVideoBitrate.value = null
+  pushAudioBitrate.value = null
   showChannelPicker.value = false
 }
 
@@ -650,6 +700,11 @@ const getDestAuth = (id) => {
   return dest && dest.username
 }
 
+const getDestUrl = (id) => {
+  const dest = props.destinations.find(d => d.id === id)
+  return dest ? dest.url : ''
+}
+
 const csrfToken = () => decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || '')
 
 const api = async (url, method = 'GET', body = null) => {
@@ -675,10 +730,17 @@ const startPush = async (channelId, destinationId) => {
   else loadingSingle.value = true
 
   try {
-    await api(route('admin.channels.push.start'), 'POST', {
+    const body = {
       channel_id: channelId,
       destination_id: destinationId,
-    })
+    }
+    if (!isMatrix) {
+      const streamKey = pushStreamKey.value.trim() || selectedChannel.value?.slug || null
+      if (streamKey) body.stream_key = streamKey
+      if (pushVideoBitrate.value) body.video_bitrate = pushVideoBitrate.value
+      if (pushAudioBitrate.value) body.audio_bitrate = pushAudioBitrate.value
+    }
+    await api(route('admin.channels.push.start'), 'POST', body)
     location.reload()
   } catch (e) {
     alert(e.message)

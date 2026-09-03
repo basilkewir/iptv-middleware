@@ -19,8 +19,13 @@ class ChannelPushService
         $this->ffmpegPath = config('streaming.transcoding.ffmpeg_path', '/usr/bin/ffmpeg');
     }
 
-    public function startPush(Channel $channel, PushDestination $destination): ChannelPushDestination
-    {
+    public function startPush(
+        Channel $channel,
+        PushDestination $destination,
+        ?string $streamKey = null,
+        ?int $videoBitrate = null,
+        ?int $audioBitrate = null,
+    ): ChannelPushDestination {
         $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
 
         if (empty($sourceUrl)) {
@@ -35,12 +40,15 @@ class ChannelPushService
             return $existing;
         }
 
-        $outputUrl = $this->buildOutputUrl($destination);
-        $command = $this->buildFFmpegCommand($sourceUrl, $outputUrl, $destination->protocol);
+        $outputUrl = $this->buildOutputUrl($destination, $streamKey);
+        $command = $this->buildFFmpegCommand($sourceUrl, $outputUrl, $destination->protocol, $videoBitrate, $audioBitrate);
         $pid = $this->executeFFmpeg($command, $channel->id, $destination->id);
 
         if ($existing) {
             $existing->update([
+                'stream_key' => $streamKey,
+                'video_bitrate' => $videoBitrate,
+                'audio_bitrate' => $audioBitrate,
                 'status' => 'pushing',
                 'ffmpeg_pid' => $pid,
                 'started_at' => now(),
@@ -52,6 +60,9 @@ class ChannelPushService
             $record = ChannelPushDestination::create([
                 'channel_id' => $channel->id,
                 'push_destination_id' => $destination->id,
+                'stream_key' => $streamKey,
+                'video_bitrate' => $videoBitrate,
+                'audio_bitrate' => $audioBitrate,
                 'status' => 'pushing',
                 'ffmpeg_pid' => $pid,
                 'started_at' => now(),
@@ -63,6 +74,9 @@ class ChannelPushService
             'destination_id' => $destination->id,
             'source' => $sourceUrl,
             'output' => $outputUrl,
+            'stream_key' => $streamKey,
+            'video_bitrate' => $videoBitrate,
+            'audio_bitrate' => $audioBitrate,
             'pid' => $pid,
         ]);
 
@@ -121,44 +135,90 @@ class ChannelPushService
                 'channel' => $push->channel->name ?? 'Unknown',
                 'destination' => $push->pushDestination->name ?? 'Unknown',
                 'protocol' => $push->pushDestination->protocol ?? 'unknown',
+                'stream_key' => $push->stream_key,
+                'video_bitrate' => $push->video_bitrate,
+                'audio_bitrate' => $push->audio_bitrate,
                 'started_at' => $push->started_at?->toISOString(),
                 'pid' => $push->ffmpeg_pid,
             ])
             ->toArray();
     }
 
-    public function buildOutputUrl(PushDestination $destination): string
+    public function buildOutputUrl(PushDestination $destination, ?string $streamKey = null): string
     {
-        return $destination->authenticated_url;
-    }
+        $base = rtrim($destination->url, '/');
 
-    public function buildFFmpegCommand(string $inputUrl, string $outputUrl, string $protocol): string
-    {
-        $inputFlag = str_starts_with($inputUrl, 'rtmp://') ? '-i' : '-re -i';
-
-        if ($protocol === 'srt') {
-            return sprintf(
-                '%s %s %s -c:v copy -c:a aac -f mpegts "%s" 2>&1',
-                $this->ffmpegPath,
-                $inputFlag,
-                escapeshellarg($inputUrl),
-                $outputUrl
-            );
+        $key = $streamKey ?? $destination->stream_key;
+        if (! empty($key)) {
+            $base .= '/' . ltrim($key, '/');
         }
 
+        if (! empty($destination->username) && ! empty($destination->password) && $destination->protocol === 'rtmp') {
+            $parsed = parse_url($base);
+            if ($parsed !== false) {
+                $auth = rawurlencode($destination->username) . ':' . rawurlencode($destination->password);
+                $host = $parsed['host'] ?? '';
+                $port = isset($parsed['port']) ? ':' . $parsed['port'] : '';
+                $path = $parsed['path'] ?? '';
+                $base = ($parsed['scheme'] ?? 'rtmp') . '://' . $auth . '@' . $host . $port . $path;
+            }
+        }
+
+        if (! empty($destination->password) && $destination->protocol === 'srt') {
+            $separator = str_contains($base, '?') ? '&' : '?';
+            $base .= $separator . 'passphrase=' . rawurlencode($destination->password);
+        }
+
+        return $base;
+    }
+
+    public function buildFFmpegCommand(
+        string $inputUrl,
+        string $outputUrl,
+        string $protocol,
+        ?int $videoBitrate = null,
+        ?int $audioBitrate = null,
+    ): string {
+        $inputFlag = str_starts_with($inputUrl, 'rtmp://') ? '-i' : '-re -i';
+
+        $videoKbps = $videoBitrate ? ($videoBitrate . 'k') : null;
+        $audioKbps = $audioBitrate ? ($audioBitrate . 'k') : null;
+
+        if ($videoKbps && $audioKbps) {
+            $vCodec = "-c:v libx264 -b:v {$videoKbps} -preset veryfast -profile:v main";
+            $aCodec = "-c:a aac -b:a {$audioKbps}";
+        } elseif ($videoKbps) {
+            $vCodec = "-c:v libx264 -b:v {$videoKbps} -preset veryfast -profile:v main";
+            $aCodec = '-c:a aac';
+        } elseif ($audioKbps) {
+            $vCodec = '-c:v copy';
+            $aCodec = "-c:a aac -b:a {$audioKbps}";
+        } else {
+            $vCodec = '-c:v copy';
+            $aCodec = '-c:a aac';
+        }
+
+        $format = $protocol === 'srt' ? 'mpegts' : 'flv';
+
         return sprintf(
-            '%s %s %s -c:v copy -c:a aac -f flv "%s" 2>&1',
+            '%s %s %s %s %s -f %s "%s"',
             $this->ffmpegPath,
             $inputFlag,
             escapeshellarg($inputUrl),
-            $outputUrl
+            $vCodec,
+            $aCodec,
+            $format,
+            $outputUrl,
         );
     }
 
     private function executeFFmpeg(string $command, int $channelId, int $destinationId): int
     {
         $processKey = $this->cacheKey($channelId, $destinationId);
-        exec("{$command} > /dev/null 2>&1 & echo $!", $output);
+        $logFile = storage_path("logs/push_{$channelId}_{$destinationId}.log");
+        $fullCommand = "{$command} > " . escapeshellarg($logFile) . " 2>&1 & echo $!";
+
+        exec($fullCommand, $output);
 
         if (empty($output)) {
             throw new \RuntimeException('Failed to start FFmpeg process.');
@@ -166,6 +226,12 @@ class ChannelPushService
 
         $pid = (int) end($output);
         Cache::put($processKey, $pid, 86400);
+
+        Log::info('FFmpeg started', [
+            'command' => $command,
+            'pid' => $pid,
+            'log_file' => $logFile,
+        ]);
 
         return $pid;
     }

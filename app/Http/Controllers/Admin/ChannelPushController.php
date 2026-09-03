@@ -105,6 +105,9 @@ class ChannelPushController extends Controller
         $validated = $request->validate([
             'channel_id' => 'required|exists:channels,id',
             'destination_id' => 'required|exists:push_destinations,id',
+            'stream_key' => 'nullable|string|max:255',
+            'video_bitrate' => 'nullable|integer|min:100|max:50000',
+            'audio_bitrate' => 'nullable|integer|min:32|max:320',
         ]);
 
         $channel = Channel::findOrFail($validated['channel_id']);
@@ -115,7 +118,13 @@ class ChannelPushController extends Controller
         }
 
         try {
-            $push = $pushService->startPush($channel, $destination);
+            $push = $pushService->startPush(
+                $channel,
+                $destination,
+                $validated['stream_key'] ?? null,
+                $validated['video_bitrate'] ?? null,
+                $validated['audio_bitrate'] ?? null,
+            );
 
             return response()->json([
                 'message' => "Push started: {$channel->name} → {$destination->name}",

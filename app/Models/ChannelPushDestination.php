@@ -13,6 +13,9 @@ class ChannelPushDestination extends Model
     protected $fillable = [
         'channel_id',
         'push_destination_id',
+        'stream_key',
+        'video_bitrate',
+        'audio_bitrate',
         'status',
         'ffmpeg_pid',
         'started_at',
@@ -22,6 +25,8 @@ class ChannelPushDestination extends Model
 
     protected $casts = [
         'ffmpeg_pid' => 'integer',
+        'video_bitrate' => 'integer',
+        'audio_bitrate' => 'integer',
         'started_at' => 'datetime',
         'stopped_at' => 'datetime',
     ];
