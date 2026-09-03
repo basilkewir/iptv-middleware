@@ -63,6 +63,85 @@
         </div>
       </div>
 
+      <!-- Push Channel (Primary Action) -->
+      <div class="bg-gray-800 rounded-xl border border-indigo-500/30 p-6">
+        <h2 class="text-lg font-semibold text-white mb-4">Push Channel to External Server</h2>
+
+        <div v-if="destinations.length === 0 || channels.length === 0" class="text-center py-8 text-gray-500 text-sm">
+          {{ destinations.length === 0 ? 'Add a push destination below first.' : 'No active channels available.' }}
+        </div>
+
+        <div v-else class="space-y-4">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-300 mb-1">Channel <span class="text-red-400">*</span></label>
+              <select
+                v-model="selectedChannelId"
+                class="w-full px-4 py-2.5 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+              >
+                <option value="">Select a channel signal…</option>
+                <option v-for="ch in channels" :key="ch.id" :value="ch.id">
+                  #{{ ch.channel_number }} — {{ ch.name }} ({{ ch.stream_type?.toUpperCase() || '—' }})
+                </option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-300 mb-1">Destination <span class="text-red-400">*</span></label>
+              <select
+                v-model="selectedDestId"
+                class="w-full px-4 py-2.5 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500"
+              >
+                <option value="">Select RTMP/SRT server…</option>
+                <option v-for="dest in activeDestinations" :key="dest.id" :value="dest.id">
+                  {{ dest.name }} ({{ dest.protocol.toUpperCase() }}){{ dest.username ? ' — Auth' : '' }}
+                </option>
+              </select>
+            </div>
+          </div>
+
+          <div v-if="selectedChannelId && selectedDestId" class="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 bg-green-500/20 rounded-full flex items-center justify-center">
+                  <Play class="w-4 h-4 text-green-400" />
+                </div>
+                <div>
+                  <p class="text-white text-sm font-medium">
+                    {{ getChannelName(selectedChannelId) }}
+                    <span class="text-gray-400 mx-1">&rarr;</span>
+                    {{ getDestName(selectedDestId) }}
+                  </p>
+                  <p class="text-gray-400 text-xs">
+                    {{ getDestProtocol(selectedDestId).toUpperCase() }}
+                    <span v-if="getDestAuth(selectedDestId)"> &mdash; Authenticated</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                v-if="isPushing(selectedChannelId, selectedDestId)"
+                @click="stopPush(selectedChannelId, selectedDestId)"
+                :disabled="loadingSingle"
+                class="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-sm rounded-lg transition flex items-center gap-2"
+              >
+                <Loader2 v-if="loadingSingle" class="w-4 h-4 animate-spin" />
+                <Square v-else class="w-4 h-4" />
+                Stop Push
+              </button>
+              <button
+                v-else
+                @click="startPush(selectedChannelId, selectedDestId)"
+                :disabled="loadingSingle"
+                class="px-5 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg transition flex items-center gap-2"
+              >
+                <Loader2 v-if="loadingSingle" class="w-4 h-4 animate-spin" />
+                <Play v-else class="w-4 h-4" />
+                Start Push
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Destinations -->
       <div class="bg-gray-800 rounded-xl border border-gray-700 p-6">
         <div class="flex items-center justify-between mb-4">
@@ -140,97 +219,28 @@
         </div>
       </div>
 
-      <!-- Push Channel -->
+      <!-- All Channels Quick Push -->
       <div class="bg-gray-800 rounded-xl border border-gray-700 p-6">
-        <h2 class="text-lg font-semibold text-white mb-4">Push Channel</h2>
-
-        <div v-if="destinations.length === 0 || channels.length === 0" class="text-center py-8 text-gray-500 text-sm">
-          {{ destinations.length === 0 ? 'Add a push destination above first.' : 'No active channels available.' }}
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-semibold text-white">All Channels</h2>
+          <input
+            v-model="search"
+            type="text"
+            placeholder="Search channels…"
+            class="px-3 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-56"
+          />
         </div>
 
-        <div v-else class="space-y-4">
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label class="block text-sm font-medium text-gray-300 mb-1">Select Channel <span class="text-red-400">*</span></label>
-              <select
-                v-model="selectedChannelId"
-                class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500"
-              >
-                <option value="">Choose a channel…</option>
-                <option v-for="ch in channels" :key="ch.id" :value="ch.id">
-                  #{{ ch.channel_number }} — {{ ch.name }} ({{ ch.stream_type?.toUpperCase() || '—' }})
-                </option>
-              </select>
-            </div>
-            <div>
-              <label class="block text-sm font-medium text-gray-300 mb-1">Push To <span class="text-red-400">*</span></label>
-              <select
-                v-model="selectedDestId"
-                class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500"
-              >
-                <option value="">Choose a destination…</option>
-                <option v-for="dest in activeDestinations" :key="dest.id" :value="dest.id">
-                  {{ dest.name }} ({{ dest.protocol.toUpperCase() }}){{ dest.username ? ' — Auth' : '' }}
-                </option>
-              </select>
-            </div>
-          </div>
+        <div v-if="destinations.length === 0" class="text-center py-8 text-gray-500 text-sm">
+          Add a push destination above first.
+        </div>
 
-          <div v-if="selectedChannelId && selectedDestId" class="bg-gray-700/50 rounded-lg p-4 border border-gray-600">
-            <div class="flex items-center justify-between">
-              <div class="flex items-center gap-3">
-                <div class="w-8 h-8 bg-green-500/20 rounded-full flex items-center justify-center">
-                  <Play class="w-4 h-4 text-green-400" />
-                </div>
-                <div>
-                  <p class="text-white text-sm font-medium">
-                    {{ getChannelName(selectedChannelId) }}
-                    <span class="text-gray-400 mx-1">→</span>
-                    {{ getDestName(selectedDestId) }}
-                  </p>
-                  <p class="text-gray-400 text-xs">
-                    {{ getDestProtocol(selectedDestId).toUpperCase() }}
-                    <span v-if="getDestAuth(selectedDestId)"> — Authenticated</span>
-                  </p>
-                </div>
-              </div>
-              <button
-                v-if="isPushing(selectedChannelId, selectedDestId)"
-                @click="stopPush(selectedChannelId, selectedDestId)"
-                :disabled="loadingSingle"
-                class="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-sm rounded-lg transition flex items-center gap-2"
-              >
-                <Loader2 v-if="loadingSingle" class="w-4 h-4 animate-spin" />
-                <Square v-else class="w-4 h-4" />
-                Stop Push
-              </button>
-              <button
-                v-else
-                @click="startPush(selectedChannelId, selectedDestId)"
-                :disabled="loadingSingle"
-                class="px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 text-white text-sm rounded-lg transition flex items-center gap-2"
-              >
-                <Loader2 v-if="loadingSingle" class="w-4 h-4 animate-spin" />
-                <Play v-else class="w-4 h-4" />
-                Start Push
-              </button>
-            </div>
-          </div>
+        <div v-else-if="filteredChannels.length === 0" class="text-center py-8 text-gray-500 text-sm">
+          No active channels found.
+        </div>
 
-          <!-- Quick push buttons table -->
-          <div>
-            <div class="flex items-center justify-between mb-3">
-              <p class="text-sm text-gray-400">Quick Push — all channels and destinations</p>
-              <input
-                v-model="search"
-                type="text"
-                placeholder="Search channels…"
-                class="px-3 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm placeholder-gray-500 focus:outline-none focus:border-indigo-500 w-56"
-              />
-            </div>
-
-            <div class="overflow-x-auto">
-              <table class="w-full text-sm">
+        <div v-else class="overflow-x-auto">
+          <table class="w-full text-sm">
                 <thead>
                   <tr class="border-b border-gray-700 text-left">
                     <th class="pb-3 pr-4 w-8 text-gray-400 font-medium">#</th>
@@ -286,8 +296,6 @@
                   </tr>
                 </tbody>
               </table>
-            </div>
-          </div>
         </div>
       </div>
 
