@@ -48,6 +48,15 @@ Route::middleware(['auth', \App\Http\Middleware\AdminMiddleware::class])
         Route::post('/channels/multicast-scan/probe', [App\Http\Controllers\Admin\MulticastScanController::class, 'scan'])->name('channels.multicast-scan.probe');
         Route::post('/channels/multicast-scan/import', [App\Http\Controllers\Admin\MulticastScanController::class, 'import'])->name('channels.multicast-scan.import');
 
+        // ─── Stream Push (External RTMP/SRT) ────────────────────────────
+        Route::get('/channels/push', [App\Http\Controllers\Admin\ChannelPushController::class, 'index'])->name('channels.push');
+        Route::post('/channels/push/destinations', [App\Http\Controllers\Admin\ChannelPushController::class, 'storeDestination'])->name('channels.push.destinations.store');
+        Route::put('/channels/push/destinations/{destination}', [App\Http\Controllers\Admin\ChannelPushController::class, 'updateDestination'])->name('channels.push.destinations.update');
+        Route::delete('/channels/push/destinations/{destination}', [App\Http\Controllers\Admin\ChannelPushController::class, 'destroyDestination'])->name('channels.push.destinations.destroy');
+        Route::post('/channels/push/start', [App\Http\Controllers\Admin\ChannelPushController::class, 'startPush'])->name('channels.push.start');
+        Route::post('/channels/push/stop', [App\Http\Controllers\Admin\ChannelPushController::class, 'stopPush'])->name('channels.push.stop');
+        Route::post('/channels/push/stop-all', [App\Http\Controllers\Admin\ChannelPushController::class, 'stopAll'])->name('channels.push.stop-all');
+
         Route::resource('channels', App\Http\Controllers\Admin\ChannelController::class)->except(['create', 'edit']);
         Route::post('/channels/{channel}/toggle-status', [App\Http\Controllers\Admin\ChannelController::class, 'toggleStatus'])->name('channels.toggleStatus');
         Route::post('/channels/bulk-import', [App\Http\Controllers\Admin\ChannelController::class, 'bulkImport'])->name('channels.bulkImport');

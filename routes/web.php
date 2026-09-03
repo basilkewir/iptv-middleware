@@ -294,6 +294,16 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
         Route::get('/channels/multicast-scan', [\App\Http\Controllers\Admin\MulticastScanController::class, 'index'])->name('channels.multicast-scan');
         Route::post('/channels/multicast-scan/probe', [\App\Http\Controllers\Admin\MulticastScanController::class, 'scan'])->name('channels.multicast-scan.probe');
         Route::post('/channels/multicast-scan/import', [\App\Http\Controllers\Admin\MulticastScanController::class, 'import'])->name('channels.multicast-scan.import');
+
+        // ─── Stream Push (External RTMP/SRT) ────────────────────────────
+        Route::get('/channels/push', [\App\Http\Controllers\Admin\ChannelPushController::class, 'index'])->name('channels.push');
+        Route::post('/channels/push/destinations', [\App\Http\Controllers\Admin\ChannelPushController::class, 'storeDestination'])->name('channels.push.destinations.store');
+        Route::put('/channels/push/destinations/{destination}', [\App\Http\Controllers\Admin\ChannelPushController::class, 'updateDestination'])->name('channels.push.destinations.update');
+        Route::delete('/channels/push/destinations/{destination}', [\App\Http\Controllers\Admin\ChannelPushController::class, 'destroyDestination'])->name('channels.push.destinations.destroy');
+        Route::post('/channels/push/start', [\App\Http\Controllers\Admin\ChannelPushController::class, 'startPush'])->name('channels.push.start');
+        Route::post('/channels/push/stop', [\App\Http\Controllers\Admin\ChannelPushController::class, 'stopPush'])->name('channels.push.stop');
+        Route::post('/channels/push/stop-all', [\App\Http\Controllers\Admin\ChannelPushController::class, 'stopAll'])->name('channels.push.stop-all');
+
         Route::get('/channels/{channel}/edit', [ChannelController::class, 'show'])->name('channels.edit');
         Route::post('/channels', [ChannelController::class, 'store'])->name('channels.store');
         Route::put('/channels/{channel}', [ChannelController::class, 'update'])->name('channels.update');
