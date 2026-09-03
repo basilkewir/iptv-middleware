@@ -183,11 +183,6 @@ class ChannelPushService
         $videoKbps = $videoBitrate ? ($videoBitrate . 'k') : null;
         $audioKbps = $audioBitrate ? ($audioBitrate . 'k') : null;
 
-        $videoCodec = $videoKbps
-            ? "-c:v libx264 -b:v {$videoKbps} -preset veryfast -profile:v main"
-            : '-c:v copy';
-        $audioCodec = $audioKbps ? "-c:a aac -b:a {$audioKbps}" : '-c:a aac -b:a 128k';
-
         $inputOpts = [];
         if (str_starts_with($inputUrl, 'http://') || str_starts_with($inputUrl, 'https://')) {
             $inputOpts[] = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_on_network_error 1';
@@ -195,18 +190,42 @@ class ChannelPushService
             $inputOpts[] = '-rtsp_transport tcp -stimeout 10000000';
         }
 
-        $outputOpts = '-flush_packets 1 -max_muxing_queue_size 1024';
+        $videoOpts = [];
+        if ($videoKbps) {
+            $videoOpts[] = '-c:v libx264';
+            $videoOpts[] = '-b:v ' . $videoKbps;
+            $videoOpts[] = '-preset veryfast';
+            $videoOpts[] = '-profile:v main';
+            $videoOpts[] = '-pix_fmt yuv420p';
+            $videoOpts[] = '-vf scale=trunc(iw/2)*2:trunc(ih/2)*2';
+        } else {
+            $videoOpts[] = '-c:v copy';
+        }
 
+        $audioOpts = [];
+        if ($audioKbps) {
+            $audioOpts[] = '-c:a aac';
+            $audioOpts[] = '-b:a ' . $audioKbps;
+            $audioOpts[] = '-ac 2';
+        } else {
+            $audioOpts[] = '-c:a aac';
+            $audioOpts[] = '-b:a 128k';
+            $audioOpts[] = '-ac 2';
+        }
+
+        $outputOpts = ['-flush_packets 1', '-max_muxing_queue_size 1024'];
         $format = $protocol === 'srt' ? 'mpegts' : 'flv';
 
-        $parts = [$this->ffmpegPath];
-        if ($inputOpts) $parts[] = implode(' ', $inputOpts);
-        $parts[] = '-i ' . escapeshellarg($inputUrl);
-        $parts[] = $videoCodec;
-        $parts[] = $audioCodec;
-        $parts[] = $outputOpts;
-        $parts[] = '-f ' . $format;
-        $parts[] = '"' . $outputUrl . '"';
+        $parts = array_merge(
+            [$this->ffmpegPath],
+            $inputOpts,
+            ['-i ' . escapeshellarg($inputUrl)],
+            $videoOpts,
+            $audioOpts,
+            $outputOpts,
+            ['-f ' . $format],
+            ['"' . $outputUrl . '"'],
+        );
 
         return implode(' ', $parts);
     }
