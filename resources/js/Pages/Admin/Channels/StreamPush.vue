@@ -560,6 +560,7 @@
 <script setup>
 import { ref, computed, reactive, nextTick, watch } from 'vue'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
+import { route } from '@/Composables/useRoute'
 import { Radio, Plus, Loader2, Square, Play, X, Lock, Tv, Search, Check } from 'lucide-vue-next'
 
 const props = defineProps({
