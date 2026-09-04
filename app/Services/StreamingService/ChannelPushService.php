@@ -202,7 +202,6 @@ class ChannelPushService
             $videoOpts[] = '-preset veryfast';
             $videoOpts[] = '-profile:v main';
             $videoOpts[] = '-pix_fmt yuv420p';
-            $videoOpts[] = '-vf scale=trunc(iw/2)*2:trunc(ih/2)*2';
         } else {
             $videoOpts[] = '-c:v copy';
         }
@@ -229,7 +228,7 @@ class ChannelPushService
             $audioOpts,
             $outputOpts,
             ['-f ' . $format],
-            ['"' . $outputUrl . '"'],
+            [escapeshellarg($outputUrl)],
         );
 
         return implode(' ', $parts);
