@@ -289,41 +289,32 @@ class ChannelPushServiceTest extends TestCase
             'url' => 'rtmp://cdn.example.com/live',
         ]);
 
-        // Mock exec to prevent actual FFmpeg execution
-        \Illuminate\Support\Facades\App::swap(
-            ChannelPushService::class,
-            new class ($this->service) extends ChannelPushService {
-                private $original;
-
-                public function __construct($original) {
-                    $this->original = $original;
-                }
-
-                public function startPush(
-                    \App\Models\Channel $channel,
-                    \App\Models\PushDestination $destination,
-                    ?string $streamKey = null,
-                    ?int $videoBitrate = null,
-                    ?int $audioBitrate = null,
-                ): ChannelPushDestination {
-                    // Simulate successful push
-                    return ChannelPushDestination::create([
-                        'channel_id' => $channel->id,
-                        'push_destination_id' => $destination->id,
-                        'stream_key' => $streamKey,
-                        'video_bitrate' => $videoBitrate,
-                        'audio_bitrate' => $audioBitrate,
-                        'status' => 'pushing',
-                        'ffmpeg_pid' => 12345,
-                        'started_at' => now(),
-                        'restart_count' => 0,
-                    ]);
-                }
+        // Create a mock that extends the real service and overrides the shell-exec parts
+        $mock = \Mockery::mock(ChannelPushService::class)->makePartial();
+        $mock->shouldReceive('isWrapperAlive')->andReturn(true);
+        // Prevent actual shell execution by mocking the private method via reflection
+        $ref = new \ReflectionClass($mock);
+        $method = $ref->getMethod('executePushWrapper');
+        $method->setAccessible(true);
+        // We can't easily mock private methods, so use a different approach:
+        // Override the whole startPush to test the logic without FFmpeg
+        $mock->shouldReceive('startPush')->once()->andReturnUsing(
+            function ($channel, $destination, $streamKey, $videoBitrate, $audioBitrate) {
+                return ChannelPushDestination::create([
+                    'channel_id' => $channel->id,
+                    'push_destination_id' => $destination->id,
+                    'stream_key' => $streamKey,
+                    'video_bitrate' => $videoBitrate,
+                    'audio_bitrate' => $audioBitrate,
+                    'status' => 'pushing',
+                    'ffmpeg_pid' => 12345,
+                    'started_at' => now(),
+                    'restart_count' => 0,
+                ]);
             }
         );
 
-        $pushService = app(ChannelPushService::class);
-        $record = $pushService->startPush($channel, $dest, 'test_key', 2500, 128);
+        $record = $mock->startPush($channel, $dest, 'test_key', 2500, 128);
 
         $this->assertInstanceOf(ChannelPushDestination::class, $record);
         $this->assertEquals($channel->id, $record->channel_id);
@@ -354,42 +345,11 @@ class ChannelPushServiceTest extends TestCase
             'started_at' => now(),
         ]);
 
-        // Mock exec to prevent actual FFmpeg execution
-        \Illuminate\Support\Facades\App::swap(
-            ChannelPushService::class,
-            new class extends ChannelPushService {
-                public function startPush(
-                    \App\Models\Channel $channel,
-                    \App\Models\PushDestination $destination,
-                    ?string $streamKey = null,
-                    ?int $videoBitrate = null,
-                    ?int $audioBitrate = null,
-                ): ChannelPushDestination {
-                    $existing = ChannelPushDestination::where('channel_id', $channel->id)
-                        ->where('push_destination_id', $destination->id)
-                        ->first();
+        // Mock the service: isWrapperAlive returns true so startPush returns existing
+        $mock = \Mockery::mock(ChannelPushService::class)->makePartial();
+        $mock->shouldReceive('isWrapperAlive')->once()->with(9999)->andReturn(true);
 
-                    if ($existing && $existing->isPushing()) {
-                        return $existing;
-                    }
-
-                    return ChannelPushDestination::create([
-                        'channel_id' => $channel->id,
-                        'push_destination_id' => $destination->id,
-                        'stream_key' => $streamKey,
-                        'video_bitrate' => $videoBitrate,
-                        'audio_bitrate' => $audioBitrate,
-                        'status' => 'pushing',
-                        'ffmpeg_pid' => 12345,
-                        'started_at' => now(),
-                        'restart_count' => 0,
-                    ]);
-                }
-            }
-        );
-
-        $pushService = app(ChannelPushService::class);
-        $result = $pushService->startPush($channel, $dest);
+        $result = $mock->startPush($channel, $dest);
 
         $this->assertEquals($existing->id, $result->id);
         $this->assertEquals($existing->ffmpeg_pid, $result->ffmpeg_pid);
@@ -414,7 +374,9 @@ class ChannelPushServiceTest extends TestCase
             'last_restart_at' => now(),
         ]);
 
-        $this->service->stopPush($push);
+        $mock = \Mockery::mock(ChannelPushService::class)->makePartial()->shouldAllowMockingProtectedMethods();
+        $mock->shouldReceive('killProcessGroup')->once();
+        $mock->stopPush($push);
 
         $push->refresh();
         $this->assertEquals('idle', $push->status);
@@ -470,7 +432,9 @@ class ChannelPushServiceTest extends TestCase
             'ffmpeg_pid' => 2222,
         ]);
 
-        $this->service->stopAllPushes();
+        $mock = \Mockery::mock(ChannelPushService::class)->makePartial()->shouldAllowMockingProtectedMethods();
+        $mock->shouldReceive('killProcessGroup')->twice();
+        $mock->stopAllPushes();
 
         $push1->refresh();
         $push2->refresh();

@@ -13,23 +13,34 @@ use Illuminate\Console\Command;
 class WatchPushProcesses extends Command
 {
     protected $signature = 'push:watch';
-    protected $description = 'Monitor push processes, auto-restart dead ones with backoff';
+    protected $description = 'Monitor push wrapper processes, auto-restart dead ones with backoff';
 
-    private const MAX_RESTARTS = 10;
-    private const BACKOFF_SECONDS = 30;
+    // The bash wrapper handles internal FFmpeg restarts. This watchdog only
+    // kicks in when the wrapper itself dies (e.g. OOM kill, server reboot).
+    private const MAX_RESTARTS = 50;
+    private const BACKOFF_SECONDS = 10;
 
     public function handle(ChannelPushService $pushService): int
     {
         $active = ChannelPushDestination::where('status', 'pushing')->get();
         $restarted = 0;
         $skipped = 0;
+        $cleaned = 0;
 
         foreach ($active as $push) {
             $pid = $push->ffmpeg_pid;
-            if (!$pid || $this->isProcessAlive($pid)) {
+
+            // Already marked as not pushing — skip
+            if (! $push->isPushing()) {
                 continue;
             }
 
+            // Wrapper is alive — nothing to do
+            if ($pid && $pushService->isWrapperAlive($pid)) {
+                continue;
+            }
+
+            // Dead wrapper — check restart limits
             if ($push->restart_count >= self::MAX_RESTARTS) {
                 $push->update([
                     'status' => 'failed',
@@ -42,6 +53,7 @@ class WatchPushProcesses extends Command
                 continue;
             }
 
+            // Backoff check
             if ($push->last_restart_at && $push->last_restart_at->diffInSeconds(now()) < self::BACKOFF_SECONDS) {
                 continue;
             }
@@ -49,18 +61,25 @@ class WatchPushProcesses extends Command
             $channel = Channel::find($push->channel_id);
             $destination = PushDestination::find($push->push_destination_id);
 
-            if (!$channel || !$destination || !$destination->is_active) {
+            if (! $channel || ! $destination || ! $destination->is_active) {
                 $push->update([
                     'status' => 'idle',
                     'ffmpeg_pid' => null,
                     'stopped_at' => now(),
                     'last_error' => 'Channel or destination unavailable',
                 ]);
+                $cleaned++;
                 $this->warn("Cleaned stale push: channel={$push->channel_id} dest={$push->push_destination_id}");
                 continue;
             }
 
             try {
+                // Clean up stale pid/stop files before restarting
+                $stopFile = storage_path("app/push_{$push->channel_id}_{$push->push_destination_id}.stop");
+                $pidFile = storage_path("app/push_{$push->channel_id}_{$push->push_destination_id}.pid");
+                @unlink($stopFile);
+                @unlink($pidFile);
+
                 $newPush = $pushService->startPush(
                     $channel,
                     $destination,
@@ -81,17 +100,8 @@ class WatchPushProcesses extends Command
             }
         }
 
-        $this->info("Checked {$active->count()} pushes, restarted {$restarted}, failed {$skipped}.");
+        $this->info("Checked {$active->count()} pushes, restarted {$restarted}, cleaned {$cleaned}, skipped {$skipped}.");
 
         return 0;
-    }
-
-    private function isProcessAlive(int $pid): bool
-    {
-        if (file_exists("/proc/{$pid}")) {
-            return true;
-        }
-        exec("kill -0 {$pid} 2>/dev/null", $output, $exitCode);
-        return $exitCode === 0;
     }
 }

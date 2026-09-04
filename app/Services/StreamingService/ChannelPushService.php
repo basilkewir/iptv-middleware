@@ -36,13 +36,18 @@ class ChannelPushService
             ->where('push_destination_id', $destination->id)
             ->first();
 
-        if ($existing && $existing->isPushing()) {
+        if ($existing && $existing->isPushing() && $this->isWrapperAlive($existing->ffmpeg_pid)) {
             return $existing;
         }
 
+        // Kill stale wrapper if it exists but is dead
+        if ($existing && $existing->ffmpeg_pid) {
+            $this->killProcessGroup($existing->ffmpeg_pid);
+        }
+
         $outputUrl = $this->buildOutputUrl($destination, $streamKey);
-        $command = $this->buildFFmpegCommand($sourceUrl, $outputUrl, $destination->protocol, $videoBitrate, $audioBitrate);
-        $pid = $this->executeFFmpeg($command, $channel->id, $destination->id);
+        $ffmpegCmd = $this->buildFFmpegCommand($sourceUrl, $outputUrl, $destination->protocol, $videoBitrate, $audioBitrate);
+        $pid = $this->executePushWrapper($ffmpegCmd, $channel->id, $destination->id);
 
         if ($existing) {
             $existing->update([
@@ -54,8 +59,8 @@ class ChannelPushService
                 'started_at' => now(),
                 'stopped_at' => null,
                 'last_error' => null,
-                'restart_count' => ($existing->restart_count ?? 0) + 1,
-                'last_restart_at' => now(),
+                'restart_count' => 0,
+                'last_restart_at' => null,
             ]);
             $record = $existing->fresh();
         } else {
@@ -94,7 +99,13 @@ class ChannelPushService
 
         $pid = $push->ffmpeg_pid;
         if ($pid) {
-            exec("kill -TERM {$pid} 2>/dev/null");
+            // Kill the entire process group (setsid wrapper + ffmpeg child)
+            $this->killProcessGroup($pid);
+
+            // Also write a .stop file so the wrapper loop exits cleanly
+            $stopFile = $this->getStopFile($push->channel_id, $push->push_destination_id);
+            @file_put_contents($stopFile, '1');
+
             Cache::forget($this->cacheKey($push->channel_id, $push->push_destination_id));
             Log::info('Channel push stopped', ['push_id' => $push->id, 'pid' => $pid]);
         }
@@ -117,16 +128,15 @@ class ChannelPushService
 
     public function isPushing(int $channelId, int $destinationId): bool
     {
-        $key = $this->cacheKey($channelId, $destinationId);
-        $pid = Cache::get($key);
+        $push = ChannelPushDestination::where('channel_id', $channelId)
+            ->where('push_destination_id', $destinationId)
+            ->first();
 
-        if ($pid && ! $this->processExists($pid)) {
-            Cache::forget($key);
-
+        if (! $push || ! $push->isPushing()) {
             return false;
         }
 
-        return (bool) $pid;
+        return $this->isWrapperAlive($push->ffmpeg_pid);
     }
 
     public function getActivePushes(): array
@@ -134,18 +144,23 @@ class ChannelPushService
         return ChannelPushDestination::with(['channel', 'pushDestination'])
             ->where('status', 'pushing')
             ->get()
-            ->map(fn (ChannelPushDestination $push) => [
-                'id' => $push->id,
-                'channel_id' => $push->channel_id,
-                'channel' => $push->channel->name ?? 'Unknown',
-                'destination' => $push->pushDestination->name ?? 'Unknown',
-                'protocol' => $push->pushDestination->protocol ?? 'unknown',
-                'stream_key' => $push->stream_key,
-                'video_bitrate' => $push->video_bitrate,
-                'audio_bitrate' => $push->audio_bitrate,
-                'started_at' => $push->started_at?->toISOString(),
-                'pid' => $push->ffmpeg_pid,
-            ])
+            ->map(function (ChannelPushDestination $push) {
+                $alive = $this->isWrapperAlive($push->ffmpeg_pid);
+
+                return [
+                    'id' => $push->id,
+                    'channel_id' => $push->channel_id,
+                    'channel' => $push->channel->name ?? 'Unknown',
+                    'destination' => $push->pushDestination->name ?? 'Unknown',
+                    'protocol' => $push->pushDestination->protocol ?? 'unknown',
+                    'stream_key' => $push->stream_key,
+                    'video_bitrate' => $push->video_bitrate,
+                    'audio_bitrate' => $push->audio_bitrate,
+                    'started_at' => $push->started_at?->toISOString(),
+                    'pid' => $push->ffmpeg_pid,
+                    'alive' => $alive,
+                ];
+            })
             ->toArray();
     }
 
@@ -193,6 +208,8 @@ class ChannelPushService
             $inputOpts[] = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_on_network_error 1';
         } elseif (str_starts_with($inputUrl, 'rtsp://')) {
             $inputOpts[] = '-rtsp_transport tcp -stimeout 10000000';
+        } elseif (str_starts_with($inputUrl, 'udp://') || str_starts_with($inputUrl, 'rtp://')) {
+            $inputOpts[] = '-timeout 5000000 -rw_timeout 5000000';
         }
 
         $videoOpts = [];
@@ -234,37 +251,118 @@ class ChannelPushService
         return implode(' ', $parts);
     }
 
-    private function executeFFmpeg(string $command, int $channelId, int $destinationId): int
+    /**
+     * Execute FFmpeg inside a bash wrapper that auto-restarts on failure.
+     * The wrapper loop: while true; do ffmpeg ...; check .stop file; sleep 5; done
+     * This makes the push permanent — it survives source drops, network hiccups,
+     * and FFmpeg crashes.
+     */
+    private function executePushWrapper(string $ffmpegCmd, int $channelId, int $destinationId): int
     {
-        $processKey = $this->cacheKey($channelId, $destinationId);
         $logFile = storage_path("logs/push_{$channelId}_{$destinationId}.log");
-        $fullCommand = "{$command} > " . escapeshellarg($logFile) . " 2>&1 & echo $!";
+        $stopFile = $this->getStopFile($channelId, $destinationId);
+        $pidFile = $this->getPidFile($channelId, $destinationId);
 
-        Log::info('FFmpeg command', ['command' => $command, 'full' => $fullCommand]);
+        // Remove stale .stop file
+        @unlink($stopFile);
 
-        exec($fullCommand, $output, $exitCode);
+        // Build the wrapper script
+        $wrapper = 'echo $$ > ' . escapeshellarg($pidFile) . '; '
+            . 'L=' . escapeshellarg($logFile) . '; '
+            . 'S=' . escapeshellarg($stopFile) . '; '
+            . 'echo "PUSH WRAPPER START channel=' . $channelId . ' dest=' . $destinationId . ' pid=$$ $(date +%%s)" >> "$L"; '
+            . 'trap \'echo "PUSH WRAPPER EXIT rc=$? $(date +%%s)" >> "$L"; rm -f "$S"; exit 0\' EXIT INT TERM; '
+            . 'DELAY=3; '
+            . 'while true; do '
+            .   '[ -f "$S" ] && echo "STOP FILE FOUND" >> "$L" && exit 0; '
+            .   'echo "PUSH START $(date +%%s)" >> "$L"; '
+            .   $ffmpegCmd . ' >> "$L" 2>&1; '
+            .   'RC=$?; '
+            .   'echo "PUSH EXIT rc=$RC $(date +%%s)" >> "$L"; '
+            .   '[ -f "$S" ] && echo "STOP FILE FOUND AFTER EXIT" >> "$L" && exit 0; '
+            .   'if [ $RC -eq 0 ]; then DELAY=3; else DELAY=$((DELAY * 2)); [ $DELAY -gt 30 ] && DELAY=30; fi; '
+            .   'echo "PUSH RESTART delay=$DELAY" >> "$L"; '
+            .   'sleep $DELAY; '
+            . 'done';
 
-        if ($exitCode !== 0 || empty($output)) {
-            $log = @file_get_contents($logFile);
-            throw new \RuntimeException("FFmpeg exec failed (exit={$exitCode}). Log: " . substr($log ?? 'empty', 0, 1000));
+        $shellCmd = 'setsid bash -c ' . escapeshellarg($wrapper) . ' < /dev/null > /dev/null 2>&1 &';
+
+        Log::info('Push wrapper starting', [
+            'channel_id' => $channelId,
+            'destination_id' => $destinationId,
+            'ffmpeg_cmd' => $ffmpegCmd,
+        ]);
+
+        exec($shellCmd);
+
+        // Wait for PID file to appear
+        for ($i = 0; $i < 20; $i++) {
+            usleep(250000); // 250ms
+            if (is_file($pidFile)) {
+                break;
+            }
         }
 
-        $pid = (int) end($output);
-        Cache::put($processKey, $pid, 86400);
+        if (! is_file($pidFile)) {
+            throw new \RuntimeException("Push wrapper failed to start — no PID file after 5s.");
+        }
 
+        $pid = (int) trim((string) file_get_contents($pidFile));
+
+        if ($pid <= 0) {
+            throw new \RuntimeException("Push wrapper wrote invalid PID: {$pid}");
+        }
+
+        Cache::put($this->cacheKey($channelId, $destinationId), $pid, 86400);
+
+        // Verify the wrapper process is alive
         usleep(500000);
-        if (!$this->processExists($pid)) {
+        if (! $this->processExists($pid)) {
             $log = @file_get_contents($logFile);
-            throw new \RuntimeException("FFmpeg exited immediately. PID={$pid}. Log: " . substr($log ?? 'empty', 0, 1000));
+            throw new \RuntimeException("Push wrapper exited immediately. PID={$pid}. Log: " . substr($log ?? 'empty', 0, 1000));
         }
 
-        Log::info('FFmpeg started', [
-            'command' => $command,
-            'pid' => $pid,
+        Log::info('Push wrapper started', [
+            'channel_id' => $channelId,
+            'destination_id' => $destinationId,
+            'wrapper_pid' => $pid,
+            'pid_file' => $pidFile,
             'log_file' => $logFile,
         ]);
 
         return $pid;
+    }
+
+    public function isWrapperAlive(?int $pid): bool
+    {
+        if (! $pid || $pid <= 0) {
+            return false;
+        }
+
+        return $this->processExists($pid);
+    }
+
+    protected function killProcessGroup(int $pid): void
+    {
+        // Kill the whole process group (setsid leader + ffmpeg child)
+        @exec("kill -TERM -{$pid} 2>/dev/null");
+        @exec("kill -TERM {$pid} 2>/dev/null");
+        usleep(500000);
+        // Force kill if still alive
+        if ($this->processExists($pid)) {
+            @exec("kill -KILL -{$pid} 2>/dev/null");
+            @exec("kill -KILL {$pid} 2>/dev/null");
+        }
+    }
+
+    private function getStopFile(int $channelId, int $destinationId): string
+    {
+        return storage_path("app/push_{$channelId}_{$destinationId}.stop");
+    }
+
+    private function getPidFile(int $channelId, int $destinationId): string
+    {
+        return storage_path("app/push_{$channelId}_{$destinationId}.pid");
     }
 
     private function cacheKey(int $channelId, int $destinationId): string
@@ -274,6 +372,6 @@ class ChannelPushService
 
     private function processExists(int $pid): bool
     {
-        return file_exists("/proc/{$pid}") || exec("kill -0 {$pid} 2>/dev/null") === '';
+        return @file_exists("/proc/{$pid}") || exec("kill -0 {$pid} 2>/dev/null") === '';
     }
 }

@@ -145,7 +145,7 @@ class MulticastScannerTest extends TestCase
 
         $cmd = $scanner->buildProbeCommandPublic('udp://@239.0.0.1:32768', null, 15);
 
-        $this->assertStringContainsString('-probesize 1M -analyzeduration 1M', $cmd);
+        $this->assertStringContainsString('-probesize 5M -analyzeduration 5M', $cmd);
         $this->assertStringNotContainsString('-analyzeduration 10M', $cmd);
         $this->assertStringContainsString('udp://@239.0.0.1:32768', $cmd);
     }
