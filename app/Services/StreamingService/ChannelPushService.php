@@ -241,10 +241,13 @@ class ChannelPushService
         $logFile = storage_path("logs/push_{$channelId}_{$destinationId}.log");
         $fullCommand = "{$command} > " . escapeshellarg($logFile) . " 2>&1 & echo $!";
 
-        exec($fullCommand, $output);
+        Log::info('FFmpeg command', ['command' => $command, 'full' => $fullCommand]);
 
-        if (empty($output)) {
-            throw new \RuntimeException('Failed to start FFmpeg process.');
+        exec($fullCommand, $output, $exitCode);
+
+        if ($exitCode !== 0 || empty($output)) {
+            $log = @file_get_contents($logFile);
+            throw new \RuntimeException("FFmpeg exec failed (exit={$exitCode}). Log: " . substr($log ?? 'empty', 0, 1000));
         }
 
         $pid = (int) end($output);
@@ -253,7 +256,7 @@ class ChannelPushService
         usleep(500000);
         if (!$this->processExists($pid)) {
             $log = @file_get_contents($logFile);
-            throw new \RuntimeException('FFmpeg exited immediately. Log: ' . substr($log ?? 'empty', 0, 500));
+            throw new \RuntimeException("FFmpeg exited immediately. PID={$pid}. Log: " . substr($log ?? 'empty', 0, 1000));
         }
 
         Log::info('FFmpeg started', [
