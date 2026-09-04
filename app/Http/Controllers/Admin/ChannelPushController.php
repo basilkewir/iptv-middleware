@@ -33,8 +33,16 @@ class ChannelPushController extends Controller
         $activePushes = $pushService->getActivePushes();
 
         $pushMap = [];
-        foreach (ChannelPushDestination::where('status', 'pushing')->get() as $cpd) {
-            $pushMap[$cpd->channel_id][$cpd->push_destination_id] = true;
+        $pushConfigs = [];
+        foreach (ChannelPushDestination::get() as $cpd) {
+            if ($cpd->status === 'pushing') {
+                $pushMap[$cpd->channel_id][$cpd->push_destination_id] = true;
+            }
+            $pushConfigs[$cpd->channel_id][$cpd->push_destination_id] = [
+                'stream_key' => $cpd->stream_key,
+                'video_bitrate' => $cpd->video_bitrate,
+                'audio_bitrate' => $cpd->audio_bitrate,
+            ];
         }
 
         return Inertia::render('Admin/Channels/StreamPush', [
@@ -42,6 +50,7 @@ class ChannelPushController extends Controller
             'destinations' => $destinations,
             'activePushes' => $activePushes,
             'pushMap' => $pushMap,
+            'pushConfigs' => $pushConfigs,
         ]);
     }
 

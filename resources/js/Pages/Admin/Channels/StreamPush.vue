@@ -366,6 +366,7 @@
                     @click="startPush(ch.id, dest.id)"
                     :disabled="loadingPush[`${ch.id}-${dest.id}`] || !ch.active_stream_url"
                     class="px-3 py-1 bg-green-600/20 hover:bg-green-600/40 text-green-400 text-xs rounded transition inline-flex items-center gap-1 disabled:opacity-40"
+                    :title="getSavedConfig(ch.id, dest.id)?.stream_key || ch.slug"
                   >
                     <Loader2 v-if="loadingPush[`${ch.id}-${dest.id}`]" class="w-3 h-3 animate-spin" />
                     <Play v-else class="w-3 h-3" />
@@ -442,6 +443,13 @@
                   </div>
                 </div>
                 <Check v-if="selectedChannel?.id === ch.id" class="w-5 h-5 text-indigo-400 shrink-0" />
+                <span
+                  v-if="hasSavedConfig(ch.id)"
+                  class="px-1.5 py-0.5 text-xs rounded-full bg-indigo-500/20 text-indigo-400 shrink-0"
+                  title="Has saved push config"
+                >
+                  Saved
+                </span>
               </button>
             </div>
             <div class="flex justify-end gap-3 p-4 border-t border-gray-700">
@@ -602,6 +610,7 @@ const props = defineProps({
   destinations:  { type: Array, default: () => [] },
   activePushes:  { type: Array, default: () => [] },
   pushMap:       { type: Object, default: () => ({}) },
+  pushConfigs:   { type: Object, default: () => ({}) },
 })
 
 const search = ref('')
@@ -656,13 +665,35 @@ watch(showChannelPicker, (val) => {
   }
 })
 
+watch(selectedDestId, (destId) => {
+  if (selectedChannel.value && destId) {
+    const saved = getSavedConfig(selectedChannel.value.id, destId)
+    if (saved) {
+      pushStreamKey.value = saved.stream_key || selectedChannel.value.slug || ''
+      pushVideoBitrate.value = saved.video_bitrate || null
+      pushAudioBitrate.value = saved.audio_bitrate || null
+    }
+  }
+})
+
 const selectChannel = (ch) => {
   selectedChannel.value = ch
   selectedChannelId.value = ch.id
-  pushStreamKey.value = ch.slug || ''
-  pushVideoBitrate.value = null
-  pushAudioBitrate.value = null
+  // Load saved config for this channel's first destination, or fallback to slug
+  const saved = getSavedConfig(ch.id, selectedDestId.value)
+  pushStreamKey.value = saved?.stream_key || ch.slug || ''
+  pushVideoBitrate.value = saved?.video_bitrate || null
+  pushAudioBitrate.value = saved?.audio_bitrate || null
   showChannelPicker.value = false
+}
+
+const getSavedConfig = (channelId, destId) => {
+  if (!destId || !props.pushConfigs[channelId]) return null
+  return props.pushConfigs[channelId][destId] || null
+}
+
+const hasSavedConfig = (channelId) => {
+  return !!props.pushConfigs[channelId] && Object.keys(props.pushConfigs[channelId]).length > 0
 }
 
 const isPushing = (channelId, destinationId) => {
@@ -728,6 +759,13 @@ const startPush = async (channelId, destinationId) => {
       if (streamKey) body.stream_key = streamKey
       if (pushVideoBitrate.value) body.video_bitrate = pushVideoBitrate.value
       if (pushAudioBitrate.value) body.audio_bitrate = pushAudioBitrate.value
+    } else {
+      // Matrix push: load saved config or use channel slug
+      const channel = props.channels.find(c => c.id === channelId)
+      const saved = getSavedConfig(channelId, destinationId)
+      body.stream_key = saved?.stream_key || channel?.slug || null
+      if (saved?.video_bitrate) body.video_bitrate = saved.video_bitrate
+      if (saved?.audio_bitrate) body.audio_bitrate = saved.audio_bitrate
     }
     await api(route('admin.channels.push.start'), 'POST', body)
     location.reload()
