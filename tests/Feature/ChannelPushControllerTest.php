@@ -186,7 +186,10 @@ class ChannelPushControllerTest extends TestCase
             ->once()
             ->with(
                 \Mockery::on(fn ($ch) => $ch->id === $channel->id),
-                \Mockery::on(fn ($d) => $d->id === $dest->id)
+                \Mockery::on(fn ($d) => $d->id === $dest->id),
+                null,
+                null,
+                null,
             )
             ->andReturn(new ChannelPushDestination([
                 'id' => 1,
