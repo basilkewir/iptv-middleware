@@ -50,6 +50,12 @@ class MulticastIngestService
     /** Load threshold the group reader waits under before respawning ffmpeg. */
     private const HOLD_GATE = 24;
 
+    // HLS segment duration and playlist size for smooth TV playback.
+    // 2s segments with 3 in playlist = 6s window — enough buffer for
+    // TV apps to avoid rebuffering while keeping latency low.
+    private const HLS_SEGMENT_TIME = 2;
+    private const HLS_PLAYLIST_SIZE = 3;
+
     /**
      * Get all active multicast channels grouped by their source URL.
      * Only includes channels whose ACTIVE source is UDP/RTP — channels that
@@ -472,6 +478,8 @@ class MulticastIngestService
             // (normalises odd profiles/codecs that break TV players). The rest
             // stream-copy BOTH video and audio at near-zero CPU cost — this is
             // what keeps dozens of UDP channels almost free, like Flussonic.
+            // However, ALL channels get audio normalized to AAC for TV app
+            // compatibility — only video stays copy when transcoding is off.
             $transcoding = (bool) ($ch->transcoding_enabled ?? false);
 
             $videoCodec = $transcoding
@@ -480,25 +488,26 @@ class MulticastIngestService
                     : ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -threads 4')
                 : ' -c:v copy';
 
-            // Stream-copied audio keeps the source codec (AC3/MP2/AAC) so there
-            // is zero encode load; only transcoding channels are normalized to AAC.
-            $audioCodec = $transcoding
-                ? ' -c:a aac -b:a 128k -ac 2 -ar 48000'
-                : ' -c:a copy';
+            // Always normalize audio to AAC for TV app compatibility — raw
+            // AC3/MP2/DTS may not decode on many TV players. The encode cost
+            // is negligible compared to the viewer experience improvement.
+            $audioCodec = ' -c:a aac -b:a 128k -ac 2 -ar 48000';
 
             $outputs[] = sprintf(
                 ' -map 0:p:%d -map_chapters -1 -ignore_unknown'
                 . '%s'
                 . ' -max_muxing_queue_size 65536'
                 . '%s'
-            .   ' -f hls -hls_time 0.5 -hls_list_size 2'
-            .   ' -hls_flags delete_segments+temp_file+independent_segments'
+            .   ' -f hls -hls_time %d -hls_list_size %d'
+            .   ' -hls_flags delete_segments+temp_file+independent_segments+append_list'
             .   ' -muxdelay 0 -muxpreload 0'
             .   ' -hls_segment_filename %s/segment_%%04d.ts'
                 . ' %s/playlist.m3u8',
                 $programNumber,
                 $videoCodec,
                 $audioCodec,
+                self::HLS_SEGMENT_TIME,
+                self::HLS_PLAYLIST_SIZE,
                 escapeshellarg($outputDir),
                 escapeshellarg($outputDir)
             );

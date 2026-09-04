@@ -815,14 +815,12 @@ class XtreamController extends Controller
         $videoFilter = $transcode
             // GPU or CPU re-encode depending on transcoding_device setting.
             ? ($useGpu
-                ? $liveMap . ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls '
-                : ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . $liveMap . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -c:a aac -b:a 48k -ac 2 -ar 48000 -f hls ')
+                ? $liveMap . ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls '
+                : ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . $liveMap . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls ')
             : ($isMulticast
-                // Copy both streams — no audio transcode on UDP channels.
-                // mp3/mp2/ac3 plays natively on all modern IPTV players.
-                // Transcoding 64 channels simultaneously was the primary
-                // cause of load 32+ and the resulting HOLD stalls.
-                ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a copy -f hls '
+                // Video stays copy for zero CPU. Audio ALWAYS normalized to
+                // AAC — raw AC3/MP2/DTS may not decode on TV players.
+                ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls '
                 : ' -threads ' . self::FFMPEG_THREADS_SINGLE . $liveMap . ' -c:v copy -c:a copy -f hls ');
 
         // All channels run permanently — no idle timeout.  This ensures
@@ -854,7 +852,7 @@ class XtreamController extends Controller
                 ? 'NEW_URL=$(cd ' . base_path() . ' && php artisan youtube:refresh-url ' . $channelId . ' 2>/dev/null); if [ $? -eq 0 ] && [ -n "$NEW_URL" ]; then SRC_URL="$NEW_URL"; echo "YOUTUBE REFRESHED $SRC_URL" >> "$L"; fi; '
                 : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
-            .   ($isMulticast ? '-hls_time 0.5 -hls_list_size 2 ' : '-hls_time 6 -hls_list_size 5 ')
+            .   ($isMulticast ? '-hls_time 2 -hls_list_size 3 ' : '-hls_time 6 -hls_list_size 5 ')
             .   '-hls_flags delete_segments+temp_file+independent_segments+append_list '
             .   '-muxdelay 0 -muxpreload 0 '
             .   '-hls_segment_filename "$ODIR"/segment_%%04d.ts '
