@@ -54,6 +54,8 @@ class ChannelPushService
                 'started_at' => now(),
                 'stopped_at' => null,
                 'last_error' => null,
+                'restart_count' => ($existing->restart_count ?? 0) + 1,
+                'last_restart_at' => now(),
             ]);
             $record = $existing->fresh();
         } else {
@@ -66,6 +68,7 @@ class ChannelPushService
                 'status' => 'pushing',
                 'ffmpeg_pid' => $pid,
                 'started_at' => now(),
+                'restart_count' => 0,
             ]);
         }
 
@@ -100,6 +103,8 @@ class ChannelPushService
             'status' => 'idle',
             'ffmpeg_pid' => null,
             'stopped_at' => now(),
+            'restart_count' => 0,
+            'last_restart_at' => null,
         ]);
     }
 

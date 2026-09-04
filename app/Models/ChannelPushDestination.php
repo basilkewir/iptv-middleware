@@ -21,14 +21,18 @@ class ChannelPushDestination extends Model
         'started_at',
         'stopped_at',
         'last_error',
+        'restart_count',
+        'last_restart_at',
     ];
 
     protected $casts = [
         'ffmpeg_pid' => 'integer',
         'video_bitrate' => 'integer',
         'audio_bitrate' => 'integer',
+        'restart_count' => 'integer',
         'started_at' => 'datetime',
         'stopped_at' => 'datetime',
+        'last_restart_at' => 'datetime',
     ];
 
     public function channel(): BelongsTo

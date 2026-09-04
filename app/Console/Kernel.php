@@ -62,6 +62,11 @@ class Kernel extends ConsoleKernel
         $schedule->command('channels:purge-ffmpeg')
             ->everyFiveMinutes()
             ->withoutOverlapping();
+
+        // Monitor push processes and auto-restart dead ones
+        $schedule->command('push:watch')
+            ->everyMinute()
+            ->withoutOverlapping();
     }
 
     protected function commands(): void
