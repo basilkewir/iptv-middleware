@@ -117,7 +117,7 @@ class PurgeOrphanFfmpeg extends Command
         $offs['protected_group'] = $groupStats['protected'];
 
         // ── 3. Delete HLS directories for stopped/inactive channels ──
-        $dirsCleaned = $this->cleanupStaleDirectories($activeIds->toArray(), $dryRun);
+        $dirsCleaned = $this->cleanupStaleDirectories($dryRun);
 
         // ── 4. Sweep stale segments from all HLS directories ──
         $segmentsCleaned = $this->sweepStaleSegments($dryRun);
@@ -186,9 +186,13 @@ class PurgeOrphanFfmpeg extends Command
         // Belt-and-braces: kill the ffmpeg pid directly too.
         @exec('kill -KILL ' . (int) $pid . ' 2>/dev/null');
 
-        // Delete the entire HLS directory — these segments are no longer needed.
+        // Clean only segment files — preserve the directory and control files
+        // (.stop, .heartbeat, ingest.pid) so the wrapper can restart cleanly.
         if (is_dir($outputDir)) {
-            File::deleteDirectory($outputDir);
+            foreach (glob("{$outputDir}/segment_*.ts") ?: [] as $seg) {
+                @unlink($seg);
+            }
+            @unlink($outputDir . '/playlist.m3u8');
         }
 
         Log::info('Purged ffmpeg ingest', [
@@ -202,10 +206,12 @@ class PurgeOrphanFfmpeg extends Command
     }
 
     /**
-     * Delete HLS directories for channels that are no longer active
-     * and have no running ingest process.
+     * Delete HLS directories for channels that no longer exist in the database.
+     * Only truly deleted channels have their directories removed — inactive
+     * channels are left alone since they may be served via Flussonic or
+     * reactivated later.
      */
-    private function cleanupStaleDirectories(array $activeIds, bool $dryRun): int
+    private function cleanupStaleDirectories(bool $dryRun): int
     {
         $hlsRoot = storage_path('app/streams/hls');
 
@@ -218,13 +224,15 @@ class PurgeOrphanFfmpeg extends Command
         foreach (glob($hlsRoot . '/*', GLOB_ONLYDIR) ?: [] as $dir) {
             $id = basename($dir);
 
-            // Skip admin channel directories (handled by sweepStaleSegments).
+            // Skip admin channel directories.
             if (str_starts_with($id, 'admin-channel-')) {
                 continue;
             }
 
-            // Skip directories for active channels.
-            if (ctype_digit($id) && in_array($id, $activeIds, true)) {
+            // Skip directories for channels that still exist in the DB
+            // (active or inactive — they may be served via Flussonic or
+            // reactivated later).
+            if (ctype_digit($id) && Channel::where('id', (int) $id)->exists()) {
                 continue;
             }
 
@@ -235,10 +243,10 @@ class PurgeOrphanFfmpeg extends Command
 
             $cleaned++;
             if ($dryRun) {
-                $this->line(sprintf('  [dry-run] delete stale directory %s', $id));
+                $this->line(sprintf('  [dry-run] delete orphaned directory %s', $id));
             } else {
                 File::deleteDirectory($dir);
-                $this->line(sprintf('  deleted stale directory %s', $id));
+                $this->line(sprintf('  deleted orphaned directory %s', $id));
             }
         }
 
