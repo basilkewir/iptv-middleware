@@ -9,6 +9,7 @@ use App\Models\Channel;
 use App\Services\StreamingService\MulticastIngestService;
 use App\Services\YouTubeService;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -572,7 +573,7 @@ class SourceHealthCheckService
     }
 
     /**
-     * Stop a channel's ingest process.
+     * Stop a channel's ingest process and clean up its HLS segments.
      */
     public function stopChannel(Channel $channel): bool
     {
@@ -602,6 +603,11 @@ class SourceHealthCheckService
             }
 
             @unlink($pidFile);
+        }
+
+        // Clean up HLS segment files — they are no longer needed.
+        if (is_dir($outputDir)) {
+            File::deleteDirectory($outputDir);
         }
 
         cache()->forget("ffmpeg:channel:{$channel->id}");

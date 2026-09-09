@@ -7,6 +7,7 @@ namespace App\Console\Commands;
 use App\Models\Channel;
 use App\Services\StreamingService\MulticastIngestService;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -40,6 +41,11 @@ class PurgeOrphanFfmpeg extends Command
     // unused (heartbeat is touched on every client request) and is pruned.
     private const IDLE_SECONDS = 180;
 
+    // Max age (seconds) for HLS segment files during the stale sweep.
+    // Segments older than this are deleted even if the ingest is still running,
+    // which handles accumulated leftover segments from prior ffmpeg sessions.
+    private int $segmentMaxAge;
+
     private function isGroupReaderCmd(string $cmd): bool
     {
         // Shared multicast readers ingest from a UDP/RTP mux with several
@@ -53,6 +59,7 @@ class PurgeOrphanFfmpeg extends Command
     public function handle(MulticastIngestService $multicast): int
     {
         $dryRun = (bool) $this->option('dry-run');
+        $this->segmentMaxAge = (int) config('streaming.hls.segment_max_age', 3600);
 
         $activeIds = Channel::where('is_active', true)
             ->pluck('id')
@@ -109,15 +116,23 @@ class PurgeOrphanFfmpeg extends Command
         $offs['group'] = $groupStats['orphaned'];
         $offs['protected_group'] = $groupStats['protected'];
 
-        // ── 3. Unused ingests for ACTIVE channels with no process matched above ──
+        // ── 3. Delete HLS directories for stopped/inactive channels ──
+        $dirsCleaned = $this->cleanupStaleDirectories($activeIds, $dryRun);
+
+        // ── 4. Sweep stale segments from all HLS directories ──
+        $segmentsCleaned = $this->sweepStaleSegments($dryRun);
+
+        // ── 5. Unused ingests for ACTIVE channels with no process matched above ──
         // (handled inline for each per-channel ingest via channelOffenderReason)
         $this->line(sprintf(
-            'ffmpeg prune done — duplicates: %d, stopped: %d, unused: %d, orphaned groups: %d, protected (live) groups: %d%s',
+            'ffmpeg prune done — duplicates: %d, stopped: %d, unused: %d, orphaned groups: %d, protected (live) groups: %d, dirs cleaned: %d, stale segments: %d%s',
             $offs['duplicate'],
             $offs['stopped'],
             $offs['unused'],
             $offs['group'],
             $offs['protected_group'],
+            $dirsCleaned,
+            $segmentsCleaned,
             $dryRun ? ' [DRY RUN]' : ''
         ));
 
@@ -171,6 +186,11 @@ class PurgeOrphanFfmpeg extends Command
         // Belt-and-braces: kill the ffmpeg pid directly too.
         @exec('kill -KILL ' . (int) $pid . ' 2>/dev/null');
 
+        // Delete the entire HLS directory — these segments are no longer needed.
+        if (is_dir($outputDir)) {
+            File::deleteDirectory($outputDir);
+        }
+
         Log::info('Purged ffmpeg ingest', [
             'channel_id' => $channelId,
             'pid' => $pid,
@@ -179,6 +199,107 @@ class PurgeOrphanFfmpeg extends Command
         ]);
 
         $this->line(sprintf('  pruned %-9s ch%s pid=%d pgid=%d', $reason, $channelId, $pid, $pgid));
+    }
+
+    /**
+     * Delete HLS directories for channels that are no longer active
+     * and have no running ingest process.
+     */
+    private function cleanupStaleDirectories(array $activeIds, bool $dryRun): int
+    {
+        $hlsRoot = storage_path('app/streams/hls');
+
+        if (! is_dir($hlsRoot)) {
+            return 0;
+        }
+
+        $cleaned = 0;
+
+        foreach (glob($hlsRoot . '/*', GLOB_ONLYDIR) ?: [] as $dir) {
+            $id = basename($dir);
+
+            // Skip admin channel directories (handled by sweepStaleSegments).
+            if (str_starts_with($id, 'admin-channel-')) {
+                continue;
+            }
+
+            // Skip directories for active channels.
+            if (ctype_digit($id) && in_array($id, $activeIds, true)) {
+                continue;
+            }
+
+            // Skip multicast reader directories.
+            if ($this->isMulticastDir($dir)) {
+                continue;
+            }
+
+            $cleaned++;
+            if ($dryRun) {
+                $this->line(sprintf('  [dry-run] delete stale directory %s', $id));
+            } else {
+                File::deleteDirectory($dir);
+                $this->line(sprintf('  deleted stale directory %s', $id));
+            }
+        }
+
+        return $cleaned;
+    }
+
+    /**
+     * Sweep all HLS directories and delete .ts segment files older than the
+     * configured max age. This catches leftover segments from prior ffmpeg
+     * sessions (e.g. admin channel restarts that preserve segments).
+     */
+    private function sweepStaleSegments(bool $dryRun): int
+    {
+        $hlsRoot = storage_path('app/streams/hls');
+
+        if (! is_dir($hlsRoot)) {
+            return 0;
+        }
+
+        $maxAge = $this->segmentMaxAge;
+        $cleaned = 0;
+
+        foreach (glob($hlsRoot . '/*', GLOB_ONLYDIR) ?: [] as $dir) {
+            $segments = glob("{$dir}/segment_*.ts") ?: [];
+
+            foreach ($segments as $file) {
+                if ((time() - (int) @filemtime($file)) < $maxAge) {
+                    continue;
+                }
+
+                $cleaned++;
+                if ($dryRun) {
+                    $this->line(sprintf('  [dry-run] delete stale segment %s (age %ds)', basename($file), time() - (int) @filemtime($file)));
+                } else {
+                    @unlink($file);
+                }
+            }
+        }
+
+        if ($cleaned > 0 && ! $dryRun) {
+            Log::info('Swept stale HLS segments', ['count' => $cleaned, 'max_age' => $maxAge]);
+        }
+
+        return $cleaned;
+    }
+
+    private function isMulticastDir(string $dir): bool
+    {
+        // Multicast group reader directories contain a multicast_group.pid file
+        // or their name matches a multicast group hash pattern.
+        $pidFiles = glob("{$dir}/multicast_*.pid") ?: [];
+        if (! empty($pidFiles)) {
+            return true;
+        }
+        // Also check for multicast reader marker in any .pid file
+        foreach (glob("{$dir}/*.pid") ?: [] as $pidFile) {
+            if (str_contains(basename($pidFile), 'multicast')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -28,6 +28,7 @@ return [
         'output_path' => env('HLS_OUTPUT_PATH', storage_path('app/hls')),
         'temp_path' => env('HLS_TEMP_PATH', storage_path('app/hls_temp')),
         'cleanup_interval' => env('HLS_CLEANUP_INTERVAL', 300),
+        'segment_max_age' => env('HLS_SEGMENT_MAX_AGE', 3600),
         'max_concurrent_streams' => env('HLS_MAX_CONCURRENT', 1000),
     ],
 
