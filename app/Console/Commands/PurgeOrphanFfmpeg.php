@@ -117,7 +117,7 @@ class PurgeOrphanFfmpeg extends Command
         $offs['protected_group'] = $groupStats['protected'];
 
         // ── 3. Delete HLS directories for stopped/inactive channels ──
-        $dirsCleaned = $this->cleanupStaleDirectories($activeIds, $dryRun);
+        $dirsCleaned = $this->cleanupStaleDirectories($activeIds->toArray(), $dryRun);
 
         // ── 4. Sweep stale segments from all HLS directories ──
         $segmentsCleaned = $this->sweepStaleSegments($dryRun);
