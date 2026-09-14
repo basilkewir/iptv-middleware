@@ -826,20 +826,18 @@ class SourceHealthCheckService
         $mtime = @filemtime($playlist);
         $age = $mtime ? (time() - $mtime) : PHP_INT_MAX;
 
-        // Stale threshold matches XtreamController::INGEST_STALE_SECONDS (90s).
-        // A process alive but not writing segments is effectively offline.
-        if ($age > 90) {
+        // Multicast readers deliberately ride out short feed pauses (a 60s
+        // read timeout; ad breaks / blank breaks frequently silence the mux).
+        // A playlist that has not advanced for up to the stale window (the
+        // same 90s as XtreamController::INGEST_STALE_SECONDS and the watchdog)
+        // therefore means the source just paused, NOT that it is offline —
+        // force-restarting here would wipe the reader and create the very
+        // playback errors we are avoiding. Only a playlist older than the
+        // stale window (never recovered) is treated as offline.
+        if ($age > XtreamController::INGEST_STALE_SECONDS) {
             return [
                 'status' => 'offline',
-                'message' => 'Ingest alive but no playlist after ' . $age . 's',
-                'details' => ['playlist_age' => $age],
-            ];
-        }
-
-        if ($age > 30) {
-            return [
-                'status' => 'offline',
-                'message' => 'Playlist stale (' . $age . 's old)',
+                'message' => 'Ingest alive but no playlist update after ' . $age . 's',
                 'details' => ['playlist_age' => $age],
             ];
         }

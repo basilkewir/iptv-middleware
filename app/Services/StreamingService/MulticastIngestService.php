@@ -30,6 +30,14 @@ class MulticastIngestService
     // its process is still alive (mirrors XtreamController::INGEST_STALE_SECONDS).
     private const STALE_SECONDS = 90;
 
+    // Multicast read/socket timeout (microseconds). The group reader must
+    // tolerate short feed pauses — ad breaks and blank breaks commonly silence
+    // the mux for a few seconds. A 5s timeout made ffmpeg exit on every pause,
+    // restarting (and wiping) the whole bucket, which players saw as frequent
+    // "channel playback error". 60s lets the reader ride out pauses; a truly
+    // dead mux is handled by the watchdog via playlist staleness instead.
+    private const UDP_READ_TIMEOUT_US = 60000000;
+
     // Max programs mapped into one shared ffmpeg reader. Buckets bound the
     // blast radius of a single corrupt program killing its whole process.
     private const MAX_OUTPUTS_PER_READER = 5;
@@ -51,10 +59,12 @@ class MulticastIngestService
     private const HOLD_GATE = 24;
 
     // HLS segment duration and playlist size for smooth TV playback.
-    // 2s segments with 3 in playlist = 6s window — enough buffer for
-    // TV apps to avoid rebuffering while keeping latency low.
-    private const HLS_SEGMENT_TIME = 2;
-    private const HLS_PLAYLIST_SIZE = 3;
+    // 4s segments with 5 in playlist = ~20s window — enough buffer for TV
+    // apps to ride out the short multicast pauses (ad breaks, blank breaks)
+    // without exhausting the player buffer and showing playback errors,
+    // while keeping live latency reasonable.
+    private const HLS_SEGMENT_TIME = 4;
+    private const HLS_PLAYLIST_SIZE = 5;
 
     /**
      * Get all active multicast channels grouped by their source URL.
@@ -371,11 +381,16 @@ class MulticastIngestService
                 @unlink($pidFile);
             }
 
-            // Only wipe output for this dead bucket's channels
+            // Only wipe output for this dead bucket's channels. The playlist
+            // is removed so the rebuilt reader starts with a clean list, but
+            // existing .ts segments are KEPT: the stale-cached playlists served
+            // by streamLive() still reference those files, so players riding
+            // through the restart keep receiving data (204 instead of 404/503)
+            // instead of a hard "channel playback error". The new ffmpeg simply
+            // overwrites segment_%04d.ts in place as it produces fresh output.
             foreach ($bucketChannels as $ch) {
                 $dir = storage_path("app/streams/hls/{$ch->id}");
                 if (is_dir($dir)) {
-                    foreach (glob($dir . '/segment_*.ts') ?: [] as $f) { @unlink($f); }
                     foreach (glob($dir . '/playlist*.m3u8') ?: [] as $f) { @unlink($f); }
                 } else {
                     @mkdir($dir, 0755, true);
@@ -533,7 +548,7 @@ class MulticastIngestService
             . 'done; '
 . 'while true; do '
             .   ('nice -n ' . self::NICE_LEVEL . ' ffmpeg -threads ' . self::FFMPEG_THREADS
-            .   ' -fflags +genpts+discardcorrupt+igndts+nobuffer -flags low_delay -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -flush_packets 1 -probesize 1M -analyzeduration 500000 -rw_timeout 5000000 -timeout 5000000 -i %s')
+            .   ' -fflags +genpts+discardcorrupt+igndts+nobuffer -flags low_delay -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -flush_packets 1 -probesize 1M -analyzeduration 500000 -rw_timeout %d -timeout %d -i %s')
             .   " \\\n%s \\\n"
             .   '2>>"$L"; '
             .   'echo "GROUP READER RESTART $(date +%%s)" >> "$L"; '
@@ -543,6 +558,8 @@ class MulticastIngestService
             . 'done',
             escapeshellarg(storage_path("app/streams/multicast")),
             escapeshellarg($logFile),
+            self::UDP_READ_TIMEOUT_US,
+            self::UDP_READ_TIMEOUT_US,
             escapeshellarg($sourceUrl),
             $allOutputs
         );

@@ -24,10 +24,14 @@ class XtreamController extends Controller
     public const INGEST_STALE_SECONDS = 90;
     private const FFMPEG_READ_TIMEOUT_US = 30000000;
 
-    // UDP multicast is a local, continuous socket — a feed that goes silent
-    // is dead and must be detected fast (a 30s read timeout made a frozen
-    // source look "buffered" for 30s). Give multicast its own short timeout.
-    private const FFMPEG_UDP_TIMEOUT_US = 5000000;
+    // UDP multicast is a lossy feed: sources routinely pause for a few
+    // seconds (ad insertion, blank breaks, TS discontinuities) without being
+    // dead. A too-short socket timeout makes ffmpeg exit on every brief
+    // pause, and each exit/restart cycle wipes the channel's HLS output and
+    // makes players report "channel playback error". 60s tolerates those
+    // pauses while still letting the input die; a genuinely dead mux is
+    // finally handled by the watchdog (90s playlist staleness) instead.
+    private const FFMPEG_UDP_TIMEOUT_US = 60000000;
 
     private const INGEST_RESTART_BACKOFF_SECONDS = 10;
 
@@ -422,6 +426,8 @@ class XtreamController extends Controller
         // produce its first playlist before giving up. This prevents players
         // from seeing a 503 on the very first request after a cold start and
         // interpreting it as "stream format not supported".
+        $staleKey = "hls:stale:live:{$channelId}:playlist";
+
         $playlist = "{$hlsDir}/playlist.m3u8";
         $waited   = 0;
         while (! file_exists($playlist) && $waited < 8) {
@@ -429,15 +435,27 @@ class XtreamController extends Controller
             $waited++;
         }
 
-        if (! file_exists($playlist)) {
-            return response('Service Unavailable', 503, [
-                'Retry-After'  => '3',
-                'Cache-Control'=> 'no-cache, no-store, must-revalidate',
-            ]);
-        }
+        $content = is_file($playlist) ? @file_get_contents($playlist) : false;
 
-        $content = file_get_contents($playlist);
-        if ($content === false) {
+        if ($content === false || $content === '') {
+            // The ingest is mid-restart (feed pause, wrapper retry, group
+            // bucket rebuild). Serve the most recent good playlist from cache
+            // instead of 503 — most IPTV players treat a 503 on the playlist
+            // URL as a hard "channel playback error". A stale-but-valid
+            // playlist, combined with the 204 the segment endpoint returns for
+            // momentarily-missing segments, keeps the player polling until the
+            // ingest produces a fresh playlist, so playback never hard-errors.
+            $cached = Cache::get($staleKey);
+
+            if ($cached !== null) {
+                return response($cached, 200, [
+                    'Content-Type'               => 'application/vnd.apple.mpegurl',
+                    'Cache-Control'              => 'no-cache, no-store, must-revalidate',
+                    'Access-Control-Allow-Origin'=> '*',
+                    'X-HLS-Stale'                => '1',
+                ]);
+            }
+
             return response('Service Unavailable', 503, [
                 'Retry-After'  => '3',
                 'Cache-Control'=> 'no-cache, no-store, must-revalidate',
@@ -451,6 +469,10 @@ class XtreamController extends Controller
             $hlsBase . '/$1',
             $content
         );
+
+        // Remember the last good playlist so it can be served during the
+        // next ingest restart instead of a 503 (see above).
+        Cache::put($staleKey, $content, 120);
 
         return response($content, 200, [
             'Content-Type'               => 'application/vnd.apple.mpegurl',
@@ -830,6 +852,16 @@ class XtreamController extends Controller
         $isYouTube = str_contains(strtolower($sourceUrl), 'youtube');
         $ytInit = $isYouTube && $channelId > 0 ? 'SRC_URL=' . escapeshellarg($sourceUrl) . '; ' : '';
 
+        // On wrapper retry, stale segments/playlist are dropped so a fresh
+        // ffmpeg run never appends onto old content. For multicast inputs the
+        // existing .ts segments are KEPT (only the playlist is removed): the
+        // stale-cached playlist served by streamLive() still references those
+        // files, so players riding through a restart keep getting data (204
+        // instead of 404/503) instead of a hard "channel playback error".
+        $restartClean = $isMulticast
+            ? '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/playlist.m3u8; '
+            : '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/segment_*.ts "$ODIR"/playlist.m3u8; ';
+
         return sprintf(
             'ODIR=%s; L=%s; DELAY=3; '
             . $ytInit
@@ -847,12 +879,12 @@ class XtreamController extends Controller
             . 'while true; do '
             .   '[ -f "$ODIR/.stop" ] && exit 0; '
             .   'HAS_SEGS=0; ls "$ODIR"/segment_*.ts > /dev/null 2>&1 && HAS_SEGS=1; '
-            .   '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/segment_*.ts "$ODIR"/playlist.m3u8; '
+            . $restartClean
             .   ($channelId > 0 && str_contains(strtolower($sourceUrl), 'youtube')
                 ? 'NEW_URL=$(cd ' . base_path() . ' && php artisan youtube:refresh-url ' . $channelId . ' 2>/dev/null); if [ $? -eq 0 ] && [ -n "$NEW_URL" ]; then SRC_URL="$NEW_URL"; echo "YOUTUBE REFRESHED $SRC_URL" >> "$L"; fi; '
                 : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
-            .   ($isMulticast ? '-hls_time 2 -hls_list_size 3 ' : '-hls_time 6 -hls_list_size 5 ')
+            .   ($isMulticast ? '-hls_time 4 -hls_list_size 5 ' : '-hls_time 6 -hls_list_size 5 ')
             .   '-hls_flags delete_segments+temp_file+independent_segments+append_list '
             .   '-muxdelay 0 -muxpreload 0 '
             .   '-hls_segment_filename "$ODIR"/segment_%%04d.ts '

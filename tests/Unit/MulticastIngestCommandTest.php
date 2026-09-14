@@ -30,8 +30,8 @@ class MulticastIngestCommandTest extends TestCase
         $this->assertStringContainsString('+genpts+discardcorrupt+nobuffer', $cmd);
         $this->assertStringContainsString('-flags low_delay', $cmd);
         $this->assertStringContainsString('-probesize 1M -analyzeduration 500000', $cmd);
-        $this->assertStringContainsString('-rw_timeout 5000000 -timeout 5000000', $cmd);
-        $this->assertStringContainsString('-hls_time 2 -hls_list_size 3', $cmd);
+        $this->assertStringContainsString('-rw_timeout 60000000 -timeout 60000000', $cmd);
+        $this->assertStringContainsString('-hls_time 4 -hls_list_size 5', $cmd);
         $this->assertStringContainsString('-muxdelay 0 -muxpreload 0', $cmd);
         $this->assertStringNotContainsString('-reconnect', $cmd);
         $this->assertStringNotContainsString(' -re -i', $cmd);
