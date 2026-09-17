@@ -26,7 +26,7 @@ import AdminLayout from '@/Layouts/AdminLayout.vue'
 import {
   Settings, Globe, Tv, Film, Rss, Users, Shield, KeyRound, CreditCard,
   FileText, Server, Database, Zap, Mail, Bell, ScrollText, Activity,
-  HardDrive, Code, Puzzle, Variable, Clock, Globe2, BadgeCheck
+  HardDrive, Code, Puzzle, Variable, Clock, Globe2, BadgeCheck, VideoOff
 } from 'lucide-vue-next'
 
 const sections = [
@@ -36,6 +36,7 @@ const sections = [
   { key: 'channels', label: 'Channel Settings', icon: Tv, description: 'Channel management, stream types, fallback, and health checks' },
   { key: 'vod', label: 'VOD Settings', icon: Film, description: 'Video on demand, metadata, series, and transcoding profiles' },
   { key: 'epg', label: 'EPG Settings', icon: Rss, description: 'Electronic Program Guide sources, mapping, and output format' },
+  { key: 'offline-video', label: 'Offline Video', icon: VideoOff, description: 'Upload and manage the video shown when a channel is offline' },
   { key: 'users', label: 'User Management', icon: Users, description: 'Registration, password policy, and session management' },
   { key: 'security', label: 'Security', icon: Shield, description: '2FA, access control, rate limiting, and encryption' },
   { key: 'roles', label: 'Roles & Permissions', icon: KeyRound, description: 'User roles, permission matrix, and access levels' },

@@ -456,6 +456,15 @@ class XtreamController extends Controller
                 ]);
             }
 
+            // No live ingest and no cached playlist — serve the offline video
+            // stream so the player shows the "channel offline" video instead
+            // of a hard error. Falls back to 503 if the offline HLS is not
+            // prepared yet (run: php artisan streams:prepare-offline).
+            $offlinePlaylist = config('streaming.offline.hls_dir') . '/playlist.m3u8';
+            if (is_file($offlinePlaylist)) {
+                return redirect(config('app.url') . '/hls/offline/playlist.m3u8');
+            }
+
             return response('Service Unavailable', 503, [
                 'Retry-After'  => '3',
                 'Cache-Control'=> 'no-cache, no-store, must-revalidate',
@@ -779,6 +788,12 @@ class XtreamController extends Controller
         $isHls = str_contains(strtolower($input), '.m3u8');
         $isLiveHttp = $isHls || !preg_match('/\.(mp4|mkv|avi|mov|wmv|flv|webm|ts|m4v)$/i', parse_url($input, PHP_URL_PATH) ?? '');
         $userAgent = '-user_agent \'VLC/3.0.16 LibVLC/3.0.16\'';
+        // Some providers serve HLS segments with no file extension (e.g.
+        // /hls/<token>). FFmpeg's HLS demuxer (7.x) refuses such segments with
+        // "URL ... is not in allowed_segment_extensions" and aborts the ingest.
+        // extension_picky=0 disables the extension check (allowed_extensions=
+        // ALL alone is not enough in newer FFmpeg).
+        $hlsOpts = $isHls ? '-extension_picky 0 ' : '';
         // For UDP: +genpts fixes missing PTS after TS discontinuities,
         // +discardcorrupt drops damaged packets, -err_detect ignore_err skips
         // corrupt frames without stalling, -avoid_negative_ts make_zero fixes
@@ -792,7 +807,7 @@ class XtreamController extends Controller
         $inputOpts = $isMulticast
             ? '-fflags +genpts+discardcorrupt+nobuffer -flags low_delay -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -probesize 1M -analyzeduration 500000 -rw_timeout %d -timeout %d -i %s'
             : ($isLiveHttp
-                ? '-fflags +genpts+discardcorrupt -max_interleave_delta 0 -reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d ' . $userAgent . ' -i %s'
+                ? '-fflags +genpts+discardcorrupt -max_interleave_delta 0 -reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d ' . $hlsOpts . $userAgent . ' -i %s'
                 : '-reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d -re -i %s');
 
         // -map p:N only applies to raw UDP MPEG-TS muxes where multiple programs

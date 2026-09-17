@@ -557,7 +557,24 @@ class MyChannelHlsService
         $text = ($channel->enable_ticker && $channel->ticker_text)
             ? $channel->ticker_text
             : '';
-        File::put("{$streamDir}/ticker.txt", $text);
+
+        $file = "{$streamDir}/ticker.txt";
+
+        if (! is_writable($streamDir)) {
+            @chmod($streamDir, 0775);
+        }
+
+        try {
+            File::put($file, $text);
+        } catch (\Exception $e) {
+            Log::warning('Could not write ticker.txt — attempting chmod fix', [
+                'path'  => $file,
+                'error' => $e->getMessage(),
+            ]);
+            // Last resort: shell out so root/sudo wrapper can fix ownership
+            @shell_exec('chmod 0664 ' . escapeshellarg($file) . ' 2>/dev/null');
+            @file_put_contents($file, $text);
+        }
     }
 
     /**
@@ -1014,7 +1031,9 @@ BASH;
     private function ensureDirectory(string $path): void
     {
         if (! File::isDirectory($path)) {
-            File::makeDirectory($path, 0755, true, true);
+            File::makeDirectory($path, 0775, true, true);
+        } elseif (! is_writable($path)) {
+            @chmod($path, 0775);
         }
     }
 }

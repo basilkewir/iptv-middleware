@@ -158,6 +158,11 @@ return [
         'password' => env('FLUSSONIC_PASSWORD', ''),
     ],
 
+    'offline' => [
+        'video_path' => env('OFFLINE_VIDEO_PATH', storage_path('app/offline/channel-offline.mp4')),
+        'hls_dir'    => storage_path('app/streams/hls/offline'),
+    ],
+
     'monitoring' => [
         'enabled' => env('STREAM_MONITORING_ENABLED', true),
         'metrics_retention' => env('METRICS_RETENTION_DAYS', 30),

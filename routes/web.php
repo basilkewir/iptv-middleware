@@ -609,6 +609,11 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
         Route::get('/reports/logs', [\App\Http\Controllers\Admin\LogController::class, 'index'])->name('reports.logs');
 
         // ─── Quality Detection ─────────────────────────────────────────
+        Route::get('/settings/offline-video', [\App\Http\Controllers\Admin\OfflineVideoController::class, 'index'])->name('settings.offline-video');
+        Route::post('/settings/offline-video/upload', [\App\Http\Controllers\Admin\OfflineVideoController::class, 'upload'])->name('settings.offline-video.upload');
+        Route::post('/settings/offline-video/prepare', [\App\Http\Controllers\Admin\OfflineVideoController::class, 'prepare'])->name('settings.offline-video.prepare');
+        Route::delete('/settings/offline-video', [\App\Http\Controllers\Admin\OfflineVideoController::class, 'destroy'])->name('settings.offline-video.destroy');
+
         Route::get('/settings/quality-detection', [QualityDetectionController::class, 'index'])->name('settings.quality-detection');
         Route::put('/settings/quality-detection', [QualityDetectionController::class, 'updateSettings'])->name('settings.quality-detection.update');
         Route::post('/settings/quality-detection/scan/{id}', [QualityDetectionController::class, 'scanChannel'])->name('quality.scan.channel');

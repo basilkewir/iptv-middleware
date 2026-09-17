@@ -722,7 +722,11 @@ class SourceHealthCheckService
         $isHls = in_array($channel->stream_type, ['hls', 'm3u8']) || str_contains(strtolower($url), '.m3u8');
 
         $timeout = self::CHECK_TIMEOUT_SECONDS;
-        $rwTimeout = $isHls ? '-rw_timeout 10000000' : '';
+        // extension_picky=0 lets ffprobe read HLS sources whose segments have
+        // no file extension (otherwise FFmpeg 7.x rejects them with
+        // "URL ... is not in allowed_segment_extensions" and the source is
+        // falsely reported offline).
+        $rwTimeout = $isHls ? '-rw_timeout 10000000 -extension_picky 0' : '';
         $inputUrl = escapeshellarg($url);
 
         // Keep ffprobe's JSON (stdout) separate from warnings/errors (stderr).
