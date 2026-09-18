@@ -405,12 +405,32 @@ class XtreamController extends Controller
 
         $channel = Channel::where('id', $channelId)->where('is_active', true)->firstOrFail();
 
-        // Route through the local FFmpeg ingest pipeline so audio is
-        // transcoded to AAC (required for Android TV and most IPTV players).
-        // This applies to UDP/RTMP sources and Flussonic multicast re-streams.
-        $this->ensureHlsStream($channelId, $channel->active_stream_url ?? $channel->stream_url, $channel->program_number, $channel->local_address, (bool) ($channel->transcoding_enabled ?? false));
+        // XC-VM proxy: when enabled and the channel has been synced to the
+        // engine, stream it through XC-VM. Falls back below when not mapped yet.
+        if (($stream = $this->xcVmProxy('channel', $channelId, $username, $password, $streamId)) !== null) {
+            return $stream;
+        }
 
-        // Parse the streamId to determine file type
+        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+        $isMulticast = str_starts_with((string) $sourceUrl, 'udp://') || str_starts_with((string) $sourceUrl, 'rtp://');
+        $needsIngest = $isMulticast || (bool) ($channel->transcoding_enabled ?? false);
+
+        // Plain HTTP/HLS sources with no transcoding: redirect directly to the
+        // upstream URL. No local FFmpeg ingest needed — the player speaks HLS
+        // natively and the upstream is already a valid HLS stream.
+        if (! $needsIngest && $sourceUrl) {
+            return redirect($sourceUrl);
+        }
+
+        // UDP/multicast or transcoding-enabled: route through local FFmpeg ingest.
+        $this->ensureHlsStream($channelId, $sourceUrl, $channel->program_number, $channel->local_address, (bool) ($channel->transcoding_enabled ?? false));
+
+        // Kick off a background XC-VM sync so future requests go through XC-VM.
+        if (\App\Services\XcVm\XcVmPlayerProxy::enabled()) {
+            dispatch(new \App\Jobs\XcVmSyncJob('channel', $channelId))->afterResponse();
+        }
+
+        // Ingest-based path (UDP/multicast or transcoding): serve local HLS.
         $extension = strtolower(pathinfo($streamId, PATHINFO_EXTENSION));
 
         $hlsDir  = storage_path("app/streams/hls/{$channelId}");
@@ -619,6 +639,12 @@ class XtreamController extends Controller
                     'channel_id' => $channelId,
                     'pid' => $pid,
                 ]);
+
+                // Invalidate the UDP→XC-VM bridge cooldown so the next
+                // scheduler tick re-pushes the fresh HLS URL to XC-VM.
+                if (config('xcvm.enabled') && config('xcvm.proxy_player')) {
+                    app(\App\Services\XcVm\UdpXcVmBridge::class)->invalidate($channelId);
+                }
             }
         } finally {
             $lock->release();
@@ -982,6 +1008,13 @@ class XtreamController extends Controller
 
         $vodId = (int) $streamId;
         $vod = VODContent::where('id', $vodId)->where('is_active', true)->firstOrFail();
+
+        // XC-VM proxy (falls back to local file serving below when the engine
+        // is unreachable or the movie is not mapped yet).
+        if (($stream = $this->xcVmProxy('vod', $vodId, $username, $password, $streamId)) !== null) {
+            return $stream;
+        }
+
         $media = $vod->vodMedia()->first();
         if (! $media?->stream_url) abort(404);
 
@@ -997,9 +1030,38 @@ class XtreamController extends Controller
 
         $episodeId = (int) $streamId;
         $media = VODMedia::where('id', $episodeId)->where('is_available', true)->firstOrFail();
+
+        // XC-VM proxy (falls back to local file serving below when the engine
+        // is unreachable or the episode is not mapped yet).
+        if (($stream = $this->xcVmProxy('episode', $episodeId, $username, $password, $streamId)) !== null) {
+            return $stream;
+        }
+
         if (! $media->stream_url) abort(404);
 
         return $this->serveVodFile($media->stream_url);
+    }
+
+    /**
+     * Attempt to serve {$type:$localId} through the XC-VM player proxy.
+     * Returns a response when proxying succeeded, or null so the caller can
+     * fall back to the local pipeline.
+     */
+    private function xcVmProxy(string $type, int $localId, string $username, string $password, string $streamId): mixed
+    {
+        if (! \App\Services\XcVm\XcVmPlayerProxy::enabled()) {
+            return null;
+        }
+
+        $ext = strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION));
+        $suffix = $ext !== '' ? ".{$ext}" : null;
+
+        if ($type === 'channel' && $suffix === null) {
+            $suffix = '.m3u8';
+        }
+
+        return app(\App\Services\XcVm\XcVmPlayerProxy::class)
+            ->tryStream($type, $localId, $username, $password, $suffix);
     }
 
     private function serveVodFile(string $streamUrl)

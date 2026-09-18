@@ -842,7 +842,7 @@ const handleDrop = (e) => {
     try {
       uploadProgress.value = 1
       form.processing = true
-      const res = await fetch(`/admin/vod/${vodId}`, {
+      const res = await fetch(route('admin.vod.update', { vod: vodId }), {
         method: 'POST',
         headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'text/html, application/xhtml+xml', 'X-XSRF-TOKEN': token },
         credentials: 'same-origin',
@@ -864,7 +864,7 @@ const handleDrop = (e) => {
     }
   } else {
     form.transform(data => ({ ...data, episodes_data: episodesData }))
-      .put(`/admin/vod/${vodId}`)
+      .put(route('admin.vod.update', { vod: vodId }))
   }
 }
 </script>

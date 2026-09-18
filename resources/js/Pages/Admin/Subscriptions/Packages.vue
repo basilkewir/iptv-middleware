@@ -6,7 +6,7 @@
           <h1 class="text-2xl font-bold text-white">Subscription Packages</h1>
           <p class="text-gray-400 mt-1">Manage pricing plans</p>
         </div>
-        <button @click="showAddModal = true" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center gap-2">
+        <button @click="openAdd" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center gap-2">
           <Plus class="w-4 h-4" />
           Add Package
         </button>
@@ -49,20 +49,24 @@
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-2">Name</label>
               <input v-model="form.name" type="text" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500" />
+              <p v-if="form.errors.name" class="text-red-400 text-xs mt-1">{{ form.errors.name }}</p>
             </div>
             <div class="grid grid-cols-2 gap-4">
               <div>
                 <label class="block text-sm font-medium text-gray-300 mb-2">Price</label>
                 <input v-model="form.price" type="number" step="0.01" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500" />
+                <p v-if="form.errors.price" class="text-red-400 text-xs mt-1">{{ form.errors.price }}</p>
               </div>
               <div>
                 <label class="block text-sm font-medium text-gray-300 mb-2">Duration (days)</label>
                 <input v-model="form.duration_days" type="number" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500" />
+                <p v-if="form.errors.duration_days" class="text-red-400 text-xs mt-1">{{ form.errors.duration_days }}</p>
               </div>
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-2">Max Connections</label>
               <input v-model="form.max_connections" type="number" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-indigo-500" />
+              <p v-if="form.errors.max_connections" class="text-red-400 text-xs mt-1">{{ form.errors.max_connections }}</p>
             </div>
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-2">Features (one per line)</label>
@@ -74,7 +78,7 @@
             </div>
             <div class="flex justify-end gap-3 mt-6">
               <button type="button" @click="showAddModal = false" class="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition">Cancel</button>
-              <button type="submit" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition">
+              <button type="submit" :disabled="form.processing" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition disabled:opacity-50">
                 {{ editingPackage ? 'Update' : 'Add' }} Package
               </button>
             </div>
@@ -87,6 +91,7 @@
 
 <script setup>
 import { ref } from 'vue'
+import { useForm } from '@inertiajs/vue3'
 import { router } from '@inertiajs/vue3'
 import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
@@ -96,24 +101,50 @@ defineProps({ packages: Array })
 
 const showAddModal = ref(false)
 const editingPackage = ref(null)
-const form = ref({ name: '', price: '', duration_days: 30, max_connections: 1, featuresText: '', is_active: true })
+
+const form = useForm({
+  name: '', price: '', duration_days: 30, max_connections: 1, featuresText: '', is_active: true
+})
+
+const openAdd = () => {
+  editingPackage.value = null
+  form.reset()
+  form.clearErrors()
+  showAddModal.value = true
+}
 
 const editPackage = (pkg) => {
   editingPackage.value = pkg
-  form.value = { name: pkg.name, price: pkg.price, duration_days: pkg.duration_days || 30, max_connections: pkg.max_connections || 1, featuresText: (pkg.features || []).join('\n'), is_active: pkg.is_active }
+  form.name = pkg.name
+  form.price = pkg.price
+  form.duration_days = pkg.duration_days || 30
+  form.max_connections = pkg.max_connections || 1
+  form.featuresText = (pkg.features || []).join('\n')
+  form.is_active = pkg.is_active
+  form.clearErrors()
   showAddModal.value = true
 }
 
 const savePackage = () => {
-  const data = { ...form.value, features: form.value.featuresText.split('\n').filter(f => f.trim()) }
-  delete data.featuresText
-  if (editingPackage.value) {
-    router.put(route('admin.subscriptions.packages.update', editingPackage.value.id), data)
-  } else {
-    router.post(route('admin.subscriptions.packages.store'), data)
+  const payload = {
+    name: form.name,
+    price: Number(form.price),
+    duration_days: Number(form.duration_days),
+    max_connections: Number(form.max_connections),
+    features: form.featuresText.split('\n').filter(f => f.trim()),
+    is_active: form.is_active,
   }
-  showAddModal.value = false
-  editingPackage.value = null
+  if (editingPackage.value) {
+    form.transform(() => payload).put(
+      route('admin.subscriptions.packages.update', editingPackage.value.id),
+      { onSuccess: () => { showAddModal.value = false; editingPackage.value = null } }
+    )
+  } else {
+    form.transform(() => payload).post(
+      route('admin.subscriptions.packages.store'),
+      { onSuccess: () => { showAddModal.value = false; form.reset() } }
+    )
+  }
 }
 
 const deletePackage = (pkg) => {

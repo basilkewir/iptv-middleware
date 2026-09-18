@@ -67,6 +67,36 @@ class Kernel extends ConsoleKernel
         $schedule->command('push:watch')
             ->everyMinute()
             ->withoutOverlapping();
+
+        // Full XC-VM reconciliation (runs only when the integration is enabled).
+        $this->scheduleXcVmFullSync($schedule);
+
+        // UDP → XC-VM bridge: push loopback HLS URLs for multicast channels
+        // to XC-VM every minute so the engine always has a fresh source URL
+        // after an ingest restart. Runs only when XC-VM is enabled.
+        $schedule->command('xcvm:sync-udp')
+            ->everyMinute()
+            ->withoutOverlapping()
+            ->when(fn () => (bool) config('xcvm.enabled'));
+    }
+
+    private function scheduleXcVmFullSync(Schedule $schedule): void
+    {
+        $spec = trim((string) config('xcvm.full_resync_schedule', ''));
+
+        if ($spec === '') {
+            return;
+        }
+
+        $event = $schedule->command('xcvm:sync', ['--no-progress'])
+            ->withoutOverlapping()
+            ->when(fn () => (bool) config('xcvm.enabled'));
+
+        if (str_contains($spec, '*') || preg_match('/^[0-9]/', $spec)) {
+            $event->cron($spec);
+        } else {
+            $event->{$spec}();
+        }
     }
 
     protected function commands(): void

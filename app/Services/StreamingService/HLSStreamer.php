@@ -188,9 +188,13 @@ class HLSStreamer implements HLSStreamerInterface
     private function buildFFmpegCommand(string $input, string $outputPath, Stream $stream): string
     {
         $segmentTime = $this->segmentDuration;
+        // Allow HLS segments without a file extension (FFmpeg 7.x otherwise
+        // rejects them and the ingest dies with "not in
+        // allowed_segment_extensions").
+        $hlsOpts = str_contains(strtolower($input), '.m3u8') ? '-extension_picky 0 ' : '';
 
         return sprintf(
-            'ffmpeg -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i %s ' .
+            'ffmpeg -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 ' . $hlsOpts . '-i %s ' .
             '-c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k -c:a aac -f hls ' .
             '-hls_time %d -hls_list_size %d ' .
             '-hls_flags delete_segments+append_list ' .

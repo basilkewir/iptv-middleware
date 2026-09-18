@@ -20,8 +20,25 @@ use App\Services\ContentService\ContentIndexer;
 use App\Services\CacheService\CacheManager;
 use App\Services\CacheService\RedisCache;
 use App\Services\VOD\VODService;
+use App\Services\XcVm\XcVmClient;
+use App\Services\XcVm\XcVmPlayerProxy;
+use App\Services\XcVm\XcVmSyncService;
+use App\Services\XcVm\UdpXcVmBridge;
+use App\Models\Bouquet;
+use App\Models\Channel;
+use App\Models\ContentCategory;
+use App\Models\User;
+use App\Models\VODContent;
+use App\Models\VODMedia;
+use App\Observers\XcVm\BouquetObserver;
+use App\Observers\XcVm\ChannelObserver;
+use App\Observers\XcVm\ContentCategoryObserver;
+use App\Observers\XcVm\UserObserver;
+use App\Observers\XcVm\VODContentObserver;
+use App\Observers\XcVm\VODMediaObserver;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Database\Eloquent\Model;
+use GuzzleHttp\Client as GuzzleClient;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -33,12 +50,22 @@ class AppServiceProvider extends ServiceProvider
         $this->registerContentServices();
         $this->registerCacheServices();
         $this->registerVODService();
+        $this->registerXcVmServices();
     }
 
     public function boot(): void
     {
         Model::unguard(false);
         Model::preventLazyLoading(!$this->app->isProduction());
+
+        if (config('xcvm.enabled')) {
+            Channel::observe(ChannelObserver::class);
+            ContentCategory::observe(ContentCategoryObserver::class);
+            Bouquet::observe(BouquetObserver::class);
+            User::observe(UserObserver::class);
+            VODContent::observe(VODContentObserver::class);
+            VODMedia::observe(VODMediaObserver::class);
+        }
     }
 
     private function registerStreamingServices(): void
@@ -106,6 +133,28 @@ class AppServiceProvider extends ServiceProvider
                 $app->make(\App\Services\TMDB\TMDBService::class),
                 $app->make(\App\Services\QualityDetectionService::class)
             );
+        });
+    }
+
+    private function registerXcVmServices(): void
+    {
+        $this->app->singleton(XcVmClient::class, function () {
+            return new XcVmClient();
+        });
+
+        $this->app->singleton(XcVmSyncService::class, function ($app) {
+            return new XcVmSyncService($app->make(XcVmClient::class));
+        });
+
+        $this->app->singleton(XcVmPlayerProxy::class, function () {
+            return new XcVmPlayerProxy(new GuzzleClient([
+                'http_errors' => false,
+                'allow_redirects' => true,
+            ]));
+        });
+
+        $this->app->singleton(UdpXcVmBridge::class, function ($app) {
+            return new UdpXcVmBridge($app->make(XcVmClient::class));
         });
     }
 }

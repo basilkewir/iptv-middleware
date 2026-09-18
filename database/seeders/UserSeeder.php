@@ -11,9 +11,9 @@ class UserSeeder extends Seeder
     public function run(): void
     {
         User::create([
-            'username' => 'admin',
-            'email' => 'admin@iptv-middleware.com',
-            'password' => Hash::make('password'),
+            'username' => env('ADMIN_USERNAME', 'admin'),
+            'email' => env('ADMIN_EMAIL', 'admin@iptv-middleware.com'),
+            'password' => Hash::make(env('ADMIN_PASSWORD', 'password')),
             'is_admin' => true,
             'is_active' => true,
             'email_verified_at' => now(),
