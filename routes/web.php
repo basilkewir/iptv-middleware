@@ -716,7 +716,12 @@ Route::get('/live/{username}/{password}/{streamId}', [\App\Http\Controllers\Xtre
 Route::get('/movie/{username}/{password}/{streamId}', [\App\Http\Controllers\XtreamController::class, 'streamVod'])->where('streamId', '.*');
 Route::get('/series/{username}/{password}/{streamId}', [\App\Http\Controllers\XtreamController::class, 'streamSeries'])->where('streamId', '.*');
 
+// ─── Multicast sweep (above the catch-all so it is reachable) ─────────────────
+// Was registered *after* the /{any} catch-all and was therefore unreachable.
+// Added auth + admin middleware for access control.
+Route::middleware(['auth:web', \App\Http\Middleware\AdminMiddleware::class])
+    ->get('/channels/admin/{channel}/sweep', [AdminChannelController::class, 'scanMulticast'])
+    ->name('admin.channels.scan-multicast');
+
 // ─── Catch-all ─────────────────────────────────────────────────────────────────
 Route::get('/{any}', fn () => redirect()->route('login'))->where('any', '.*');
-
-Route::get('/channels/admin/{channel}/sweep', [AdminChannelController::class, 'scanMulticast'])->name('admin.channels.scan-multicast');
