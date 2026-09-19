@@ -946,9 +946,13 @@ class XtreamController extends Controller
         // stale-cached playlist served by streamLive() still references those
         // files, so players riding through a restart keep getting data (204
         // instead of 404/503) instead of a hard "channel playback error".
-        $restartClean = $isMulticast
-            ? '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/playlist.m3u8; '
-            : '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/segment_*.ts "$ODIR"/playlist.m3u8; ';
+        // On restart, keep existing segments alive for all source types so
+        // players continue receiving stale-but-valid content during the gap
+        // instead of hitting 404s and showing a black screen. Only the
+        // playlist is removed so the new ffmpeg run starts a clean sequence;
+        // the old .ts files remain on disk until ffmpeg's delete_segments flag
+        // naturally rotates them out as new segments arrive.
+        $restartClean = '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/playlist.m3u8; ';
 
         return sprintf(
             'ODIR=%s; L=%s; DELAY=3; '
@@ -972,7 +976,7 @@ class XtreamController extends Controller
                 ? 'NEW_URL=$(cd ' . base_path() . ' && php artisan youtube:refresh-url ' . $channelId . ' 2>/dev/null); if [ $? -eq 0 ] && [ -n "$NEW_URL" ]; then SRC_URL="$NEW_URL"; echo "YOUTUBE REFRESHED $SRC_URL" >> "$L"; fi; '
                 : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
-            .   ($isMulticast ? '-hls_time 4 -hls_list_size 5 ' : '-hls_time 6 -hls_list_size 5 ')
+            .   ($isMulticast ? '-hls_time 4 -hls_list_size 5 ' : '-hls_time 4 -hls_list_size 6 ')
             .   '-hls_flags delete_segments+temp_file+independent_segments+append_list '
             .   '-muxdelay 0 -muxpreload 0 '
             .   '-hls_segment_filename "$ODIR"/segment_%%04d.ts '
