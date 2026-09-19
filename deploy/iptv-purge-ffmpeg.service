@@ -4,7 +4,7 @@ After=iptv-ingest.service
 
 [Service]
 Type=oneshot
-User=kotelhms
-WorkingDirectory=/home/kotelhms/middleware
-ExecStart=/usr/bin/php artisan channels:purge-ffmpeg
+User=www-data
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/php __APP_DIR__/artisan channels:purge-ffmpeg
 TimeoutStartSec=120
