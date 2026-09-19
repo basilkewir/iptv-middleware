@@ -26,7 +26,7 @@ DB_PASS="${DB_PASS:-$(openssl rand -hex 16)}"
 XCVM_DB_NAME="${XCVM_DB_NAME:-xcvm}"
 XCVM_DB_USER="${XCVM_DB_USER:-xcvm}"
 XCVM_DB_PASS="${XCVM_DB_PASS:-$(openssl rand -hex 16)}"
-PHP_VER="8.2"
+PHP_VER="8.3"
 NODE_VER="20"
 XCVM_REPO="https://github.com/Vateron-Media/XC_VM.git"
 XCVM_ACCESS_CODE="${XCVM_ACCESS_CODE:-$(openssl rand -hex 8)}"
@@ -74,6 +74,13 @@ fi
 # =============================================================================
 info "Updating apt and installing system packages…"
 export DEBIAN_FRONTEND=noninteractive
+
+# Add Ondřej Surý PHP PPA (needed on Ubuntu 24.04+ for specific PHP versions)
+if ! grep -r 'ondrej/php' /etc/apt/sources.list.d/ &>/dev/null; then
+    apt-get install -y -qq software-properties-common
+    add-apt-repository -y ppa:ondrej/php
+fi
+
 apt-get update -qq
 apt-get install -y -qq \
     curl wget git unzip rsync ffmpeg \
