@@ -511,6 +511,28 @@ chmod -R 775 \
 success "Permissions set."
 
 # =============================================================================
+# 12b. RAM-backed HLS segment cache (tmpfs)
+# =============================================================================
+# Mount a tmpfs over the HLS streams directory so segments are written to RAM
+# instead of disk. This mirrors XC-VM's local segment caching architecture:
+# thousands of clients read from RAM simultaneously, removing disk I/O as a
+# bottleneck. Size is capped at 20% of total RAM (min 512M).
+info "Mounting tmpfs for HLS segment cache…"
+TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+TMPFS_SIZE=$(( TOTAL_RAM_KB / 5 / 1024 ))  # 20% in MB
+[[ $TMPFS_SIZE -lt 512 ]] && TMPFS_SIZE=512
+HLS_DIR="$APP_DIR/storage/app/streams/hls"
+
+# Add to fstab if not already present
+if ! grep -q "$HLS_DIR" /etc/fstab; then
+    echo "tmpfs $HLS_DIR tmpfs defaults,size=${TMPFS_SIZE}M,uid=www-data,gid=www-data,mode=0775 0 0" >> /etc/fstab
+    mount "$HLS_DIR" 2>/dev/null || true
+    success "tmpfs mounted at $HLS_DIR (${TMPFS_SIZE}MB RAM cache)."
+else
+    success "tmpfs already configured for $HLS_DIR."
+fi
+
+# =============================================================================
 # 13. Firewall — block XC-VM port from outside
 # =============================================================================
 if command -v ufw &>/dev/null; then

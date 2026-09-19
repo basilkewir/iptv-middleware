@@ -9,6 +9,8 @@ use App\Models\EPGProgram;
 use App\Models\User;
 use App\Models\VODContent;
 use App\Models\VODMedia;
+use App\Services\StreamingService\ConnectionLimiter;
+use App\Services\StreamingService\EdgeDispatcher;
 use App\Services\StreamingService\MulticastIngestService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -372,6 +374,68 @@ class XtreamController extends Controller
         return response()->json(['epg_listings' => $programs]);
     }
 
+    /**
+     * HTTP TS (MPEG-TS over HTTP) continuous stream endpoint.
+     * Faster channel zap than HLS — no chunk boundary wait.
+     * Proxies the upstream source directly to the client.
+     */
+    public function streamTs(Request $request, $username, $password, $streamId)
+    {
+        $user = User::where('username', $username)->first();
+        if (! $user || ! $user->is_active) abort(401);
+        if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) abort(401);
+
+        $channelId = (int) $streamId;
+        $channel   = Channel::where('id', $channelId)->where('is_active', true)->firstOrFail();
+
+        // Connection limit enforcement
+        $limiter   = app(ConnectionLimiter::class);
+        $streamKey = "ts:{$channelId}";
+        if (! $limiter->acquire($user, $streamKey)) {
+            abort(429, 'Connection limit reached');
+        }
+
+        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+
+        // For HTTP/HLS sources proxy the TS stream directly.
+        // For UDP/multicast sources redirect to the local HLS playlist
+        // (TS proxy of multicast requires the group reader to be running).
+        $isMulticast = str_starts_with((string) $sourceUrl, 'udp://')
+                    || str_starts_with((string) $sourceUrl, 'rtp://');
+
+        if ($isMulticast) {
+            $this->ensureHlsStream($channelId, $sourceUrl, $channel->program_number, $channel->local_address);
+            return redirect(config('app.url') . "/hls/{$channelId}/playlist.m3u8");
+        }
+
+        // Stream TS directly — zero re-encode, minimal latency.
+        return response()->stream(function () use ($sourceUrl, $limiter, $user, $streamKey) {
+            $ch = curl_init($sourceUrl);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => false,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_CONNECTTIMEOUT => 10,
+                CURLOPT_TIMEOUT        => 0,
+                CURLOPT_WRITEFUNCTION  => function ($curl, $data) use ($limiter, $user, $streamKey) {
+                    // Refresh slot on every chunk so it doesn't expire mid-stream.
+                    $limiter->acquire($user, $streamKey);
+                    echo $data;
+                    if (ob_get_level()) ob_flush();
+                    flush();
+                    return strlen($data);
+                },
+            ]);
+            curl_exec($ch);
+            curl_close($ch);
+            $limiter->release($user->id, $streamKey);
+        }, 200, [
+            'Content-Type'               => 'video/mp2t',
+            'Cache-Control'              => 'no-cache',
+            'Access-Control-Allow-Origin'=> '*',
+            'X-Accel-Buffering'          => 'no',
+        ]);
+    }
+
     // Stream a live channel — serves content inline (no redirect).
     // IPTV players often fail to follow 302 redirects for HLS, and
     // segment URLs in the playlist would resolve back into this route,
@@ -386,6 +450,13 @@ class XtreamController extends Controller
         // Accept either the password hash or the m3u_token
         if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) {
             abort(401);
+        }
+
+        // ── Connection limit enforcement ──────────────────────────────────────
+        $limiter   = app(ConnectionLimiter::class);
+        $streamKey = "live:{$streamId}";
+        if (! $limiter->acquire($user, $streamKey)) {
+            abort(429, 'Connection limit reached');
         }
 
         // Extract numeric ID from streamId (e.g., "1.m3u8" -> 1)
@@ -405,8 +476,17 @@ class XtreamController extends Controller
 
         $channel = Channel::where('id', $channelId)->where('is_active', true)->firstOrFail();
 
-        // XC-VM proxy: when enabled and the channel has been synced to the
-        // engine, stream it through XC-VM. Falls back below when not mapped yet.
+        // ── Edge server dispatch ──────────────────────────────────────────────
+        // Authenticate here (master/control plane), then redirect to the
+        // least-loaded edge server (data plane) — mirrors XC-VM architecture.
+        $edge = app(EdgeDispatcher::class)->bestEdge();
+        if ($edge !== null) {
+            app(EdgeDispatcher::class)->incrementConnections($edge);
+            $ext = strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION)) ?: 'm3u8';
+            return redirect("{$edge}/edge/live/{$username}/{$user->m3u_token}/{$channelId}.{$ext}");
+        }
+
+        // ── XC-VM proxy (legacy, when enabled) ───────────────────────────────
         if (($stream = $this->xcVmProxy('channel', $channelId, $username, $password, $streamId)) !== null) {
             return $stream;
         }
