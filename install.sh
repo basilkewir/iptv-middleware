@@ -216,6 +216,7 @@ success "Middleware dependencies installed."
 info "Writing middleware .env…"
 APP_KEY="$(php -r 'echo "base64:".base64_encode(random_bytes(32));')"
 JWT_SECRET="$(openssl rand -hex 32)"
+[[ "$NO_XCVM" == "true" ]] && XC_VM_ENABLED=false || XC_VM_ENABLED=true
 
 SERVER_IP="$(hostname -I | awk '{print $1}')"
 APP_URL="http://${DOMAIN:-$SERVER_IP}:${MW_PORT}"
@@ -279,7 +280,7 @@ TMDB_CACHE_TTL=86400
 OFFLINE_VIDEO_PATH=${APP_DIR}/storage/app/offline/channel-offline.mp4
 
 # ── XC-VM Engine (loopback, hidden from internet) ──────────────────────────
-[[ "$NO_XCVM" == "true" ]] && XC_VM_ENABLED=false || XC_VM_ENABLED=true
+XC_VM_ENABLED=${XC_VM_ENABLED}
 XC_VM_URL=http://127.0.0.1
 XC_VM_PORT=${XCVM_PORT}
 XC_VM_ACCESS_CODE=${XCVM_ACCESS_CODE}
