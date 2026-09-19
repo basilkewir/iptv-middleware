@@ -15,11 +15,12 @@
 # =============================================================================
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/iptv-middleware}"
+APP_DIR="${APP_DIR:-/home/kotelhms/middleware}"
 REMOTE_HOST=""
 REMOTE_USER="root"
 REMOTE_PASS=""
 REMOTE_PORT="22"
+NGINX_PORT="8081"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()    { echo -e "${CYAN}[INFO]${NC}  $*"; }
@@ -34,6 +35,7 @@ while [[ $# -gt 0 ]]; do
         --user)     REMOTE_USER="$2";  shift 2 ;;
         --pass)     REMOTE_PASS="$2";  shift 2 ;;
         --port)     REMOTE_PORT="$2";  shift 2 ;;
+        --nginx-port) NGINX_PORT="$2"; shift 2 ;;
         *) warn "Unknown argument: $1"; shift ;;
     esac
 done
@@ -66,7 +68,7 @@ if [[ -n "$REMOTE_HOST" ]]; then
 
     info "Running update on ${REMOTE_HOST}..."
     sshpass -p "$REMOTE_PASS" ssh $SSH_OPTS "${REMOTE_USER}@${REMOTE_HOST}" \
-        "echo '${REMOTE_PASS}' | sudo -S bash /tmp/deploy-update.sh --app-dir ${APP_DIR}"
+        "echo '${REMOTE_PASS}' | sudo -S bash /tmp/deploy-update.sh --app-dir ${APP_DIR} --nginx-port ${NGINX_PORT}"
 
     exit $?
 fi
@@ -83,6 +85,12 @@ for sock in /run/php/php*-fpm.sock; do
     [[ -S "$sock" ]] && PHP_VER=$(echo "$sock" | grep -oP '\d+\.\d+') && break
 done
 info "Detected PHP ${PHP_VER}"
+
+# Detect nginx port from existing vhost if not overridden
+if [[ -z "${NGINX_PORT:-}" ]]; then
+    NGINX_PORT=$(grep -h 'listen ' /etc/nginx/sites-enabled/* 2>/dev/null | grep -oP '\d+' | head -1)
+    NGINX_PORT="${NGINX_PORT:-8081}"
+fi
 
 cd "$APP_DIR"
 
@@ -123,7 +131,73 @@ else
 fi
 
 # =============================================================================
-# 5. Patch .env XC-VM settings if XC-VM is enabled
+# 5. Fix nginx HLS location (ensure alias-based /hls/ block is present)
+# =============================================================================
+info "Checking nginx HLS config..."
+NGINX_VHOST=$(ls /etc/nginx/sites-enabled/middleware /etc/nginx/sites-enabled/iptv-middleware 2>/dev/null | head -1 || true)
+if [[ -n "$NGINX_VHOST" ]]; then
+    if ! grep -q 'location /hls/' "$NGINX_VHOST"; then
+        info "Patching nginx vhost: replacing HLS location with alias block..."
+        # Detect PHP-FPM socket path used in this vhost
+        FPM_SOCK=$(grep -oP 'unix:/run/php/[^;]+' "$NGINX_VHOST" | head -1 || echo "unix:/run/php/php${PHP_VER}-fpm.sock")
+        cat > "$NGINX_VHOST" <<NGINX
+server {
+    listen ${NGINX_PORT};
+    server_name _;
+    root ${APP_DIR}/public;
+    index index.php;
+    charset utf-8;
+    client_max_body_size 0;
+    client_body_timeout 3600s;
+    sendfile on;
+    tcp_nopush on;
+    keepalive_requests 10000;
+
+    location /hls/ {
+        alias ${APP_DIR}/storage/app/streams/hls/;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Access-Control-Allow-Origin "*";
+        add_header X-Accel-Buffering "no";
+        types { application/vnd.apple.mpegurl m3u8; video/mp2t ts; }
+        sendfile on;
+        tcp_nopush on;
+    }
+
+    location /storage/ {
+        alias ${APP_DIR}/storage/app/public/;
+        expires 7d;
+        sendfile on;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location = /index.php {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root/index.php;
+        fastcgi_param SCRIPT_NAME     /index.php;
+        fastcgi_pass  ${FPM_SOCK};
+        fastcgi_read_timeout 3600s;
+        fastcgi_param HTTP_HOST              \$http_host;
+        fastcgi_param HTTP_X_FORWARDED_FOR   \$http_x_forwarded_for;
+        fastcgi_param HTTP_X_FORWARDED_PROTO \$http_x_forwarded_proto;
+        fastcgi_param HTTP_X_FORWARDED_HOST  \$http_x_forwarded_host;
+        fastcgi_param HTTP_X_FORWARDED_PORT  \$http_x_forwarded_port;
+        fastcgi_param HTTPS                  \$http_x_forwarded_proto;
+    }
+
+    location ~ /\.(?!well-known).* { deny all; }
+}
+NGINX
+        nginx -t && systemctl reload nginx && success "Nginx HLS config patched and reloaded."
+    else
+        success "Nginx HLS config already correct."
+    fi
+fi
+
+# =============================================================================
+# 5b. Patch .env XC-VM settings if XC-VM is enabled
 # =============================================================================
 XCVM_ENABLED=$(grep -E "^XC_VM_ENABLED=" "$APP_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "false")
 if [[ "$XCVM_ENABLED" == "true" ]]; then
@@ -165,6 +239,8 @@ success "Caches rebuilt."
 # =============================================================================
 chown -R www-data:www-data "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
 chmod -R 775 "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
+mkdir -p "$APP_DIR/storage/app/streams/hls"
+chown -R www-data:www-data "$APP_DIR/storage/app/streams"
 
 # =============================================================================
 # 9. XC-VM re-sync
@@ -180,7 +256,12 @@ fi
 info "Reloading services..."
 systemctl reload "php${PHP_VER}-fpm" 2>/dev/null || systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
 systemctl reload nginx 2>/dev/null || true
-supervisorctl restart iptv-queue 2>/dev/null || true
+# Restart queue worker (systemd unit takes priority over supervisor)
+if systemctl is-active --quiet middleware-queue 2>/dev/null; then
+    systemctl restart middleware-queue
+elif systemctl is-active --quiet supervisor 2>/dev/null; then
+    supervisorctl restart iptv-queue 2>/dev/null || true
+fi
 success "Services reloaded."
 
 echo ""
