@@ -502,20 +502,36 @@ class XtreamController extends Controller
         if (! $needsIngest && $sourceUrl) {
             $extension = strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION));
 
-            // For .m3u8 requests fetch the upstream playlist and rewrite
-            // any relative segment URLs to absolute so the player can fetch them.
+            // For .m3u8 requests fetch the upstream playlist via curl (handles
+            // redirects, auth headers, etc.) and rewrite relative segment URLs
+            // to absolute so the player can fetch them directly from upstream.
             if ($extension === 'm3u8' || $extension === '') {
-                $content = @file_get_contents($sourceUrl);
-                if ($content === false || $content === '') {
+                $ch = curl_init($sourceUrl);
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_MAXREDIRS      => 5,
+                    CURLOPT_CONNECTTIMEOUT => 10,
+                    CURLOPT_TIMEOUT        => 15,
+                    CURLOPT_USERAGENT      => 'VLC/3.0.16 LibVLC/3.0.16',
+                ]);
+                $content  = curl_exec($ch);
+                $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+                curl_close($ch);
+
+                if (! $content) {
                     return response('Service Unavailable', 503, ['Retry-After' => '3']);
                 }
-                // Rewrite relative segment/playlist URLs to absolute
-                $base = preg_replace('/\/[^\/]*$/', '/', $sourceUrl);
+
+                // Rewrite relative segment/playlist URLs to absolute using
+                // the final URL after redirects as the base.
+                $base = preg_replace('/\/[^\/]*$/', '/', $finalUrl);
                 $content = preg_replace_callback(
                     '/^(?!#)(\S+)\s*$/m',
-                    fn ($m) => (str_starts_with($m[1], 'http') ? $m[1] : $base . $m[1]),
+                    fn ($m) => (preg_match('#^https?://#', $m[1]) ? $m[1] : $base . ltrim($m[1], '/')),
                     $content
                 );
+
                 return response($content, 200, [
                     'Content-Type'                => 'application/vnd.apple.mpegurl',
                     'Cache-Control'               => 'no-cache, no-store, must-revalidate',
@@ -531,6 +547,7 @@ class XtreamController extends Controller
                     CURLOPT_FOLLOWLOCATION => true,
                     CURLOPT_CONNECTTIMEOUT => 10,
                     CURLOPT_TIMEOUT        => 0,
+                    CURLOPT_USERAGENT      => 'VLC/3.0.16 LibVLC/3.0.16',
                     CURLOPT_WRITEFUNCTION  => function ($curl, $data) {
                         echo $data;
                         if (ob_get_level()) ob_flush();
@@ -662,13 +679,8 @@ class XtreamController extends Controller
         @touch($heartbeat);
 
         // Multi-program UDP/RTP multicast muxes MUST go through the shared group
-        // reader — one ffmpeg reads the mux ONCE and fans out per-program HLS.
-        // A per-channel ingest here would independently read the WHOLE high-bitrate
-        // mux (all HD programs) just to keep one program via -map p:N. At 7 Mbps ×
-        // N programs the UDP receive socket overflows during bursts, packets drop,
-        // and the client sees the classic "plays ~1s, stalls ~5s" dropout. Routing
-        // multicast to the group reader fixes it: the mux is read once regardless
-        // of how many HD channels are being watched.
+        // reader when a program number is set. Single-program UDP sources (no
+        // program number) get their own per-channel ingest below.
         $isMulticast = str_starts_with($sourceUrl, 'udp://') || str_starts_with($sourceUrl, 'rtp://');
         if ($isMulticast && $programNumber !== null && $programNumber > 0 && $channelId > 0) {
             $channel = Channel::find($channelId);
@@ -945,7 +957,9 @@ class XtreamController extends Controller
         // "URL ... is not in allowed_segment_extensions" and aborts the ingest.
         // extension_picky=0 disables the extension check (allowed_extensions=
         // ALL alone is not enough in newer FFmpeg).
-        $hlsOpts = $isHls ? '-extension_picky 0 ' : '';
+        // extension_picky was added in FFmpeg 6.x — skip it on older builds.
+        $ffmpegVersion = (int) shell_exec('ffmpeg -version 2>&1 | grep -oP "ffmpeg version \\K\\d+" | head -1');
+        $hlsOpts = ($isHls && $ffmpegVersion >= 6) ? '-extension_picky 0 ' : '';
         // For UDP: +genpts fixes missing PTS after TS discontinuities,
         // +discardcorrupt drops damaged packets, -err_detect ignore_err skips
         // corrupt frames without stalling, -avoid_negative_ts make_zero fixes
