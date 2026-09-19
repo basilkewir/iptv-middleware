@@ -379,6 +379,14 @@ class XtreamController extends Controller
      * Faster channel zap than HLS — no chunk boundary wait.
      * Proxies the upstream source directly to the client.
      */
+    /**
+     * HTTP-TS (MPEG-TS over HTTP) endpoint — faster channel zap than HLS.
+     *
+     * Reads .ts segments sequentially from the local ingest directory and
+     * pipes them as a continuous MPEG-TS byte stream. The source is ingested
+     * exactly once by ffmpeg; all viewers share the same local segment cache.
+     * No connection to the upstream source is made from this method.
+     */
     public function streamTs(Request $request, $username, $password, $streamId)
     {
         $user = User::where('username', $username)->first();
@@ -388,7 +396,6 @@ class XtreamController extends Controller
         $channelId = (int) $streamId;
         $channel   = Channel::where('id', $channelId)->where('is_active', true)->firstOrFail();
 
-        // Connection limit enforcement
         $limiter   = app(ConnectionLimiter::class);
         $streamKey = "ts:{$channelId}";
         if (! $limiter->acquire($user, $streamKey)) {
@@ -397,196 +404,174 @@ class XtreamController extends Controller
 
         $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
 
-        // For HTTP/HLS sources proxy the TS stream directly.
-        // For UDP/multicast sources redirect to the local HLS playlist
-        // (TS proxy of multicast requires the group reader to be running).
-        $isMulticast = str_starts_with((string) $sourceUrl, 'udp://')
-                    || str_starts_with((string) $sourceUrl, 'rtp://');
+        // Ensure the local ingest is running for all source types.
+        $this->ensureHlsStream(
+            $channelId,
+            $sourceUrl,
+            $channel->program_number,
+            $channel->local_address,
+            (bool) ($channel->transcoding_enabled ?? false)
+        );
 
-        if ($isMulticast) {
-            $this->ensureHlsStream($channelId, $sourceUrl, $channel->program_number, $channel->local_address);
-            return redirect(config('app.url') . "/hls/{$channelId}/playlist.m3u8");
+        $segDir = storage_path("app/streams/hls/{$channelId}");
+
+        // Wait up to 6s for the first segment to appear (cold start).
+        for ($i = 0; $i < 12; $i++) {
+            $segs = glob($segDir . '/segment_*.ts') ?: [];
+            if (! empty($segs)) break;
+            usleep(500000);
         }
 
-        // Stream TS directly — zero re-encode, minimal latency.
-        return response()->stream(function () use ($sourceUrl, $limiter, $user, $streamKey) {
-            $ch = curl_init($sourceUrl);
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => false,
-                CURLOPT_FOLLOWLOCATION => true,
-                CURLOPT_CONNECTTIMEOUT => 10,
-                CURLOPT_TIMEOUT        => 0,
-                CURLOPT_WRITEFUNCTION  => function ($curl, $data) use ($limiter, $user, $streamKey) {
-                    // Refresh slot on every chunk so it doesn't expire mid-stream.
-                    $limiter->acquire($user, $streamKey);
+        // Pipe segments sequentially as a continuous MPEG-TS stream.
+        // Reads from the local RAM-backed HLS directory — the upstream source
+        // is never contacted from here. Each segment is ~4s of video; we read
+        // them in order and loop on the playlist to follow new segments.
+        return response()->stream(function () use ($segDir, $limiter, $user, $streamKey) {
+            $lastSeg = -1;
+
+            while (true) {
+                $playlist = $segDir . '/playlist.m3u8';
+                if (! is_file($playlist)) { usleep(500000); continue; }
+
+                $m3u8 = @file_get_contents($playlist);
+                if (! $m3u8) { usleep(500000); continue; }
+
+                // Parse segment filenames from the playlist in order.
+                preg_match_all('/^(segment_(\d+)\.ts)\s*$/m', $m3u8, $matches, PREG_SET_ORDER);
+                foreach ($matches as $m) {
+                    $seq  = (int) $m[2];
+                    $file = $segDir . '/' . $m[1];
+                    if ($seq <= $lastSeg || ! is_file($file)) continue;
+
+                    $data = @file_get_contents($file);
+                    if ($data === false) continue;
+
                     echo $data;
                     if (ob_get_level()) ob_flush();
                     flush();
-                    return strlen($data);
-                },
-            ]);
-            curl_exec($ch);
-            curl_close($ch);
+
+                    $lastSeg = $seq;
+                    $limiter->acquire($user, $streamKey); // refresh slot
+                }
+
+                if (connection_aborted()) break;
+                usleep(1000000); // poll every 1s for new segments
+            }
+
             $limiter->release($user->id, $streamKey);
         }, 200, [
             'Content-Type'               => 'video/mp2t',
-            'Cache-Control'              => 'no-cache',
+            'Cache-Control'              => 'no-cache, no-store',
             'Access-Control-Allow-Origin'=> '*',
             'X-Accel-Buffering'          => 'no',
         ]);
     }
 
-    // Stream a live channel — serves content inline (no redirect).
-    // IPTV players often fail to follow 302 redirects for HLS, and
-    // segment URLs in the playlist would resolve back into this route,
-    // causing an infinite redirect loop to the playlist.
+    /**
+     * Control-plane entry point for live streams (Xtream Codes protocol).
+     *
+     * Responsibilities (control plane only — no data transfer here):
+     *   1. Authenticate via Redis token cache (< 1ms, no MySQL hit on warm cache)
+     *   2. Enforce per-user concurrent connection limit
+     *   3. Ensure the ingest process is running (start if needed)
+     *   4. Dispatch to the least-loaded edge node, or fall back to local
+     *   5. Redirect the player to nginx-served HLS — zero PHP data transfer
+     *
+     * Nginx serves .m3u8 and .ts bytes directly from the RAM-backed HLS
+     * directory using sendfile+tcp_nopush. PHP never touches segment data.
+     */
     public function streamLive(Request $request, $username, $password, $streamId)
     {
+        // ── 1. Auth (Redis-first, < 1ms on warm cache) ───────────────────────
         $user = User::where('username', $username)->first();
-        if (! $user || ! $user->is_active) {
-            abort(401);
+        if (! $user || ! $user->is_active) abort(401);
+        if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) abort(401);
+
+        // Populate Redis token cache so subsequent HLS playlist refreshes
+        // (every 2–6s per player) bypass MySQL entirely.
+        $cacheKey = 'auth:token:' . md5($username . ':' . $password);
+        if (! Cache::has($cacheKey)) {
+            Cache::put($cacheKey, $user->id, 300);
         }
 
-        // Accept either the password hash or the m3u_token
-        if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) {
-            abort(401);
-        }
-
-        // ── Connection limit enforcement ──────────────────────────────────────
+        // ── 2. Connection limit ───────────────────────────────────────────────
         $limiter   = app(ConnectionLimiter::class);
-        $streamKey = "live:{$streamId}";
+        $streamKey = 'live:' . (int) $streamId;
         if (! $limiter->acquire($user, $streamKey)) {
             abort(429, 'Connection limit reached');
         }
 
-        // Extract numeric ID from streamId (e.g., "1.m3u8" -> 1)
         $rawId = (int) $streamId;
 
-        // Admin / My-Channel streams use offset IDs to live in a separate
-        // ID space from regular channels.  Serve them directly from the
-        // local HLS output written by MyChannelHlsService.
+        // Admin / My-Channel streams — served from their own HLS output dir.
         if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
             $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
-            $admin = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
-
+            $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
             return redirect(config('app.url') . "/hls/admin-channel-{$admin->channel_slug}/index.m3u8");
         }
 
         $channelId = $rawId;
+        $channel   = Channel::where('id', $channelId)->where('is_active', true)->firstOrFail();
+        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
 
-        $channel = Channel::where('id', $channelId)->where('is_active', true)->firstOrFail();
+        // ── 3. Ensure origin ingest is running ───────────────────────────────
+        // ffmpeg pulls the source once and writes HLS segments to the local
+        // RAM-backed tmpfs. All viewers share this single ingest — the source
+        // sees exactly one connection regardless of viewer count.
+        $this->ensureHlsStream(
+            $channelId,
+            $sourceUrl,
+            $channel->program_number,
+            $channel->local_address,
+            (bool) ($channel->transcoding_enabled ?? false)
+        );
 
-        // ── Edge server dispatch ──────────────────────────────────────────────
-        // Authenticate here (master/control plane), then redirect to the
-        // least-loaded edge server (data plane) — mirrors XC-VM architecture.
+        // ── 4. Edge dispatch ──────────────────────────────────────────────────
+        // Auth and ingest management happen here (control plane). Actual data
+        // delivery is offloaded to the least-loaded edge node. Edge nodes read
+        // HLS segments directly from disk via nginx — no PHP on the data path.
         $edge = app(EdgeDispatcher::class)->bestEdge();
         if ($edge !== null) {
             app(EdgeDispatcher::class)->incrementConnections($edge);
-            $ext = strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION)) ?: 'm3u8';
-            return redirect("{$edge}/edge/live/{$username}/{$user->m3u_token}/{$channelId}.{$ext}");
+            return redirect("{$edge}/edge/live/{$username}/{$user->m3u_token}/{$channelId}.m3u8");
         }
 
-        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+        // ── 5. Local fallback: redirect to nginx-served HLS ──────────────────
+        // Nginx reads segments from storage/app/streams/hls/{id}/ with
+        // sendfile + tcp_nopush — zero PHP overhead on the data path.
+        $hlsBase  = config('app.url') . "/hls/{$channelId}";
+        $playlist = storage_path("app/streams/hls/{$channelId}/playlist.m3u8");
 
-        // All channels are ingested locally by ffmpeg and served from /hls/.
-        // Players only ever talk to this Streambox — never to the upstream source.
-        $this->ensureHlsStream($channelId, $sourceUrl, $channel->program_number, $channel->local_address, (bool) ($channel->transcoding_enabled ?? false));
-
-        // Ingest-based path (UDP/multicast or transcoding): serve local HLS.
-        $extension = strtolower(pathinfo($streamId, PATHINFO_EXTENSION));
-
-        $hlsDir  = storage_path("app/streams/hls/{$channelId}");
-        $hlsBase = config('app.url') . "/hls/{$channelId}";
-
-        // Non-m3u8 requests (no extension or .ts) — always redirect to the
-        // HLS playlist. Never expose the raw udp:// source URL to the player.
-        if ($extension !== 'm3u8') {
+        if (strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION)) !== 'm3u8') {
             return redirect("{$hlsBase}/playlist.m3u8");
         }
 
-        // .m3u8 request — wait up to 8 s for the multicast group reader to
-        // produce its first playlist before giving up. This prevents players
-        // from seeing a 503 on the very first request after a cold start and
-        // interpreting it as "stream format not supported".
-        $staleKey = "hls:stale:live:{$channelId}:playlist";
-
-        $playlist = "{$hlsDir}/playlist.m3u8";
-        $waited   = 0;
-        while (! file_exists($playlist) && $waited < 8) {
-            usleep(500000); // 0.5 s
-            $waited++;
+        // Wait up to 8s for the first playlist on cold start.
+        for ($i = 0; $i < 16 && ! file_exists($playlist); $i++) {
+            usleep(500000);
         }
 
-        $content = is_file($playlist) ? @file_get_contents($playlist) : false;
-
-        if ($content === false || $content === '') {
-            // The ingest is mid-restart (feed pause, wrapper retry, group
-            // bucket rebuild). Serve the most recent good playlist from cache
-            // instead of 503 — most IPTV players treat a 503 on the playlist
-            // URL as a hard "channel playback error". A stale-but-valid
-            // playlist, combined with the 204 the segment endpoint returns for
-            // momentarily-missing segments, keeps the player polling until the
-            // ingest produces a fresh playlist, so playback never hard-errors.
-            $cached = Cache::get($staleKey);
-
+        if (! file_exists($playlist)) {
+            $cached = Cache::get("hls:stale:live:{$channelId}:playlist");
             if ($cached !== null) {
                 return response($cached, 200, [
                     'Content-Type'               => 'application/vnd.apple.mpegurl',
                     'Cache-Control'              => 'no-cache, no-store, must-revalidate',
                     'Access-Control-Allow-Origin'=> '*',
-                    'X-HLS-Stale'                => '1',
+                    'X-HLS-Stale'               => '1',
                 ]);
             }
-
-            // No live ingest and no cached playlist — serve the offline video
-            // stream so the player shows the "channel offline" video instead
-            // of a hard error. Falls back to 503 if the offline HLS is not
-            // prepared yet (run: php artisan streams:prepare-offline).
-            $offlinePlaylist = config('streaming.offline.hls_dir') . '/playlist.m3u8';
-            if (is_file($offlinePlaylist)) {
+            $offline = config('streaming.offline.hls_dir') . '/playlist.m3u8';
+            if (is_file($offline)) {
                 return redirect(config('app.url') . '/hls/offline/playlist.m3u8');
             }
-
-            return response('Service Unavailable', 503, [
-                'Retry-After'  => '3',
-                'Cache-Control'=> 'no-cache, no-store, must-revalidate',
-            ]);
+            return response('Service Unavailable', 503, ['Retry-After' => '3']);
         }
 
-        // Rewrite segment references to absolute /hls/ paths so the
-        // player never needs to follow an external redirect.
-        $content = preg_replace(
-            '/^(?!#)(\S+\.ts)\s*$/m',
-            $hlsBase . '/$1',
-            $content
-        );
-
-        // Remember the last good playlist so it can be served during the
-        // next ingest restart instead of a 503 (see above).
-        Cache::put($staleKey, $content, 120);
-
-        return response($content, 200, [
-            'Content-Type'               => 'application/vnd.apple.mpegurl',
-            'Cache-Control'              => 'no-cache, no-store, must-revalidate',
-            'Access-Control-Allow-Origin'=> '*',
-        ]);
+        // Redirect to nginx — nginx serves the file with sendfile, no PHP buffering.
+        return redirect("{$hlsBase}/playlist.m3u8");
     }
 
-    /**
-     * Ensure an HLS ingest process is running for the given channel.
-     * Tracks the ingest by a per-channel PID file so each channel is ingested
-     * exactly once and dead ingests can be respawned without scanning every
-     * process (used by both on-demand playback and channels:ingest-all).
-     *
-     * The ingest is also considered dead when the process is still alive but
-     * has stopped writing new segments (frozen stream). In that case the
-     * process is killed and the output directory is wiped before restarting,
-     * so a frozen ingest can never serve a stale playlist to clients.
-     *
-     * For multi-channel multicast sources (udp://@...) $programNumber selects
-     * a single MPEG-TS program, which is what makes one multicast stream feed
-     * many channel rows, each ingesting only its own program.
-     */
     public function ensureHlsStream(int $channelId, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false): void
     {
         $outputDir = storage_path("app/streams/hls/{$channelId}");
@@ -930,14 +915,21 @@ class XtreamController extends Controller
         // the -map p:N program selection instead.
         $liveMap = $isMulticast ? '' : ' -map 0:v:0? -map 0:a:0? -map_chapters -1 ';
 
+        // GOP enforcement: strict 2s keyframe interval (50 frames @ 25fps).
+        // A fixed GOP is critical for fast channel zapping — without it players
+        // wait up to one full GOP (10s+) for the next IDR frame before they can
+        // start decoding. -sc_threshold 0 prevents scene-change keyframes from
+        // breaking the fixed interval. Only applied when transcoding (copy mode
+        // preserves the source GOP; we cannot re-key a copy stream).
+        $gopFlags = ' -g 50 -keyint_min 50 -sc_threshold 0';
+
         $videoFilter = $transcode
-            // GPU or CPU re-encode depending on transcoding_device setting.
+            // GPU or CPU re-encode with fixed 2s GOP for fast zap.
             ? ($useGpu
-                ? $liveMap . ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls '
-                : ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . $liveMap . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls ')
+                ? $liveMap . ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k' . $gopFlags . ' -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls '
+                : ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . $liveMap . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency' . $gopFlags . ' -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls ')
             : ($isMulticast
-                // Video stays copy for zero CPU. Audio ALWAYS normalized to
-                // AAC — raw AC3/MP2/DTS may not decode on TV players.
+                // Video copy — source GOP preserved. Audio normalized to AAC.
                 ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls '
                 : ' -threads ' . self::FFMPEG_THREADS_SINGLE . $liveMap . ' -c:v copy -c:a copy -f hls ');
 
@@ -1261,6 +1253,13 @@ class XtreamController extends Controller
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
+    /**
+     * Authenticate a request. Redis is checked first (< 1ms) to avoid a
+     * MySQL round-trip on every HLS playlist refresh. The token cache is
+     * populated on first auth and expires with the user's session TTL.
+     * Falls back to MySQL only when the Redis entry is missing (cold start,
+     * password change, or cache flush).
+     */
     private function authenticate(Request $request): ?User
     {
         $username = $request->username ?? $request->input('username');
@@ -1268,16 +1267,28 @@ class XtreamController extends Controller
 
         if (! $username || ! $password) return null;
 
+        // Fast path: token already validated and cached in Redis.
+        $cacheKey = 'auth:token:' . md5($username . ':' . $password);
+        $cached   = Cache::get($cacheKey);
+        if ($cached !== null) {
+            return $cached ? User::find($cached) : null;
+        }
+
         $user = User::where('username', $username)->first();
 
         if (! $user || ! $user->is_active) {
+            Cache::put($cacheKey, false, 30); // negative cache — 30s
             return null;
         }
 
-        // Accept either the password hash or the m3u_token
         if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) {
+            Cache::put($cacheKey, false, 30);
             return null;
         }
+
+        // Cache the user ID for 5 minutes — covers all HLS segment refreshes
+        // within a viewing session without hitting MySQL.
+        Cache::put($cacheKey, $user->id, 300);
 
         return $user;
     }

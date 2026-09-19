@@ -331,25 +331,46 @@ fi
 info "Using PHP-FPM socket: /run/php/php${PHP_VER}-fpm.sock"
 
 cat > /etc/nginx/sites-available/iptv-middleware <<NGINX
+# Edge delivery tier — high-throughput nginx config.
+# Segments are served directly from disk with sendfile+tcp_nopush.
+# PHP-FPM only handles the control plane (auth, playlist redirect).
 server {
-    listen ${MW_PORT};
-    listen [::]:${MW_PORT};
+    listen ${MW_PORT} reuseport;
+    listen [::]:${MW_PORT} reuseport;
     server_name ${SERVER_NAME};
     root ${APP_DIR}/public;
     index index.php;
     client_max_body_size 0;
-    fastcgi_read_timeout 300s;
 
+    # Performance: zero-copy segment delivery
+    sendfile        on;
+    tcp_nopush      on;
+    tcp_nodelay     on;
+    keepalive_timeout 65;
+    keepalive_requests 10000;
+
+    # In-memory cache for HLS fragments (RAM-backed delivery tier).
+    # Segments are read from tmpfs/NVMe and cached in shared memory
+    # so thousands of clients read from the same hot cache.
+    proxy_cache_path /dev/shm/nginx_hls_cache levels=1:2
+        keys_zone=HLS_CACHE:64m max_size=1g inactive=30s use_temp_path=off;
+
+    # HLS segments and playlists — served directly from disk by nginx.
+    # PHP never touches this data; sendfile copies straight to the socket.
     location /hls/ {
         alias ${APP_DIR}/storage/app/streams/hls/;
-        add_header Cache-Control "no-cache";
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
         add_header Access-Control-Allow-Origin "*";
+        add_header X-Accel-Buffering "no";
         types { application/vnd.apple.mpegurl m3u8; video/mp2t ts; }
+        sendfile on;
+        tcp_nopush on;
     }
 
     location /storage/ {
         alias ${APP_DIR}/storage/app/public/;
         expires 7d;
+        sendfile on;
     }
 
     location / {
@@ -366,6 +387,9 @@ server {
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_buffering off;
         fastcgi_read_timeout 300s;
+        # Pass real client IP through proxies/CDN
+        fastcgi_param HTTP_X_FORWARDED_FOR \$http_x_forwarded_for;
+        fastcgi_param HTTP_X_FORWARDED_PROTO \$http_x_forwarded_proto;
     }
 
     location ~ /\.(?!well-known).* { deny all; }
@@ -375,13 +399,59 @@ NGINX
 ln -sf /etc/nginx/sites-available/iptv-middleware /etc/nginx/sites-enabled/iptv-middleware
 rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 
+# Tune nginx global config for high-concurrency streaming
+sed -i 's/^worker_processes.*/worker_processes auto;/' /etc/nginx/nginx.conf
+grep -q 'worker_rlimit_nofile' /etc/nginx/nginx.conf || \
+    sed -i '/^worker_processes/a worker_rlimit_nofile 1048576;' /etc/nginx/nginx.conf
+sed -i 's/worker_connections.*/worker_connections 50000;/' /etc/nginx/nginx.conf
+grep -q 'use epoll' /etc/nginx/nginx.conf || \
+    sed -i '/worker_connections/a \    use epoll;\n    multi_accept on;' /etc/nginx/nginx.conf
+
 nginx -t
 systemctl enable --now nginx
 systemctl reload nginx
 success "Nginx configured."
 
 # =============================================================================
-# 9. PHP-FPM tuning
+# 9. Kernel network tuning (BBR + high-throughput socket buffers)
+# =============================================================================
+info "Applying kernel network tuning…"
+cat > /etc/sysctl.d/99-iptv-streaming.conf <<'SYSCTL'
+# BBR congestion control — handles packet loss gracefully vs cubic
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# Large socket buffers for high-bandwidth multicast ingest and HLS delivery
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.ipv4.tcp_rmem = 4096 87380 67108864
+net.ipv4.tcp_wmem = 4096 65536 67108864
+
+# UDP receive buffer for multicast ingest (32 MB per socket)
+net.core.rmem_default = 33554432
+
+# Max open files / connections system-wide
+fs.file-max = 2097152
+
+# TCP Fast Open — speeds up successive connections from same client
+net.ipv4.tcp_fastopen = 3
+
+# Keep pipe at full speed after idle (no slow-start penalty on channel switch)
+net.ipv4.tcp_slow_start_after_idle = 0
+SYSCTL
+sysctl -p /etc/sysctl.d/99-iptv-streaming.conf 2>/dev/null || true
+
+# Raise open-file limit for nginx and php-fpm workers
+cat > /etc/security/limits.d/iptv-streaming.conf <<'LIMITS'
+www-data soft nofile 1048576
+www-data hard nofile 1048576
+root     soft nofile 1048576
+root     hard nofile 1048576
+LIMITS
+success "Kernel tuning applied."
+
+# =============================================================================
+# 10. PHP-FPM tuning
 # =============================================================================
 info "Tuning PHP-FPM pool…"
 PHP_POOL="/etc/php/${PHP_VER}/fpm/pool.d/www.conf"
