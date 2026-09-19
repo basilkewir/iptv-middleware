@@ -145,6 +145,11 @@ class ChannelPushController extends Controller
                 ],
             ]);
         } catch (\RuntimeException $e) {
+            \Illuminate\Support\Facades\Log::error('Push start failed', [
+                'channel_id' => $validated['channel_id'],
+                'destination_id' => $validated['destination_id'],
+                'error' => $e->getMessage(),
+            ]);
             return response()->json(['message' => $e->getMessage()], 422);
         }
     }

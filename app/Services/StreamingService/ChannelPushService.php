@@ -259,82 +259,91 @@ class ChannelPushService
      */
     private function executePushWrapper(string $ffmpegCmd, int $channelId, int $destinationId): int
     {
-        $logFile = storage_path("logs/push_{$channelId}_{$destinationId}.log");
+        $logFile  = storage_path("logs/push_{$channelId}_{$destinationId}.log");
         $stopFile = $this->getStopFile($channelId, $destinationId);
-        $pidFile = $this->getPidFile($channelId, $destinationId);
+        $pidFile  = $this->getPidFile($channelId, $destinationId);
+        $scriptFile = storage_path("app/push_{$channelId}_{$destinationId}.sh");
 
-        // Remove stale .stop file
         @unlink($stopFile);
 
-        // Build the wrapper script
-        $wrapper = 'echo $$ > ' . escapeshellarg($pidFile) . '; '
-            . 'L=' . escapeshellarg($logFile) . '; '
-            . 'S=' . escapeshellarg($stopFile) . '; '
-            . 'echo "PUSH WRAPPER START channel=' . $channelId . ' dest=' . $destinationId . ' pid=$$ $(date +%s)" >> "$L"; '
-            . 'trap \'echo "PUSH WRAPPER EXIT $(date +%s)" >> "$L"; exit 0\' EXIT INT TERM; '
-            . 'DELAY=3; '
-            . 'while true; do '
-            .   '[ -f "$S" ] && echo "STOP FILE FOUND" >> "$L" && exit 0; '
-            .   'echo "PUSH START $(date +%s)" >> "$L"; '
-            .   $ffmpegCmd . ' >> "$L" 2>&1; '
-            .   'RC=$?; '
-            .   'echo "PUSH EXIT rc=$RC $(date +%s)" >> "$L"; '
-            .   '[ -f "$S" ] && echo "STOP FILE FOUND AFTER EXIT" >> "$L" && exit 0; '
-            .   'if [ $RC -eq 0 ]; then DELAY=3; else DELAY=$((DELAY * 2)); [ $DELAY -gt 30 ] && DELAY=30; fi; '
-            .   'echo "PUSH RESTART delay=$DELAY" >> "$L"; '
-            .   'sleep $DELAY; '
-            . 'done';
+        // Write the wrapper as a file — avoids all shell-quoting issues with
+        // complex ffmpeg commands that contain single/double quotes.
+        $script = <<<BASH
+#!/bin/bash
+echo \$\$ > {$pidFile}
+L={$logFile}
+S={$stopFile}
+echo "PUSH WRAPPER START channel={$channelId} dest={$destinationId} pid=\$\$ \$(date +%s)" >> "\$L"
+trap 'echo "PUSH WRAPPER EXIT \$(date +%s)" >> "\$L"; exit 0' EXIT INT TERM
+DELAY=3
+while true; do
+  [ -f "\$S" ] && echo "STOP FILE FOUND" >> "\$L" && exit 0
+  echo "PUSH START \$(date +%s)" >> "\$L"
+  {$ffmpegCmd} >> "\$L" 2>&1
+  RC=\$?
+  echo "PUSH EXIT rc=\$RC \$(date +%s)" >> "\$L"
+  [ -f "\$S" ] && echo "STOP FILE FOUND AFTER EXIT" >> "\$L" && exit 0
+  if [ \$RC -eq 0 ]; then DELAY=3; else DELAY=\$((DELAY * 2)); [ \$DELAY -gt 30 ] && DELAY=30; fi
+  echo "PUSH RESTART delay=\$DELAY" >> "\$L"
+  sleep \$DELAY
+done
+BASH;
 
-        $shellCmd = 'setsid bash -c ' . escapeshellarg($wrapper) . ' < /dev/null > /dev/null 2>&1 &';
+        file_put_contents($scriptFile, $script);
+        chmod($scriptFile, 0755);
+
+        $shellCmd = 'setsid bash ' . escapeshellarg($scriptFile) . ' < /dev/null > /dev/null 2>&1 &';
 
         Log::info('Push wrapper starting', [
-            'channel_id' => $channelId,
+            'channel_id'  => $channelId,
             'destination_id' => $destinationId,
-            'ffmpeg_cmd' => $ffmpegCmd,
+            'ffmpeg_cmd'  => $ffmpegCmd,
+            'script'      => $scriptFile,
         ]);
 
         exec($shellCmd);
 
-        // Wait for PID file to appear
+        // Wait up to 5s for PID file
         for ($i = 0; $i < 20; $i++) {
-            usleep(250000); // 250ms
-            if (is_file($pidFile)) {
-                break;
-            }
+            usleep(250000);
+            if (is_file($pidFile)) break;
         }
 
         if (! is_file($pidFile)) {
-            throw new \RuntimeException("Push wrapper failed to start — no PID file after 5s.");
+            throw new \RuntimeException(
+                'Push wrapper failed to start — no PID file after 5s. '
+                . 'Check: ' . $logFile
+            );
         }
 
         $pid = (int) trim((string) file_get_contents($pidFile));
-
         if ($pid <= 0) {
             throw new \RuntimeException("Push wrapper wrote invalid PID: {$pid}");
         }
 
         Cache::put($this->cacheKey($channelId, $destinationId), $pid, 86400);
 
-        // Verify the wrapper process is alive — give it up to 2s
+        // Give the wrapper up to 3s to stay alive (it should loop forever)
         $alive = false;
-        for ($i = 0; $i < 4; $i++) {
+        for ($i = 0; $i < 6; $i++) {
             usleep(500000);
             if ($this->processExists($pid)) {
                 $alive = true;
                 break;
             }
         }
+
         if (! $alive) {
-            $log = @file_get_contents($logFile);
-            throw new \RuntimeException("Push wrapper exited immediately. PID={$pid}. Log: " . substr($log ?? 'empty', 0, 1000));
+            $log = @file_get_contents($logFile) ?? 'empty';
+            throw new \RuntimeException(
+                'Push wrapper exited immediately. Log: ' . substr($log, -800)
+            );
         }
 
         Log::info('Push wrapper started', [
-            'channel_id' => $channelId,
+            'channel_id'     => $channelId,
             'destination_id' => $destinationId,
-            'wrapper_pid' => $pid,
-            'pid_file' => $pidFile,
-            'log_file' => $logFile,
+            'wrapper_pid'    => $pid,
         ]);
 
         return $pid;
