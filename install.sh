@@ -322,6 +322,14 @@ info "Writing middleware Nginx vhost…"
 
 SERVER_NAME="${DOMAIN:-_}"
 
+# Detect installed PHP-FPM version (prefer configured PHP_VER, fall back to whatever is installed)
+if [[ ! -S "/run/php/php${PHP_VER}-fpm.sock" ]]; then
+    for sock in /run/php/php*-fpm.sock; do
+        [[ -S "$sock" ]] && PHP_VER=$(echo "$sock" | grep -oP '\d+\.\d+') && break
+    done
+fi
+info "Using PHP-FPM socket: /run/php/php${PHP_VER}-fpm.sock"
+
 cat > /etc/nginx/sites-available/iptv-middleware <<NGINX
 server {
     listen ${MW_PORT};
@@ -329,42 +337,34 @@ server {
     server_name ${SERVER_NAME};
     root ${APP_DIR}/public;
     index index.php;
-
-    charset utf-8;
     client_max_body_size 0;
     fastcgi_read_timeout 300s;
 
-    # HLS segments — served directly, no PHP overhead
     location /hls/ {
         alias ${APP_DIR}/storage/app/streams/hls/;
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Cache-Control "no-cache";
         add_header Access-Control-Allow-Origin "*";
-        types {
-            application/vnd.apple.mpegurl m3u8;
-            video/mp2t ts;
-        }
+        types { application/vnd.apple.mpegurl m3u8; video/mp2t ts; }
+    }
+
+    location /storage/ {
+        alias ${APP_DIR}/storage/app/public/;
+        expires 7d;
     }
 
     location / {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    location = /favicon.ico { access_log off; log_not_found off; }
-    location = /robots.txt  { access_log off; log_not_found off; }
-
-    error_page 404 /index.php;
-
-    location ~ \.php$ {
-        try_files \$uri /index.php?\$query_string;
-        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+    # Only index.php is served via FastCGI — all virtual .php routes
+    # (get.php, player_api.php, etc.) are caught by try_files above
+    # and rewritten to index.php by Laravel's front controller.
+    location = /index.php {
         fastcgi_pass unix:/run/php/php${PHP_VER}-fpm.sock;
         fastcgi_index index.php;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param PATH_INFO \$fastcgi_path_info;
         fastcgi_buffering off;
-        fastcgi_connect_timeout 300s;
-        fastcgi_send_timeout 300s;
         fastcgi_read_timeout 300s;
     }
 
