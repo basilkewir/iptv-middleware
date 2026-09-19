@@ -495,11 +495,57 @@ class XtreamController extends Controller
         $isMulticast = str_starts_with((string) $sourceUrl, 'udp://') || str_starts_with((string) $sourceUrl, 'rtp://');
         $needsIngest = $isMulticast || (bool) ($channel->transcoding_enabled ?? false);
 
-        // Plain HTTP/HLS sources with no transcoding: redirect directly to the
-        // upstream URL. No local FFmpeg ingest needed — the player speaks HLS
-        // natively and the upstream is already a valid HLS stream.
+        // Plain HTTP/HLS sources with no transcoding: proxy the content
+        // directly to the player. A redirect() here breaks most IPTV players
+        // (TiviMate, IPTV Smarters, VLC) because they don't follow 302s on
+        // .m3u8 URLs — they treat the redirect as a stream format error.
         if (! $needsIngest && $sourceUrl) {
-            return redirect($sourceUrl);
+            $extension = strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION));
+
+            // For .m3u8 requests fetch the upstream playlist and rewrite
+            // any relative segment URLs to absolute so the player can fetch them.
+            if ($extension === 'm3u8' || $extension === '') {
+                $content = @file_get_contents($sourceUrl);
+                if ($content === false || $content === '') {
+                    return response('Service Unavailable', 503, ['Retry-After' => '3']);
+                }
+                // Rewrite relative segment/playlist URLs to absolute
+                $base = preg_replace('/\/[^\/]*$/', '/', $sourceUrl);
+                $content = preg_replace_callback(
+                    '/^(?!#)(\S+)\s*$/m',
+                    fn ($m) => (str_starts_with($m[1], 'http') ? $m[1] : $base . $m[1]),
+                    $content
+                );
+                return response($content, 200, [
+                    'Content-Type'                => 'application/vnd.apple.mpegurl',
+                    'Cache-Control'               => 'no-cache, no-store, must-revalidate',
+                    'Access-Control-Allow-Origin' => '*',
+                ]);
+            }
+
+            // For .ts segment requests proxy the bytes directly.
+            return response()->stream(function () use ($sourceUrl) {
+                $ch = curl_init($sourceUrl);
+                curl_setopt_array($ch, [
+                    CURLOPT_RETURNTRANSFER => false,
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_CONNECTTIMEOUT => 10,
+                    CURLOPT_TIMEOUT        => 0,
+                    CURLOPT_WRITEFUNCTION  => function ($curl, $data) {
+                        echo $data;
+                        if (ob_get_level()) ob_flush();
+                        flush();
+                        return strlen($data);
+                    },
+                ]);
+                curl_exec($ch);
+                curl_close($ch);
+            }, 200, [
+                'Content-Type'                => 'video/mp2t',
+                'Cache-Control'               => 'no-cache',
+                'Access-Control-Allow-Origin' => '*',
+                'X-Accel-Buffering'           => 'no',
+            ]);
         }
 
         // UDP/multicast or transcoding-enabled: route through local FFmpeg ingest.
