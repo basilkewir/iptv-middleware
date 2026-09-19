@@ -486,92 +486,11 @@ class XtreamController extends Controller
             return redirect("{$edge}/edge/live/{$username}/{$user->m3u_token}/{$channelId}.{$ext}");
         }
 
-        // ── XC-VM proxy (legacy, when enabled) ───────────────────────────────
-        if (($stream = $this->xcVmProxy('channel', $channelId, $username, $password, $streamId)) !== null) {
-            return $stream;
-        }
-
         $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
-        $isMulticast = str_starts_with((string) $sourceUrl, 'udp://') || str_starts_with((string) $sourceUrl, 'rtp://');
-        $needsIngest = $isMulticast || (bool) ($channel->transcoding_enabled ?? false);
 
-        // Plain HTTP/HLS sources with no transcoding: proxy the content
-        // directly to the player. A redirect() here breaks most IPTV players
-        // (TiviMate, IPTV Smarters, VLC) because they don't follow 302s on
-        // .m3u8 URLs — they treat the redirect as a stream format error.
-        if (! $needsIngest && $sourceUrl) {
-            $extension = strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION));
-
-            // For .m3u8 requests fetch the upstream playlist via curl (handles
-            // redirects, auth headers, etc.) and rewrite relative segment URLs
-            // to absolute so the player can fetch them directly from upstream.
-            if ($extension === 'm3u8' || $extension === '') {
-                $ch = curl_init($sourceUrl);
-                curl_setopt_array($ch, [
-                    CURLOPT_RETURNTRANSFER => true,
-                    CURLOPT_FOLLOWLOCATION => true,
-                    CURLOPT_MAXREDIRS      => 5,
-                    CURLOPT_CONNECTTIMEOUT => 10,
-                    CURLOPT_TIMEOUT        => 15,
-                    CURLOPT_USERAGENT      => 'VLC/3.0.16 LibVLC/3.0.16',
-                ]);
-                $content  = curl_exec($ch);
-                $finalUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-                curl_close($ch);
-
-                if (! $content) {
-                    return response('Service Unavailable', 503, ['Retry-After' => '3']);
-                }
-
-                // Rewrite relative segment/playlist URLs to absolute using
-                // the final URL after redirects as the base.
-                $base = preg_replace('/\/[^\/]*$/', '/', $finalUrl);
-                $content = preg_replace_callback(
-                    '/^(?!#)(\S+)\s*$/m',
-                    fn ($m) => (preg_match('#^https?://#', $m[1]) ? $m[1] : $base . ltrim($m[1], '/')),
-                    $content
-                );
-
-                return response($content, 200, [
-                    'Content-Type'                => 'application/vnd.apple.mpegurl',
-                    'Cache-Control'               => 'no-cache, no-store, must-revalidate',
-                    'Access-Control-Allow-Origin' => '*',
-                ]);
-            }
-
-            // For .ts segment requests proxy the bytes directly.
-            return response()->stream(function () use ($sourceUrl) {
-                $ch = curl_init($sourceUrl);
-                curl_setopt_array($ch, [
-                    CURLOPT_RETURNTRANSFER => false,
-                    CURLOPT_FOLLOWLOCATION => true,
-                    CURLOPT_CONNECTTIMEOUT => 10,
-                    CURLOPT_TIMEOUT        => 0,
-                    CURLOPT_USERAGENT      => 'VLC/3.0.16 LibVLC/3.0.16',
-                    CURLOPT_WRITEFUNCTION  => function ($curl, $data) {
-                        echo $data;
-                        if (ob_get_level()) ob_flush();
-                        flush();
-                        return strlen($data);
-                    },
-                ]);
-                curl_exec($ch);
-                curl_close($ch);
-            }, 200, [
-                'Content-Type'                => 'video/mp2t',
-                'Cache-Control'               => 'no-cache',
-                'Access-Control-Allow-Origin' => '*',
-                'X-Accel-Buffering'           => 'no',
-            ]);
-        }
-
-        // UDP/multicast or transcoding-enabled: route through local FFmpeg ingest.
+        // All channels are ingested locally by ffmpeg and served from /hls/.
+        // Players only ever talk to this Streambox — never to the upstream source.
         $this->ensureHlsStream($channelId, $sourceUrl, $channel->program_number, $channel->local_address, (bool) ($channel->transcoding_enabled ?? false));
-
-        // Kick off a background XC-VM sync so future requests go through XC-VM.
-        if (\App\Services\XcVm\XcVmPlayerProxy::enabled()) {
-            dispatch(new \App\Jobs\XcVmSyncJob('channel', $channelId))->afterResponse();
-        }
 
         // Ingest-based path (UDP/multicast or transcoding): serve local HLS.
         $extension = strtolower(pathinfo($streamId, PATHINFO_EXTENSION));
@@ -778,11 +697,7 @@ class XtreamController extends Controller
                     'pid' => $pid,
                 ]);
 
-                // Invalidate the UDP→XC-VM bridge cooldown so the next
-                // scheduler tick re-pushes the fresh HLS URL to XC-VM.
-                if (config('xcvm.enabled') && config('xcvm.proxy_player')) {
-                    app(\App\Services\XcVm\UdpXcVmBridge::class)->invalidate($channelId);
-                }
+
             }
         } finally {
             $lock->release();
@@ -1149,12 +1064,6 @@ class XtreamController extends Controller
         $vodId = (int) $streamId;
         $vod = VODContent::where('id', $vodId)->where('is_active', true)->firstOrFail();
 
-        // XC-VM proxy (falls back to local file serving below when the engine
-        // is unreachable or the movie is not mapped yet).
-        if (($stream = $this->xcVmProxy('vod', $vodId, $username, $password, $streamId)) !== null) {
-            return $stream;
-        }
-
         $media = $vod->vodMedia()->first();
         if (! $media?->stream_url) abort(404);
 
@@ -1171,37 +1080,9 @@ class XtreamController extends Controller
         $episodeId = (int) $streamId;
         $media = VODMedia::where('id', $episodeId)->where('is_available', true)->firstOrFail();
 
-        // XC-VM proxy (falls back to local file serving below when the engine
-        // is unreachable or the episode is not mapped yet).
-        if (($stream = $this->xcVmProxy('episode', $episodeId, $username, $password, $streamId)) !== null) {
-            return $stream;
-        }
-
         if (! $media->stream_url) abort(404);
 
         return $this->serveVodFile($media->stream_url);
-    }
-
-    /**
-     * Attempt to serve {$type:$localId} through the XC-VM player proxy.
-     * Returns a response when proxying succeeded, or null so the caller can
-     * fall back to the local pipeline.
-     */
-    private function xcVmProxy(string $type, int $localId, string $username, string $password, string $streamId): mixed
-    {
-        if (! \App\Services\XcVm\XcVmPlayerProxy::enabled()) {
-            return null;
-        }
-
-        $ext = strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION));
-        $suffix = $ext !== '' ? ".{$ext}" : null;
-
-        if ($type === 'channel' && $suffix === null) {
-            $suffix = '.m3u8';
-        }
-
-        return app(\App\Services\XcVm\XcVmPlayerProxy::class)
-            ->tryStream($type, $localId, $username, $password, $suffix);
     }
 
     private function serveVodFile(string $streamUrl)
