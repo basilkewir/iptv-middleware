@@ -75,11 +75,16 @@ fi
 info "Updating apt and installing system packages…"
 export DEBIAN_FRONTEND=noninteractive
 
-# Add Ondřej Surý PHP PPA (needed on Ubuntu 24.04+ for specific PHP versions)
-if ! grep -r 'ondrej/php' /etc/apt/sources.list.d/ &>/dev/null; then
-    apt-get install -y -qq software-properties-common
-    add-apt-repository -y ppa:ondrej/php
+# Add Sury PHP repo (PPA doesn't support Ubuntu 26.04+)
+if ! grep -r 'packages.sury.org/php' /etc/apt/sources.list.d/ &>/dev/null; then
+    apt-get install -y -qq curl ca-certificates
+    curl -sSLo /tmp/php.gpg https://packages.sury.org/php/apt.gpg
+    gpg --dearmor < /tmp/php.gpg > /usr/share/keyrings/sury-php.gpg
+    echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" \
+        > /etc/apt/sources.list.d/sury-php.list
 fi
+# Remove stale Ondrej PPA if present
+rm -f /etc/apt/sources.list.d/ondrej-ubuntu-php-*.list 2>/dev/null || true
 
 apt-get update -qq
 apt-get install -y -qq \
