@@ -60,7 +60,7 @@ if [[ -n "$REMOTE_HOST" ]]; then
     SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15 -p ${REMOTE_PORT}"
 
     info "Uploading deploy script to ${REMOTE_USER}@${REMOTE_HOST}..."
-    sshpass -p "$REMOTE_PASS" scp $SSH_OPTS \
+    sshpass -p "$REMOTE_PASS" scp -P "${REMOTE_PORT}" -o StrictHostKeyChecking=no -o ConnectTimeout=15 \
         "${BASH_SOURCE[0]}" \
         "${REMOTE_USER}@${REMOTE_HOST}:/tmp/deploy-update.sh"
 
