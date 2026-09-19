@@ -270,15 +270,15 @@ class ChannelPushService
         $wrapper = 'echo $$ > ' . escapeshellarg($pidFile) . '; '
             . 'L=' . escapeshellarg($logFile) . '; '
             . 'S=' . escapeshellarg($stopFile) . '; '
-            . 'echo "PUSH WRAPPER START channel=' . $channelId . ' dest=' . $destinationId . ' pid=$$ $(date +%%s)" >> "$L"; '
-            . 'trap \'echo "PUSH WRAPPER EXIT rc=$? $(date +%%s)" >> "$L"; rm -f "$S"; exit 0\' EXIT INT TERM; '
+            . 'echo "PUSH WRAPPER START channel=' . $channelId . ' dest=' . $destinationId . ' pid=$$ $(date +%s)" >> "$L"; '
+            . 'trap \'echo "PUSH WRAPPER EXIT $(date +%s)" >> "$L"; exit 0\' EXIT INT TERM; '
             . 'DELAY=3; '
             . 'while true; do '
             .   '[ -f "$S" ] && echo "STOP FILE FOUND" >> "$L" && exit 0; '
-            .   'echo "PUSH START $(date +%%s)" >> "$L"; '
+            .   'echo "PUSH START $(date +%s)" >> "$L"; '
             .   $ffmpegCmd . ' >> "$L" 2>&1; '
             .   'RC=$?; '
-            .   'echo "PUSH EXIT rc=$RC $(date +%%s)" >> "$L"; '
+            .   'echo "PUSH EXIT rc=$RC $(date +%s)" >> "$L"; '
             .   '[ -f "$S" ] && echo "STOP FILE FOUND AFTER EXIT" >> "$L" && exit 0; '
             .   'if [ $RC -eq 0 ]; then DELAY=3; else DELAY=$((DELAY * 2)); [ $DELAY -gt 30 ] && DELAY=30; fi; '
             .   'echo "PUSH RESTART delay=$DELAY" >> "$L"; '
@@ -315,9 +315,16 @@ class ChannelPushService
 
         Cache::put($this->cacheKey($channelId, $destinationId), $pid, 86400);
 
-        // Verify the wrapper process is alive
-        usleep(500000);
-        if (! $this->processExists($pid)) {
+        // Verify the wrapper process is alive — give it up to 2s
+        $alive = false;
+        for ($i = 0; $i < 4; $i++) {
+            usleep(500000);
+            if ($this->processExists($pid)) {
+                $alive = true;
+                break;
+            }
+        }
+        if (! $alive) {
             $log = @file_get_contents($logFile);
             throw new \RuntimeException("Push wrapper exited immediately. PID={$pid}. Log: " . substr($log ?? 'empty', 0, 1000));
         }
@@ -372,6 +379,10 @@ class ChannelPushService
 
     private function processExists(int $pid): bool
     {
-        return @file_exists("/proc/{$pid}") || exec("kill -0 {$pid} 2>/dev/null") === '';
+        if (@file_exists("/proc/{$pid}")) {
+            return true;
+        }
+        exec("kill -0 {$pid} 2>/dev/null", $out, $rc);
+        return $rc === 0;
     }
 }
