@@ -739,7 +739,13 @@ const api = async (url, method = 'GET', body = null) => {
   if (body) opts.body = JSON.stringify(body)
   const res = await fetch(url, opts)
   const data = await res.json()
-  if (!res.ok) throw new Error(data.message || 'Request failed.')
+  if (!res.ok) {
+    // Collect all validation field errors into one readable message
+    const fieldErrors = data.errors
+      ? Object.values(data.errors).flat().join(' | ')
+      : null
+    throw new Error(fieldErrors || data.message || `HTTP ${res.status}`)
+  }
   return data
 }
 
