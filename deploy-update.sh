@@ -165,7 +165,21 @@ chown -R www-data:www-data "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
 chmod -R 775 "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
 
 # =============================================================================
-# 10. Graceful reload — zero downtime
+# 10. Re-sync to XC-VM (if enabled) — preserves existing mappings
+# =============================================================================
+XCVM_ENABLED=$(grep -E "^XC_VM_ENABLED=" "$APP_DIR/.env" | cut -d= -f2 | tr -d '"' || echo "false")
+if [[ "$XCVM_ENABLED" == "true" ]]; then
+    info "Re-syncing to XC-VM (preserves existing channel numbers, users, ports)…"
+    cd "$APP_DIR"
+    php artisan xcvm:sync --no-progress 2>&1 | tail -10 || warn "XC-VM sync had issues — re-run: php artisan xcvm:sync"
+    php artisan xcvm:sync-udp 2>&1 | tail -5 || true
+    success "XC-VM re-sync complete."
+else
+    success "XC-VM not enabled — skipping sync."
+fi
+
+# =============================================================================
+# 11. Graceful reload — zero downtime
 # =============================================================================
 info "Reloading services…"
 systemctl reload "php${PHP_VER}-fpm" 2>/dev/null || systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true

@@ -30,6 +30,8 @@ use App\Models\ContentCategory;
 use App\Models\User;
 use App\Models\VODContent;
 use App\Models\VODMedia;
+use App\Models\AdminChannel\AdminChannel;
+use App\Observers\XcVm\AdminChannelObserver;
 use App\Observers\XcVm\BouquetObserver;
 use App\Observers\XcVm\ChannelObserver;
 use App\Observers\XcVm\ContentCategoryObserver;
@@ -60,6 +62,7 @@ class AppServiceProvider extends ServiceProvider
 
         if (config('xcvm.enabled')) {
             Channel::observe(ChannelObserver::class);
+            AdminChannel::observe(AdminChannelObserver::class);
             ContentCategory::observe(ContentCategoryObserver::class);
             Bouquet::observe(BouquetObserver::class);
             User::observe(UserObserver::class);

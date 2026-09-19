@@ -4,6 +4,7 @@ namespace App\Services\XcVm;
 
 use App\Services\XcVm\Exceptions\XcVmException;
 use App\Services\XcVm\Syncers\AbstractSyncer;
+use App\Services\XcVm\Syncers\AdminChannelSyncer;
 use App\Services\XcVm\Syncers\BouquetSyncer;
 use App\Services\XcVm\Syncers\CategorySyncer;
 use App\Services\XcVm\Syncers\ChannelSyncer;
@@ -42,6 +43,7 @@ class XcVmSyncService
         $stages = [
             'category' => fn () => $this->categorySyncer(),
             'channel' => fn () => $this->channelSyncer(),
+            'admin_channel' => fn () => $this->adminChannelSyncer(),
             'bouquet' => fn () => $this->bouquetSyncer(),
             'user' => fn () => $this->lineSyncer(),
             'vod' => fn () => $this->vodSyncer(),
@@ -115,6 +117,7 @@ class XcVmSyncService
         return [
             'category' => CategorySyncer::class,
             'channel' => ChannelSyncer::class,
+            'admin_channel' => AdminChannelSyncer::class,
             'bouquet' => BouquetSyncer::class,
             'user' => LineSyncer::class,
             'line' => LineSyncer::class,
@@ -141,6 +144,11 @@ class XcVmSyncService
     protected function channelSyncer(): ChannelSyncer
     {
         return new ChannelSyncer($this->client);
+    }
+
+    protected function adminChannelSyncer(): AdminChannelSyncer
+    {
+        return new AdminChannelSyncer($this->client);
     }
 
     protected function bouquetSyncer(): BouquetSyncer

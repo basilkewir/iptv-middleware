@@ -1,36 +1,45 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Services\XcVm\Syncers;
 
-use App\Models\Channel;
+use App\Http\Controllers\XtreamController;
+use App\Models\AdminChannel\AdminChannel;
 use App\Models\XcVmMapping;
 use App\Services\XcVm\SyncReport;
 use App\Services\XcVm\SyncResult;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 use Throwable;
 
-class ChannelSyncer extends AbstractSyncer
+/**
+ * Sync "My Channels" (AdminChannels) to XC-VM as live streams.
+ *
+ * Each admin channel gets a stream_id of (admin_channel.id + ADMIN_CHANNEL_OFFSET)
+ * so it coexists with regular channel IDs without collisions.
+ *
+ * Only channels that are actively broadcasting are started on XC-VM;
+ * others are created/stopped so they appear in the panel but don't ingest.
+ */
+class AdminChannelSyncer extends AbstractSyncer
 {
     public function entityType(): string
     {
-        return 'channel';
+        return 'admin_channel';
     }
 
     public function syncOne(int|Model $entity): SyncResult
     {
-        $channel = $entity instanceof Channel ? $entity : Channel::find((int) $entity);
+        $channel = $entity instanceof AdminChannel ? $entity : AdminChannel::find((int) $entity);
         if (! $channel) {
-            return $this->skipped((int) $entity, 'channel not found');
+            return $this->skipped((int) $entity, 'admin_channel not found');
         }
 
-        $label = (string) $channel->name;
+        $label = (string) $channel->channel_name;
 
         try {
-            // For UDP/RTP multicast sources the middleware reads the stream
-            // via its own FFmpeg ingest and exposes it as a local HLS URL.
-            // XC-VM cannot join a multicast group directly, so we give it the
-            // loopback HLS URL instead of the raw udp:// address.
             $streamSource = $this->resolveStreamSource($channel);
 
             $payload = [
@@ -42,22 +51,20 @@ class ChannelSyncer extends AbstractSyncer
                 'notes'               => mb_substr((string) $channel->description, 0, 255),
             ];
 
-            // Attach the XC-VM category id when the channel belongs to a
-            // mapped, active, live category.
-            $category = $channel->categories()->first();
-            if ($category && $category->is_active && $category->category_type === 'live') {
-                $remoteCategoryId = $this->categoryRemoteId((int) $category->id);
-                if ($remoteCategoryId !== null) {
-                    $payload['category_id'] = $remoteCategoryId;
-                }
-            }
+            // XC-VM stream id uses the offset so it doesn't collide with regular channels.
+            $xcVmStreamId = (int) $channel->id + XtreamController::ADMIN_CHANNEL_OFFSET;
 
+            // Check if we already have a mapping for this admin channel.
             $remoteId = $this->remoteId((int) $channel->id);
 
             if ($remoteId !== null) {
+                // Update existing stream — use the real XC-VM id (not the offset id).
                 $this->client->editStream($remoteId, $payload);
                 $action = SyncResult::UPDATED;
             } else {
+                // Create a new stream in XC-VM with the offset-based id.
+                // XC-VM create_stream returns the id it assigned — we store
+                // that as the remote id but track the offset id in metadata.
                 $remoteId = $this->client->createStream($payload);
                 $action = SyncResult::CREATED;
 
@@ -66,8 +73,12 @@ class ChannelSyncer extends AbstractSyncer
                 }
             }
 
-            // Toggle remote stream state so enabled channels are ingested.
-            if ($channel->is_active) {
+            // Only start the stream on XC-VM if the channel is actively broadcasting.
+            $isLive = $channel->is_active
+                && $channel->broadcast_status === 'live'
+                && $channel->is_approved;
+
+            if ($isLive) {
                 if (config('xcvm.start_streams_on_sync', true)) {
                     $this->client->startStream($remoteId);
                 }
@@ -77,6 +88,8 @@ class ChannelSyncer extends AbstractSyncer
 
             $this->remember((int) $channel->id, $remoteId, [
                 'stream_source' => $streamSource,
+                'xc_vm_stream_id' => $xcVmStreamId,
+                'broadcast_status' => $channel->broadcast_status,
             ]);
 
             return new SyncResult($this->entityType(), (int) $channel->id, $action, $remoteId, $label);
@@ -86,32 +99,19 @@ class ChannelSyncer extends AbstractSyncer
     }
 
     /**
-     * Resolve the stream source URL to push to XC-VM.
+     * Resolve the HLS stream source URL for an admin channel.
      *
-     * UDP/RTP multicast channels are read by the middleware's own FFmpeg ingest
-     * and fanned out as per-channel HLS playlists under storage/app/streams/hls/.
-     * XC-VM cannot join a multicast group directly, so we give it the loopback
-     * HLS URL (http://127.0.0.1:{MW_PORT}/hls/{id}/playlist.m3u8) instead of
-     * the raw udp:// address. The middleware's Nginx serves those segments
-     * directly from disk with no PHP overhead.
+     * Active broadcast channels produce HLS via MyChannelHlsService at:
+     *   storage/app/streams/hls/admin-channel-{slug}/index.m3u8
      *
-     * All other source types (HTTP, HLS, RTMP, YouTube-resolved) are passed
-     * through unchanged — XC-VM handles them natively.
+     * XC-VM fetches this over loopback via Nginx.
      */
-    private function resolveStreamSource(Channel $channel): string
+    private function resolveStreamSource(AdminChannel $channel): string
     {
-        $raw = (string) ($channel->getSourceUrlAttribute() ?? '');
+        $port = (int) config('stream_server_port', config('xcvm.proxy_port', 25460));
+        $slug = $channel->channel_slug ?? "admin-channel-{$channel->id}";
 
-        if (str_starts_with($raw, 'udp://') || str_starts_with($raw, 'rtp://')) {
-            // Build the loopback HLS URL that the middleware's Nginx serves.
-            // XC-VM fetches this over 127.0.0.1 so it never leaves the server.
-            // Use 127.0.0.1 explicitly (not config('app.url')) so the URL always
-            // resolves over loopback even if APP_URL points to a public IP.
-            $port = (int) config('stream_server_port', config('xcvm.proxy_port', 25460));
-            return "http://127.0.0.1:{$port}/hls/{$channel->id}/playlist.m3u8";
-        }
-
-        return $raw;
+        return "http://127.0.0.1:{$port}/hls/{$slug}/index.m3u8";
     }
 
     public function delete(int $entityId): SyncResult
@@ -137,7 +137,7 @@ class ChannelSyncer extends AbstractSyncer
 
     public function queue(): Collection
     {
-        return Channel::query()
+        return AdminChannel::query()
             ->pluck('id')
             ->map(fn ($id) => (int) $id);
     }
@@ -147,10 +147,5 @@ class ChannelSyncer extends AbstractSyncer
         $results = $this->runQueue($progress, config('xcvm.prune_remote', false));
 
         return $this->report($results);
-    }
-
-    private function categoryRemoteId(int $categoryId): ?int
-    {
-        return XcVmMapping::lookup('category', $categoryId);
     }
 }

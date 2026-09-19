@@ -29,8 +29,8 @@ XCVM_DB_PASS="${XCVM_DB_PASS:-$(openssl rand -hex 16)}"
 PHP_VER="8.2"
 NODE_VER="20"
 XCVM_REPO="https://github.com/Vateron-Media/XC_VM.git"
-XCVM_ACCESS_CODE="$(openssl rand -hex 8)"
-XCVM_API_KEY="$(openssl rand -hex 24)"
+XCVM_ACCESS_CODE="${XCVM_ACCESS_CODE:-$(openssl rand -hex 8)}"
+XCVM_API_KEY="${XCVM_API_KEY:-$(openssl rand -hex 24)}"
 
 # ── Colour helpers ─────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -42,12 +42,15 @@ die()     { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 # ── Argument parsing ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --domain)       DOMAIN="$2";         shift 2 ;;
-        --port)         MW_PORT="$2";         shift 2 ;;
-        --app-dir)      APP_DIR="$2";         shift 2 ;;
-        --admin-user)   ADMIN_USERNAME="$2";  shift 2 ;;
-        --admin-pass)   ADMIN_PASSWORD="$2";  shift 2 ;;
-        --admin-email)  ADMIN_EMAIL="$2";     shift 2 ;;
+        --domain)           DOMAIN="$2";              shift 2 ;;
+        --port)             MW_PORT="$2";              shift 2 ;;
+        --app-dir)          APP_DIR="$2";              shift 2 ;;
+        --admin-user)       ADMIN_USERNAME="$2";       shift 2 ;;
+        --admin-pass)       ADMIN_PASSWORD="$2";       shift 2 ;;
+        --admin-email)      ADMIN_EMAIL="$2";          shift 2 ;;
+        --xcvm-admin-code)  XCVM_ACCESS_CODE="$2";     shift 2 ;;
+        --xcvm-api-key)     XCVM_API_KEY="$2";         shift 2 ;;
+        --xcvm-port)        XCVM_PORT="$2";            shift 2 ;;
         *) warn "Unknown argument: $1"; shift ;;
     esac
 done
