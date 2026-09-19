@@ -202,8 +202,7 @@ fi
 # =============================================================================
 info "Installing middleware PHP dependencies…"
 cd "$APP_DIR"
-sudo -u www-data composer install --no-dev --optimize-autoloader --no-interaction 2>&1 | tail -5 || \
-    composer install --no-dev --optimize-autoloader --no-interaction 2>&1 | tail -5
+COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader --no-interaction 2>&1 | tail -5
 
 info "Installing JS dependencies and building assets…"
 npm ci --silent 2>/dev/null || npm install --silent
