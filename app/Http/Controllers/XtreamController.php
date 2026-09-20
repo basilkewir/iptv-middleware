@@ -12,8 +12,6 @@ use App\Models\VODMedia;
 use App\Services\StreamingService\ConnectionLimiter;
 use App\Services\StreamingService\EdgeDispatcher;
 use App\Services\StreamingService\MulticastIngestService;
-use App\Services\XcVm\XcVmPlayerProxy;
-use App\Services\XcVm\XcVmStreamBridge;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
@@ -377,17 +375,11 @@ class XtreamController extends Controller
     }
 
     /**
-     * HTTP TS (MPEG-TS over HTTP) continuous stream endpoint.
-     * Faster channel zap than HLS — no chunk boundary wait.
-     * Proxies the upstream source directly to the client.
-     */
-    /**
      * HTTP-TS (MPEG-TS over HTTP) endpoint — faster channel zap than HLS.
      *
      * Reads .ts segments sequentially from the local ingest directory and
      * pipes them as a continuous MPEG-TS byte stream. The source is ingested
      * exactly once by ffmpeg; all viewers share the same local segment cache.
-     * No connection to the upstream source is made from this method.
      */
     public function streamTs(Request $request, $username, $password, $streamId)
     {
@@ -404,14 +396,6 @@ class XtreamController extends Controller
             abort(429, 'Connection limit reached');
         }
 
-        // Try XC-VM player proxy first for TS delivery
-        $proxy = app(XcVmPlayerProxy::class);
-        $streamed = $proxy->tryStream('channel', $channelId, $username, $password, '.ts');
-        if ($streamed !== null) {
-            return $streamed;
-        }
-
-        // Fallback to local HLS segment piping
         $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
 
         $this->ensureHlsStream(
@@ -424,7 +408,6 @@ class XtreamController extends Controller
 
         $segDir = storage_path("app/streams/hls/{$channelId}");
 
-        // Wait up to 6s for the first segment to appear (cold start).
         for ($i = 0; $i < 12; $i++) {
             $segs = glob($segDir . '/segment_*.ts') ?: [];
             if (! empty($segs)) break;
@@ -474,26 +457,27 @@ class XtreamController extends Controller
     /**
      * Control-plane entry point for live streams (Xtream Codes protocol).
      *
-     * Responsibilities (control plane only — no data transfer here):
+     * Architecture (XC-VM-style split stream):
      *   1. Authenticate via Redis token cache (< 1ms, no MySQL hit on warm cache)
      *   2. Enforce per-user concurrent connection limit
-     *   3. Route through XC-VM player proxy (primary streaming engine)
-     *   4. Return 503 when XC-VM is unreachable
+     *   3. Ensure persistent background FFmpeg ingest is running (one per channel)
+     *   4. Serve HLS via X-Accel-Redirect (Nginx delivers from RAM, PHP authenticates)
      *
-     * XC-VM is the sole streaming engine. The middleware authenticates
-     * every request and proxies the stream through XC-VM's player endpoints.
-     * No local ffmpeg ingest is started from this method — XC-VM handles
-     * all stream pulling and delivery.
+     * The middleware runs FFmpeg ONCE per channel in a background process.
+     * Nginx handles all client connections and stream duplication. No FFmpeg
+     * is ever spawned per-user — this is the one-to-many architecture.
+     *
+     * Unlike a 302 redirect, X-Accel-Redirect keeps every request routed through
+     * PHP for authentication. The player never gets a direct path to the raw
+     * /hls/ directory, so auth cannot be bypassed after the initial request.
      */
-    public function streamLive(Request $request, $username, $password, $streamId)
+    public function streamLive(Request $request, $username, $password, $streamId, ?string $file = null)
     {
         // ── 1. Auth (Redis-first, < 1ms on warm cache) ───────────────────────
         $user = User::where('username', $username)->first();
         if (! $user || ! $user->is_active) abort(401);
         if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) abort(401);
 
-        // Populate Redis token cache so subsequent HLS playlist refreshes
-        // (every 2–6s per player) bypass MySQL entirely.
         $cacheKey = 'auth:token:' . md5($username . ':' . $password);
         if (! Cache::has($cacheKey)) {
             Cache::put($cacheKey, $user->id, 300);
@@ -508,56 +492,114 @@ class XtreamController extends Controller
 
         $rawId = (int) $streamId;
 
-        // ── 3. Route through XC-VM ────────────────────────────────────────────
-        $proxy = app(XcVmPlayerProxy::class);
+        // ── 3. File request (playlist.m3u8 or segment_XXXX.ts) ───────────────
+        // After the initial request, the player fetches playlists and segments
+        // via this route. Each request is authenticated, then served via
+        // X-Accel-Redirect so Nginx handles the I/O at near-zero CPU cost.
+        if ($file !== null) {
+            return $this->serveHlsFile($rawId, $file);
+        }
 
+        // ── 4. Initial request — ensure ingest is running, serve playlist ─────
         // Admin / My-Channel streams
         if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
             $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
+            $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
 
-            $streamed = $proxy->tryStream(
-                'admin_channel',
-                $adminId,
-                $username,
-                $password,
-                strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION)) !== 'm3u8' ? '.m3u8' : null
-            );
-
-            if ($streamed !== null) {
-                return $streamed;
-            }
-
-            // XC-VM unavailable — serve the local HLS output directly.
-            $admin = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
-            return redirect(config('app.url') . "/hls/admin-channel-{$admin->channel_slug}/index.m3u8");
+            $slug = $admin->channel_slug ?? "admin-channel-{$adminId}";
+            return $this->serveHlsFile($slug, 'index.m3u8');
         }
 
         // Regular channel streams
         $channelId = $rawId;
         $channel   = Channel::where('id', $channelId)->where('is_active', true)->firstOrFail();
 
-        $streamed = $proxy->tryStream(
-            'channel',
+        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+
+        // Start persistent background FFmpeg ingest (one process per channel).
+        // This is the core of the XC-VM architecture: FFmpeg runs ONCE and
+        // writes HLS segments to disk; Nginx serves them to all viewers.
+        $this->ensureHlsStream(
             $channelId,
-            $username,
-            $password,
-            strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION)) !== 'm3u8' ? '.m3u8' : null
+            $sourceUrl,
+            $channel->program_number,
+            $channel->local_address,
+            (bool) ($channel->transcoding_enabled ?? false)
         );
 
-        if ($streamed !== null) {
-            return $streamed;
+        return $this->serveHlsFile($channelId, 'playlist.m3u8');
+    }
+
+    /**
+     * Serve an HLS file (playlist or segment) via X-Accel-Redirect.
+     *
+     * Authenticates every request, then hands off to Nginx for zero-CPU
+     * file delivery from the tmpfs RAM disk. Handles the ingest-restart
+     * gap gracefully: missing playlists serve stale cache (503 + Retry-After
+     * as fallback), missing segments return 204 (keeps players polling).
+     */
+    private function serveHlsFile(int|string $channelId, string $file): \Symfony\Component\HttpFoundation\Response
+    {
+        $file = basename($file);
+        $ext  = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+
+        if (! in_array($ext, ['m3u8', 'ts'], true)) {
+            abort(403, 'File type not allowed');
         }
 
-        // ── 4. XC-VM unavailable — return 503 ────────────────────────────────
-        // XC-VM is the primary streaming engine. When it's unreachable we
-        // return 503 with Retry-After so players keep retrying instead of
-        // showing a permanent error.
-        Log::warning('XC-VM unavailable for live stream, returning 503', [
-            'channel_id' => $channelId,
-            'user_id'    => $user->id,
-        ]);
+        $streamDir = storage_path("app/streams/hls/{$channelId}");
+        $absolute  = realpath("{$streamDir}/{$file}");
 
-        abort(503, 'Streaming engine temporarily unavailable');
+        // Path traversal check
+        if ($absolute !== false && ! str_starts_with($absolute, realpath($streamDir))) {
+            abort(403, 'Invalid stream path');
+        }
+
+        if ($absolute === false || ! is_file($absolute)) {
+            // File missing — ingest may be restarting.
+            if ($ext === 'm3u8') {
+                $cacheKey = "hls:stale:{$channelId}:playlist";
+                $cached   = Cache::get($cacheKey);
+
+                if ($cached !== null) {
+                    return response($cached, 200, [
+                        'Content-Type'              => 'application/vnd.apple.mpegurl',
+                        'Cache-Control'             => 'no-cache, no-store, must-revalidate',
+                        'Access-Control-Allow-Origin'=> '*',
+                        'X-HLS-Stale'               => '1',
+                    ]);
+                }
+
+                return response('Service Unavailable', 503, [
+                    'Retry-After'                => '3',
+                    'Cache-Control'              => 'no-cache, no-store, must-revalidate',
+                    'Access-Control-Allow-Origin'=> '*',
+                ]);
+            }
+
+            // .ts missing — return 204 so the player keeps polling.
+            return response('', 204, [
+                'Cache-Control'              => 'no-cache, no-store, must-revalidate',
+                'Access-Control-Allow-Origin'=> '*',
+            ]);
+        }
+
+        // Cache successful playlists for stale serving during restarts
+        if ($ext === 'm3u8') {
+            $content = file_get_contents($absolute);
+            if ($content !== false && strlen($content) > 10) {
+                Cache::put("hls:stale:{$channelId}:playlist", $content, 30);
+            }
+        }
+
+        // Hand off to Nginx for zero-CPU file delivery from RAM disk.
+        // Nginx reads the file asynchronously without blocking PHP-FPM.
+        return response('', 200, [
+            'Content-Type'              => $ext === 'm3u8' ? 'application/vnd.apple.mpegurl' : 'video/mp2t',
+            'Cache-Control'             => 'no-cache, no-store, must-revalidate',
+            'Access-Control-Allow-Origin'=> '*',
+            'X-Accel-Redirect'          => "/internal_hls/{$channelId}/{$file}",
+        ]);
     }
 
     public function ensureHlsStream(int $channelId, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false): void
@@ -964,8 +1006,8 @@ class XtreamController extends Controller
                 ? 'NEW_URL=$(cd ' . base_path() . ' && php artisan youtube:refresh-url ' . $channelId . ' 2>/dev/null); if [ $? -eq 0 ] && [ -n "$NEW_URL" ]; then SRC_URL="$NEW_URL"; echo "YOUTUBE REFRESHED $SRC_URL" >> "$L"; fi; '
                 : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
-            .   ($isMulticast ? '-hls_time 4 -hls_list_size 5 ' : '-hls_time 4 -hls_list_size 6 ')
-            .   '-hls_flags delete_segments+temp_file+independent_segments+append_list '
+            .   ($isMulticast ? '-hls_time 2 -hls_list_size 6 ' : '-hls_time 2 -hls_list_size 8 ')
+            .   '-hls_flags delete_segments+temp_file+independent_segments+append_list+split_by_time+discont_start '
             .   '-muxdelay 0 -muxpreload 0 '
             .   '-hls_segment_filename "$ODIR"/segment_%%04d.ts '
             .   '"$ODIR"/playlist.m3u8 2>>"$L"; '
@@ -1047,14 +1089,6 @@ class XtreamController extends Controller
 
         $vodId = (int) $streamId;
 
-        // Try XC-VM player proxy first
-        $proxy = app(XcVmPlayerProxy::class);
-        $streamed = $proxy->tryStream('vod', $vodId, $username, $password);
-        if ($streamed !== null) {
-            return $streamed;
-        }
-
-        // Fallback to local file serving
         $vod = VODContent::where('id', $vodId)->where('is_active', true)->firstOrFail();
         $media = $vod->vodMedia()->first();
         if (! $media?->stream_url) abort(404);
@@ -1071,14 +1105,6 @@ class XtreamController extends Controller
 
         $episodeId = (int) $streamId;
 
-        // Try XC-VM player proxy first
-        $proxy = app(XcVmPlayerProxy::class);
-        $streamed = $proxy->tryStream('series', $episodeId, $username, $password);
-        if ($streamed !== null) {
-            return $streamed;
-        }
-
-        // Fallback to local file serving
         $media = VODMedia::where('id', $episodeId)->where('is_available', true)->firstOrFail();
         if (! $media->stream_url) abort(404);
 
@@ -1087,10 +1113,14 @@ class XtreamController extends Controller
 
     private function serveVodFile(string $streamUrl)
     {
+        // Local file — serve via X-Accel-Redirect so Nginx handles the I/O
+        // (range requests, keep-alive) without tying up a PHP-FPM worker.
         if (str_starts_with($streamUrl, '/storage/')) {
-            $diskPath = storage_path('app/public/' . substr($streamUrl, strlen('/storage/')));
+            $relativePath = substr($streamUrl, strlen('/storage/'));
+            $diskPath = storage_path('app/public/' . $relativePath);
             if (file_exists($diskPath)) {
-                $mimeMap = [
+                $ext  = strtolower(pathinfo($diskPath, PATHINFO_EXTENSION));
+                $mime = [
                     'mp4'  => 'video/mp4',
                     'mkv'  => 'video/x-matroska',
                     'avi'  => 'video/x-msvideo',
@@ -1098,77 +1128,35 @@ class XtreamController extends Controller
                     'webm' => 'video/webm',
                     'flv'  => 'video/x-flv',
                     'wmv'  => 'video/x-ms-wmv',
-                ];
-                $ext = strtolower(pathinfo($diskPath, PATHINFO_EXTENSION));
-                $mime = $mimeMap[$ext] ?? mime_content_type($diskPath) ?: 'application/octet-stream';
+                ][$ext] ?? 'application/octet-stream';
 
-                return response()->file($diskPath, [
-                    'Content-Type'  => $mime,
-                    'Accept-Ranges' => 'bytes',
+                return response('', 200, [
+                    'Content-Type'               => $mime,
+                    'Accept-Ranges'              => 'bytes',
+                    'Cache-Control'              => 'no-cache',
+                    'Access-Control-Allow-Origin'=> '*',
+                    'X-Accel-Redirect'           => '/internal_local_vod/' . $relativePath,
                 ]);
             }
         }
 
-        return $this->proxyExternalUrl($streamUrl);
-    }
+        // Remote URL — hand off to Nginx proxy_pass via structured headers.
+        // PHP terminates in <5ms; Nginx handles the long-lived range stream
+        // asynchronously, freeing the FPM worker immediately.
+        $parsed     = parse_url($streamUrl);
+        $targetHost = ($parsed['scheme'] ?? 'http') . '://' . ($parsed['host'] ?? '');
+        if (isset($parsed['port'])) {
+            $targetHost .= ':' . $parsed['port'];
+        }
+        $targetUri = ($parsed['path'] ?? '/') . (isset($parsed['query']) ? '?' . $parsed['query'] : '');
 
-    /**
-     * Proxy an external URL through the middleware so the provider only
-     * sees 1 connection regardless of how many viewers are watching.
-     * Streams the response without buffering the entire file in memory.
-     */
-    private function proxyExternalUrl(string $url)
-    {
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL            => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HEADER         => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_MAXREDIRS      => 5,
-            CURLOPT_CONNECTTIMEOUT => 10,
-            CURLOPT_TIMEOUT        => 0,
-            CURLOPT_NOSIGNAL       => true,
-            CURLOPT_RANGE          => $_SERVER['HTTP_RANGE'] ?? null,
-            CURLOPT_USERAGENT      => 'IPTV-Middleware/1.0',
+        return response('', 200, [
+            'Content-Type'               => 'video/mp4',
+            'Access-Control-Allow-Origin'=> '*',
+            'X-Accel-Redirect'           => '/internal_remote_vod',
+            'X-Target-Host'              => $targetHost,
+            'X-Target-URI'               => $targetUri,
         ]);
-
-        $response = curl_exec($ch);
-        $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-        $error = curl_error($ch);
-        curl_close($ch);
-
-        if ($response === false || $statusCode === 0) {
-            abort(502, 'Upstream unreachable: ' . ($error ?: 'unknown error'));
-        }
-
-        $rawHeaders = substr($response, 0, $headerSize);
-        $body = substr($response, $headerSize);
-
-        $responseHeaders = [
-            'Content-Type'  => 'application/octet-stream',
-            'Accept-Ranges' => 'bytes',
-            'Cache-Control' => 'no-cache',
-        ];
-
-        foreach (explode("\r\n", $rawHeaders) as $header) {
-            if (preg_match('/^Content-Type:\s*(.+)/i', $header, $m)) {
-                $responseHeaders['Content-Type'] = trim($m[1]);
-            } elseif (preg_match('/^Content-Length:\s*(.+)/i', $header, $m)) {
-                $responseHeaders['Content-Length'] = trim($m[1]);
-            } elseif (preg_match('/^Content-Range:\s*(.+)/i', $header, $m)) {
-                $responseHeaders['Content-Range'] = trim($m[1]);
-            } elseif (preg_match('/^Accept-Ranges:\s*(.+)/i', $header, $m)) {
-                $responseHeaders['Accept-Ranges'] = trim($m[1]);
-            } elseif (preg_match('/^Content-Disposition:\s*(.+)/i', $header, $m)) {
-                $responseHeaders['Content-Disposition'] = trim($m[1]);
-            }
-        }
-
-        $status = $statusCode === 206 ? 206 : 200;
-
-        return response($body, $status, $responseHeaders);
     }
 
     // M3U playlist
@@ -1324,7 +1312,7 @@ class XtreamController extends Controller
     {
         $url = parse_url(config('app.url'));
 
-        $info = [
+        return [
             'url'           => $url['host'] ?? $request->getHost(),
             'port'          => (string) ($url['port'] ?? 80),
             'https_port'    => '443',
@@ -1335,14 +1323,5 @@ class XtreamController extends Controller
             'time_now'      => now()->format('Y-m-d H:i:s'),
             'process'       => true,
         ];
-
-        // When XC-VM is the backend, signal this to players so they know
-        // the panel uses the Streambox/XC-VM hybrid architecture.
-        if (config('xcvm.enabled')) {
-            $info['xc_vm_enabled'] = true;
-            $info['xc_vm_healthy'] = app(XcVmPlayerProxy::class)::xcVmAvailable();
-        }
-
-        return $info;
     }
 }

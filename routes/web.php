@@ -712,6 +712,7 @@ Route::middleware(['auth:web', 'license.check'])->prefix('vod')->name('vod.')->g
 
 Route::get('/get.php', [\App\Http\Controllers\XtreamController::class, 'm3u']);
 Route::get('/playlist/{token}/m3u', [\App\Http\Controllers\PlaylistController::class, 'generate'])->name('playlist.m3u');
+Route::get('/live/{username}/{password}/{streamId}/{file}', [\App\Http\Controllers\XtreamController::class, 'streamLive'])->where('file', '.+\.(m3u8|ts)');
 Route::get('/live/{username}/{password}/{streamId}', [\App\Http\Controllers\XtreamController::class, 'streamLive'])->where('streamId', '.*');
 Route::get('/ts/{username}/{password}/{streamId}', [\App\Http\Controllers\XtreamController::class, 'streamTs'])->where('streamId', '.*');
 Route::get('/movie/{username}/{password}/{streamId}', [\App\Http\Controllers\XtreamController::class, 'streamVod'])->where('streamId', '.*');
@@ -734,7 +735,13 @@ Route::get('/edge/live/{username}/{token}/{streamId}', function ($username, $tok
     $xtream    = app(\App\Http\Controllers\XtreamController::class);
     $xtream->ensureHlsStream($channelId, $channel->active_stream_url ?? $channel->stream_url, $channel->program_number, $channel->local_address);
     \Illuminate\Support\Facades\Cache::decrement('edge:local:connections');
-    return redirect(config('app.url') . "/hls/{$channelId}/playlist.m3u8");
+
+    return response('', 200, [
+        'Content-Type'              => 'application/vnd.apple.mpegurl',
+        'Cache-Control'             => 'no-cache, no-store, must-revalidate',
+        'Access-Control-Allow-Origin'=> '*',
+        'X-Accel-Redirect'          => "/internal_hls/{$channelId}/playlist.m3u8",
+    ]);
 })->where('streamId', '.*');
 
 // ─── Multicast sweep (above the catch-all so it is reachable) ─────────────────

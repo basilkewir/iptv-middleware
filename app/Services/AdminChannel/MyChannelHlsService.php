@@ -38,15 +38,21 @@ class MyChannelHlsService
 {
     private string $segmentRoot;
     private string $normalizedRoot;
+    private string $ramRoot;
     private string $ffmpeg;
     private string $ffprobe;
-    private int $segmentDuration = 6;
-    private int $playlistSize    = 12;
+    private int $segmentDuration = 2;
+    private int $playlistSize    = 6;
 
     public function __construct()
     {
         $this->segmentRoot    = storage_path('app/streams/hls');
         $this->normalizedRoot = storage_path('app/streams/normalized');
+        // /dev/shm is a native Linux tmpfs RAM disk. High-frequency overlay
+        // files (ticker.txt) are written here so FFmpeg's per-frame
+        // textfile reload=1 reads from RAM instead of disk, eliminating
+        // the I/O queue depth spike that blocks segment output.
+        $this->ramRoot        = '/dev/shm/studio';
         $this->ffmpeg         = config('streaming.transcoding.ffmpeg_path', '/usr/bin/ffmpeg');
         $this->ffprobe        = config('streaming.transcoding.ffprobe_path', '/usr/bin/ffprobe');
     }
@@ -535,9 +541,11 @@ class MyChannelHlsService
     // ─── Overlay helpers ─────────────────────────────────────────────────────
 
     /**
-     * Write ticker.txt and copy image assets to fixed filenames in the stream
-     * directory. FFmpeg reads these paths at startup; ticker.txt is also
-     * re-read every frame via reload=1.
+     * Write ticker.txt to /dev/shm (RAM disk) and copy image assets to the
+     * stream directory. FFmpeg reads ticker.txt with reload=1 every frame —
+     * writing it to RAM eliminates the per-frame disk I/O that causes
+     * segment output stalls when the OS disk queue depth spikes.
+     * Images (logo, watermark) are read once at startup, so they stay on disk.
      */
     private function writeOverlayAssets(string $streamDir, AdminChannel $channel): void
     {
@@ -552,29 +560,42 @@ class MyChannelHlsService
         );
     }
 
+    /**
+     * Write ticker.txt to /dev/shm/studio/ — the Linux RAM disk.
+     * This is the single most impactful I/O optimization for studio playout:
+     * FFmpeg's drawtext reload=1 issues a filesystem read on every video
+     * frame (25-60 reads/second). On disk this spikes OS queue depth and
+     * blocks segment output; on /dev/shm reads are practically free.
+     */
     private function writeTickerFile(string $streamDir, AdminChannel $channel): void
     {
         $text = ($channel->enable_ticker && $channel->ticker_text)
             ? $channel->ticker_text
             : '';
 
-        $file = "{$streamDir}/ticker.txt";
+        $slug    = $channel->channel_slug ?? basename($streamDir);
+        $ramDir  = "{$this->ramRoot}/{$slug}";
 
-        if (! is_writable($streamDir)) {
-            @chmod($streamDir, 0775);
+        if (! is_dir($ramDir)) {
+            @mkdir($ramDir, 0755, true);
         }
+
+        $file = "{$ramDir}/ticker.txt";
 
         try {
             File::put($file, $text);
         } catch (\Exception $e) {
-            Log::warning('Could not write ticker.txt — attempting chmod fix', [
+            Log::warning('Could not write ticker.txt to RAM disk', [
                 'path'  => $file,
                 'error' => $e->getMessage(),
             ]);
-            // Last resort: shell out so root/sudo wrapper can fix ownership
-            @shell_exec('chmod 0664 ' . escapeshellarg($file) . ' 2>/dev/null');
-            @file_put_contents($file, $text);
+            // Fallback: try the original stream directory
+            $fallback = "{$streamDir}/ticker.txt";
+            @file_put_contents($fallback, $text);
         }
+
+        // Also write to streamDir as a fallback for any code that references it
+        @file_put_contents("{$streamDir}/ticker.txt", $text);
     }
 
     /**
@@ -780,11 +801,12 @@ while true; do
         -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \\
         {$inputLines}-c:v {$videoCodec} \\
         -maxrate {$bitrate}k -bufsize {$bitrate}k -g {$gop} -pix_fmt yuv420p \\
+        -vsync cfr \\
         -filter_complex "{$filterComplex}" \\
         -map '[vout]' -map '[aout]' \\
         -c:a aac -b:a 128k -ac 2 -ar 48000 \\
         -f hls -hls_time {$this->segmentDuration} -hls_list_size {$this->playlistSize} \\
-        -hls_flags independent_segments+delete_segments+append_list \\
+        -hls_flags independent_segments+delete_segments+append_list+discont_start \\
         -hls_allow_cache 0 \\
         -hls_segment_type mpegts \\
         -max_muxing_queue_size 4096 \\
@@ -869,7 +891,8 @@ BASH;
 
         // ── Ticker — textfile+reload=1, zero restart on text changes ─────────
         if ($channel->enable_ticker) {
-            $tickerFile = "{$streamDir}/ticker.txt";
+            $slug       = $channel->channel_slug ?? basename($streamDir);
+            $tickerFile = "{$this->ramRoot}/{$slug}/ticker.txt";
             $color      = ltrim($channel->ticker_color ?: '#ffffff', '#');
             $bgColor    = $this->hexToFfmpegColor($channel->ticker_background ?: '#000000cc');
             $fontsize   = max(16, (int) round($height * 0.035));

@@ -23,7 +23,7 @@ return [
     'hls' => [
         'enabled' => env('HLS_ENABLED', true),
         'port' => env('HLS_PORT', 8088),
-        'segment_duration' => env('HLS_SEGMENT_DURATION', 6),
+        'segment_duration' => env('HLS_SEGMENT_DURATION', 2),
         'playlist_size' => env('HLS_PLAYLIST_SIZE', 10),
         'output_path' => env('HLS_OUTPUT_PATH', storage_path('app/hls')),
         'temp_path' => env('HLS_TEMP_PATH', storage_path('app/hls_temp')),

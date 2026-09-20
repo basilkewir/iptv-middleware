@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-# IPTV Middleware + XC-VM Engine — Bare-Metal Auto-Installer
+# IPTV Middleware — Bare-Metal Auto-Installer (Standalone, no XC-VM)
 # =============================================================================
 # Installs on Ubuntu 22.04 / 24.04 (no Docker).
-# XC-VM is bound to 127.0.0.1 only — never reachable from the internet.
-# The middleware (Streambox) is the only public-facing panel.
+# The middleware handles ALL streaming directly using the XC-VM-style
+# split-stream architecture: background FFmpeg + Nginx.
 #
 # Usage:
-#   sudo bash install.sh [--domain example.com] [--port 25460] [--app-dir /opt/iptv]
+#   sudo bash install.sh [--domain example.com] [--port 25460] [--fresh]
+#   sudo bash install.sh --fresh    # NEW install — drops and recreates database
+#   sudo bash install.sh            # UPDATE — preserves existing database
 # =============================================================================
 set -euo pipefail
 
@@ -16,21 +18,14 @@ APP_DIR="${APP_DIR:-/opt/iptv-middleware}"
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin123}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@iptv-middleware.com}"
-XCVM_DIR="${XCVM_DIR:-/opt/xcvm}"
-XCVM_PORT="${XCVM_PORT:-25462}"          # loopback-only, never exposed
-MW_PORT="${MW_PORT:-25460}"              # public middleware port
-DOMAIN="${DOMAIN:-}"                     # optional domain for Nginx vhost
+MW_PORT="${MW_PORT:-25460}"
+DOMAIN="${DOMAIN:-}"
 DB_NAME="${DB_NAME:-iptv_middleware}"
 DB_USER="${DB_USER:-iptv}"
 DB_PASS="${DB_PASS:-$(openssl rand -hex 16)}"
-XCVM_DB_NAME="${XCVM_DB_NAME:-xcvm}"
-XCVM_DB_USER="${XCVM_DB_USER:-xcvm}"
-XCVM_DB_PASS="${XCVM_DB_PASS:-$(openssl rand -hex 16)}"
 PHP_VER="8.3"
 NODE_VER="20"
-XCVM_REPO="https://github.com/Vateron-Media/XC_VM.git"
-XCVM_ACCESS_CODE="${XCVM_ACCESS_CODE:-$(openssl rand -hex 8)}"
-XCVM_API_KEY="${XCVM_API_KEY:-$(openssl rand -hex 24)}"
+FRESH_INSTALL=false
 
 # ── Colour helpers ─────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -48,14 +43,10 @@ while [[ $# -gt 0 ]]; do
         --admin-user)       ADMIN_USERNAME="$2";       shift 2 ;;
         --admin-pass)       ADMIN_PASSWORD="$2";       shift 2 ;;
         --admin-email)      ADMIN_EMAIL="$2";          shift 2 ;;
-        --xcvm-admin-code)  XCVM_ACCESS_CODE="$2";     shift 2 ;;
-        --xcvm-api-key)     XCVM_API_KEY="$2";         shift 2 ;;
-        --xcvm-port)        XCVM_PORT="$2";            shift 2 ;;
-        --no-xcvm)          NO_XCVM=true;               shift ;;
+        --fresh)            FRESH_INSTALL=true;        shift ;;
         *) warn "Unknown argument: $1"; shift ;;
     esac
 done
-NO_XCVM="${NO_XCVM:-false}"
 
 [[ $EUID -eq 0 ]] || die "Run as root: sudo bash install.sh"
 [[ -f /etc/os-release ]] || die "Cannot detect OS."
@@ -77,7 +68,7 @@ fi
 info "Updating apt and installing system packages…"
 export DEBIAN_FRONTEND=noninteractive
 
-# Add Sury PHP repo (PPA doesn't support Ubuntu 26.04+)
+# Add Sury PHP repo
 if ! grep -r 'packages.sury.org/php' /etc/apt/sources.list.d/ &>/dev/null; then
     apt-get install -y -qq curl ca-certificates
     curl -sSLo /tmp/php.gpg https://packages.sury.org/php/apt.gpg
@@ -85,7 +76,6 @@ if ! grep -r 'packages.sury.org/php' /etc/apt/sources.list.d/ &>/dev/null; then
     echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" \
         > /etc/apt/sources.list.d/sury-php.list
 fi
-# Remove stale Ondrej PPA if present
 rm -f /etc/apt/sources.list.d/ondrej-ubuntu-php-*.list 2>/dev/null || true
 
 apt-get update -qq
@@ -121,25 +111,31 @@ success "System packages installed."
 # 2. MySQL — databases & users
 # =============================================================================
 info "Configuring MySQL…"
-# Remove frozen flag left by MariaDB→MySQL downgrade conflict
 rm -f /etc/mysql/FROZEN
-# Unmask in case a previous install masked the unit
 systemctl unmask mysql 2>/dev/null || true
 systemctl enable mysql
 systemctl start mysql || { journalctl -u mysql --no-pager -n 20; die "MySQL failed to start."; }
 
-mysql -u root <<SQL
+if [[ "$FRESH_INSTALL" == "true" ]]; then
+    info "Fresh install — dropping and recreating database…"
+    mysql -u root <<SQL
+DROP DATABASE IF EXISTS \`${DB_NAME}\`;
+CREATE DATABASE \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
+FLUSH PRIVILEGES;
+SQL
+    success "Database recreated."
+else
+    info "Update mode — preserving existing database."
+    mysql -u root <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
-
-CREATE DATABASE IF NOT EXISTS \`${XCVM_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${XCVM_DB_USER}'@'127.0.0.1' IDENTIFIED BY '${XCVM_DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${XCVM_DB_NAME}\`.* TO '${XCVM_DB_USER}'@'127.0.0.1';
-
 FLUSH PRIVILEGES;
 SQL
-success "MySQL databases ready."
+    success "Database ready (preserved)."
+fi
 
 # =============================================================================
 # 3. Redis
@@ -151,54 +147,7 @@ systemctl start redis-server || true
 success "Redis running."
 
 # =============================================================================
-# 4. XC-VM Engine — real installer (non-interactive)
-# =============================================================================
-if [[ "$NO_XCVM" == "true" ]]; then
-    warn "Skipping XC-VM install (--no-xcvm)."
-else
-    info "Installing XC-VM streaming engine…"
-
-    apt-get install -y -qq python3 python3-pip default-mysql-client libcap2-bin
-
-    XCVM_INSTALL_DIR="/tmp/xcvm_install"
-    rm -rf "$XCVM_INSTALL_DIR" && mkdir -p "$XCVM_INSTALL_DIR"
-
-    XCVM_ZIP_URL=$(curl -s https://api.github.com/repos/Vateron-Media/XC_VM/releases/latest \
-        | grep browser_download_url | grep '.zip' | head -1 | cut -d'"' -f4)
-    [[ -z "$XCVM_ZIP_URL" ]] && XCVM_ZIP_URL="https://github.com/Vateron-Media/XC_VM/releases/latest/download/main.zip"
-
-    info "Downloading XC-VM from $XCVM_ZIP_URL …"
-    wget -q "$XCVM_ZIP_URL" -O "$XCVM_INSTALL_DIR/xcvm.zip"
-    unzip -q "$XCVM_INSTALL_DIR/xcvm.zip" -d "$XCVM_INSTALL_DIR"
-    XCVM_INSTALL_SCRIPT=$(find "$XCVM_INSTALL_DIR" -maxdepth 2 -name 'install' ! -name '*.py' | head -1)
-    [[ -z "$XCVM_INSTALL_SCRIPT" ]] && die "XC-VM install script not found in release zip."
-    XCVM_EXTRACT_DIR=$(dirname "$XCVM_INSTALL_SCRIPT")
-
-    cp "$APP_DIR/docker/xcvm/install_patch.py" "$XCVM_EXTRACT_DIR/install_patch.py"
-
-    info "Running XC-VM installer non-interactively…"
-    cd "$XCVM_EXTRACT_DIR"
-    XCVM_DB_HOST=127.0.0.1 \
-    XCVM_DB_NAME="$XCVM_DB_NAME" \
-    XCVM_DB_USER="$XCVM_DB_USER" \
-    XCVM_DB_PASS="$XCVM_DB_PASS" \
-    XCVM_HTTP_PORT="$XCVM_PORT" \
-    XCVM_ADMIN_CODE="$XCVM_ACCESS_CODE" \
-        python3 install_patch.py
-
-    cd "$APP_DIR"
-
-    if [[ -f /root/credentials.txt ]]; then
-        _code=$(awk '/Access Code/{print $NF}' /root/credentials.txt | head -1)
-        [[ -n "$_code" ]] && XCVM_ACCESS_CODE="$_code"
-        info "XC-VM credentials saved to /root/credentials.txt"
-    fi
-
-    success "XC-VM installed."
-fi
-
-# =============================================================================
-# 5. Middleware — PHP dependencies & assets
+# 4. Middleware — PHP dependencies & assets
 # =============================================================================
 info "Installing middleware PHP dependencies…"
 cd "$APP_DIR"
@@ -211,15 +160,28 @@ npm run build --silent
 success "Middleware dependencies installed."
 
 # =============================================================================
-# 6. Middleware .env
+# 5. Middleware .env
 # =============================================================================
 info "Writing middleware .env…"
-APP_KEY="$(php -r 'echo "base64:".base64_encode(random_bytes(32));')"
-JWT_SECRET="$(openssl rand -hex 32)"
-[[ "$NO_XCVM" == "true" ]] && XC_VM_ENABLED=false || XC_VM_ENABLED=true
 
+# Only generate new APP_KEY on fresh install
+if [[ "$FRESH_INSTALL" == "true" ]] || [[ ! -f "$APP_DIR/.env" ]]; then
+    APP_KEY="$(php -r 'echo "base64:".base64_encode(random_bytes(32));')"
+else
+    APP_KEY="$(grep APP_KEY "$APP_DIR/.env" | cut -d= -f2-)"
+    [[ -z "$APP_KEY" ]] && APP_KEY="$(php -r 'echo "base64:".base64_encode(random_bytes(32));')"
+fi
+
+JWT_SECRET="$(openssl rand -hex 32)"
 SERVER_IP="$(hostname -I | awk '{print $1}')"
 APP_URL="http://${DOMAIN:-$SERVER_IP}:${MW_PORT}"
+
+# Preserve existing DB credentials if updating
+if [[ "$FRESH_INSTALL" != "true" ]] && [[ -f "$APP_DIR/.env" ]]; then
+    DB_PASS="$(grep DB_PASSWORD "$APP_DIR/.env" | cut -d= -f2-)"
+    DB_USER="$(grep DB_USERNAME "$APP_DIR/.env" | cut -d= -f2-)"
+    DB_NAME="$(grep DB_DATABASE "$APP_DIR/.env" | cut -d= -f2-)"
+fi
 
 cat > "$APP_DIR/.env" <<ENV
 APP_NAME="IPTV Middleware"
@@ -279,54 +241,42 @@ TMDB_CACHE_TTL=86400
 
 OFFLINE_VIDEO_PATH=${APP_DIR}/storage/app/offline/channel-offline.mp4
 
-# ── XC-VM Engine (loopback, hidden from internet) ──────────────────────────
-XC_VM_ENABLED=${XC_VM_ENABLED}
-XC_VM_URL=http://127.0.0.1
-XC_VM_PORT=${XCVM_PORT}
-XC_VM_ACCESS_CODE=${XCVM_ACCESS_CODE}
-XC_VM_API_KEY=${XCVM_API_KEY}
-XC_VM_TIMEOUT=20
-XC_VM_RETRIES=2
-XC_VM_LIVE_SYNC=true
-XC_VM_FULL_RESYNC_SCHEDULE=everyFiveMinutes
-XC_VM_PRUNE_REMOTE=false
-XC_VM_START_STREAMS=true
-XC_VM_PROXY_PLAYER=true
-XC_VM_PROXY_URL=http://127.0.0.1
-XC_VM_PROXY_PORT=${XCVM_PORT}
-XC_VM_PROXY_TIMEOUT=60
-XC_VM_VOD_URL_BASE=http://127.0.0.1:${XCVM_PORT}/vod_bridge
-XC_VM_LINE_PASSWORD_SOURCE=m3u_token
-XC_VM_LINE_PASSWORD_LENGTH=16
-XC_VM_HLS_SEGMENT_DURATION=2
-XC_VM_HLS_PLAYLIST_SIZE=3
-XC_VM_HLS_KEYFRAME_INTERVAL=50
+# ── Standalone Streaming (no XC-VM dependency) ──────────────────────────────
+XC_VM_HLS_SEGMENT_DURATION=4
+XC_VM_HLS_PLAYLIST_SIZE=5
+XC_VM_HLS_KEYFRAME_INTERVAL=100
 XC_VM_MAX_PLAYLIST_AGE=120
 ENV
 
 success ".env written."
 
 # =============================================================================
-# 7. Middleware — database migrations & seeding
+# 6. Middleware — database migrations & seeding
 # =============================================================================
 info "Running database migrations…"
 cd "$APP_DIR"
-php artisan migrate --force
-php artisan db:seed --force
+
+if [[ "$FRESH_INSTALL" == "true" ]]; then
+    php artisan migrate --force
+    php artisan db:seed --force
+else
+    php artisan migrate --force
+fi
+
 php artisan storage:link --force 2>/dev/null || true
 php artisan config:cache
 php artisan route:cache
 php artisan view:cache
-success "Database migrated and seeded."
+success "Database migrated."
 
 # =============================================================================
-# 8. Middleware Nginx vhost (public)
+# 7. Middleware Nginx vhost (public)
 # =============================================================================
 info "Writing middleware Nginx vhost…"
 
 SERVER_NAME="${DOMAIN:-_}"
 
-# Detect installed PHP-FPM version (prefer configured PHP_VER, fall back to whatever is installed)
+# Detect installed PHP-FPM version
 if [[ ! -S "/run/php/php${PHP_VER}-fpm.sock" ]]; then
     for sock in /run/php/php*-fpm.sock; do
         [[ -S "$sock" ]] && PHP_VER=$(echo "$sock" | grep -oP '\d+\.\d+') && break
@@ -335,8 +285,8 @@ fi
 info "Using PHP-FPM socket: /run/php/php${PHP_VER}-fpm.sock"
 
 cat > /etc/nginx/sites-available/iptv-middleware <<NGINX
-# Edge delivery tier — high-throughput nginx config.
-# Segments are served directly from disk with sendfile+tcp_nopush.
+# IPTV Middleware — standalone streaming (XC-VM-style architecture)
+# Segments served directly from RAM-backed tmpfs by nginx.
 # PHP-FPM only handles the control plane (auth, playlist redirect).
 server {
     listen ${MW_PORT} reuseport;
@@ -353,14 +303,16 @@ server {
     keepalive_timeout 65;
     keepalive_requests 10000;
 
-    # HLS segments and playlists — served directly from disk by nginx.
+    # HLS segments — served directly from tmpfs by nginx.
     # PHP never touches this data; sendfile copies straight to the socket.
+    # try_files returns 204 for missing segments (keeps ExoPlayer alive).
     location /hls/ {
         alias ${APP_DIR}/storage/app/streams/hls/;
         add_header Cache-Control "no-cache, no-store, must-revalidate";
         add_header Access-Control-Allow-Origin "*";
         add_header X-Accel-Buffering "no";
         types { application/vnd.apple.mpegurl m3u8; video/mp2t ts; }
+        try_files \$uri =204;
         sendfile on;
         tcp_nopush on;
     }
@@ -375,9 +327,6 @@ server {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    # Only index.php is served via FastCGI — all virtual .php routes
-    # (get.php, player_api.php, etc.) are caught by try_files above
-    # and rewritten to index.php by Laravel's front controller.
     location = /index.php {
         fastcgi_pass unix:/run/php/php${PHP_VER}-fpm.sock;
         fastcgi_index index.php;
@@ -385,7 +334,6 @@ server {
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_buffering off;
         fastcgi_read_timeout 300s;
-        # Pass real client IP through proxies/CDN
         fastcgi_param HTTP_X_FORWARDED_FOR \$http_x_forwarded_for;
         fastcgi_param HTTP_X_FORWARDED_PROTO \$http_x_forwarded_proto;
     }
@@ -405,14 +353,23 @@ sed -i 's/worker_connections.*/worker_connections 50000;/' /etc/nginx/nginx.conf
 grep -q 'use epoll' /etc/nginx/nginx.conf || \
     sed -i '/worker_connections/a \    use epoll;\n    multi_accept on;' /etc/nginx/nginx.conf
 
-# Add proxy_cache_path directives to the http block (must be outside server {})
-# Write to conf.d/ which is loaded before sites-enabled
+# HLS segment cache in RAM + high-performance file serving tuning
 cat > /etc/nginx/conf.d/iptv-cache.conf <<'CACHECONF'
-# HLS segment caches — RAM-backed for ultra-low latency delivery.
 proxy_cache_path /dev/shm/nginx_hls_cache levels=1:2
     keys_zone=HLS_CACHE:64m max_size=1g inactive=30s use_temp_path=off;
-proxy_cache_path /dev/shm/xcvm_hls_cache levels=1:2
-    keys_zone=XCVM_HLS:32m max_size=512m inactive=10s use_temp_path=off;
+
+# Open file descriptor cache — critical for high-volume HLS segment serving.
+# Caches stat() results so Nginx doesn't re-stat the same .ts files on
+# every concurrent request from hundreds of players.
+open_file_cache max=10000 inactive=20s;
+open_file_cache_valid 30s;
+open_file_cache_min_uses 2;
+open_file_cache_errors on;
+
+# Maximize output buffers for high-bitrate video delivery.
+# 128k per buffer absorbs full MPEG-TS packets without fragmentation.
+output_buffers 1 128k;
+postpone_output 1460;
 CACHECONF
 
 nginx -t
@@ -421,43 +378,26 @@ systemctl reload nginx
 success "Nginx configured."
 
 # =============================================================================
-# 9. Kernel network tuning (BBR + high-throughput socket buffers)
+# 8. Kernel network tuning (BBR + high-throughput socket buffers)
 # =============================================================================
 info "Applying kernel network tuning…"
 cat > /etc/sysctl.d/99-iptv-streaming.conf <<'SYSCTL'
-# BBR congestion control — handles packet loss gracefully vs cubic
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
-
-# Large socket buffers for high-bandwidth multicast ingest and HLS delivery
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
-
-# Reduced TCP buffering for ultra-low latency HLS delivery.
-# Smaller buffers = less buffering delay = faster first-byte on segment requests.
 net.ipv4.tcp_rmem = 4096 32768 16777216
 net.ipv4.tcp_wmem = 4096 32768 16777216
-
-# UDP receive buffer for multicast ingest (32 MB per socket)
 net.core.rmem_default = 33554432
-
-# Max open files / connections system-wide
 fs.file-max = 2097152
-
-# TCP Fast Open — speeds up successive connections from same client
 net.ipv4.tcp_fastopen = 3
-
-# Disable slow start after idle — instant full-speed delivery on channel switch
 net.ipv4.tcp_slow_start_after_idle = 0
-
-# Keepalive probes — detect dead connections faster
 net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 10
 net.ipv4.tcp_keepalive_probes = 6
 SYSCTL
 sysctl -p /etc/sysctl.d/99-iptv-streaming.conf 2>/dev/null || true
 
-# Raise open-file limit for nginx and php-fpm workers
 cat > /etc/security/limits.d/iptv-streaming.conf <<'LIMITS'
 www-data soft nofile 1048576
 www-data hard nofile 1048576
@@ -467,7 +407,7 @@ LIMITS
 success "Kernel tuning applied."
 
 # =============================================================================
-# 10. PHP-FPM tuning
+# 9. PHP-FPM tuning
 # =============================================================================
 info "Tuning PHP-FPM pool…"
 PHP_POOL="/etc/php/${PHP_VER}/fpm/pool.d/www.conf"
@@ -523,11 +463,10 @@ supervisorctl update
 success "Supervisor configured."
 
 # =============================================================================
-# 11. Systemd services — XC-VM, watchdog, ingest, push purge
+# 11. Systemd services — watchdog, ingest
 # =============================================================================
 info "Installing systemd services…"
 
-# Substitute __APP_DIR__ placeholder in deploy service files before copying
 for svc in iptv-watchdog iptv-ingest iptv-purge-ffmpeg; do
     src="${APP_DIR}/deploy/${svc}.service"
     if [[ -f "$src" ]]; then
@@ -539,33 +478,7 @@ for timer in iptv-watchdog iptv-purge-ffmpeg; do
     [[ -f "$src" ]] && cp "$src" "/etc/systemd/system/${timer}.timer"
 done
 
-# XC-VM manages its own service via /home/xc_vm/service
-# Create a systemd unit that wraps it so it auto-starts on boot
-cat > /etc/systemd/system/xcvm.service <<XCVMSVC
-[Unit]
-Description=XC-VM Streaming Engine (loopback-only)
-After=network.target mysql.service redis-server.service
-Wants=mysql.service redis-server.service
-
-[Service]
-Type=forking
-User=root
-ExecStart=/home/xc_vm/service start
-ExecStop=/home/xc_vm/service stop
-Restart=on-failure
-RestartSec=10
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-XCVMSVC
-
 systemctl daemon-reload
-if [[ "$NO_XCVM" != "true" ]]; then
-    systemctl enable xcvm.service
-    systemctl start xcvm.service || warn "XC-VM service failed to start — check: journalctl -u xcvm"
-fi
 
 for unit in iptv-watchdog.timer iptv-purge-ffmpeg.timer iptv-ingest.service; do
     systemctl enable "$unit" 2>/dev/null && systemctl start "$unit" 2>/dev/null || true
@@ -580,7 +493,6 @@ info "Setting file permissions…"
 chown -R www-data:www-data "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
 chmod -R 775 "$APP_DIR/storage" "$APP_DIR/bootstrap/cache"
 
-# VOD upload directories
 mkdir -p "$APP_DIR/storage/app/public/vod"
 mkdir -p "$APP_DIR/storage/app/public/episodes"
 mkdir -p "$APP_DIR/storage/app/streams/hls"
@@ -599,19 +511,14 @@ chmod -R 775 \
 success "Permissions set."
 
 # =============================================================================
-# 12b. RAM-backed HLS segment cache (tmpfs)
+# 13. RAM-backed HLS segment cache (tmpfs)
 # =============================================================================
-# Mount a tmpfs over the HLS streams directory so segments are written to RAM
-# instead of disk. This mirrors XC-VM's local segment caching architecture:
-# thousands of clients read from RAM simultaneously, removing disk I/O as a
-# bottleneck. Size is capped at 20% of total RAM (min 512M).
 info "Mounting tmpfs for HLS segment cache…"
 TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 TMPFS_SIZE=$(( TOTAL_RAM_KB / 5 / 1024 ))  # 20% in MB
 [[ $TMPFS_SIZE -lt 512 ]] && TMPFS_SIZE=512
 HLS_DIR="$APP_DIR/storage/app/streams/hls"
 
-# Add to fstab if not already present
 if ! grep -q "$HLS_DIR" /etc/fstab; then
     echo "tmpfs $HLS_DIR tmpfs defaults,size=${TMPFS_SIZE}M,uid=www-data,gid=www-data,mode=0775 0 0" >> /etc/fstab
     mount "$HLS_DIR" 2>/dev/null || true
@@ -621,7 +528,7 @@ else
 fi
 
 # =============================================================================
-# 13. Firewall — block XC-VM port from outside
+# 14. Firewall
 # =============================================================================
 if command -v ufw &>/dev/null; then
     info "Configuring UFW firewall…"
@@ -630,18 +537,7 @@ if command -v ufw &>/dev/null; then
     ufw allow "${MW_PORT}/tcp"
     ufw allow 80/tcp
     ufw allow 443/tcp
-    # Explicitly deny external access to XC-VM port
-    ufw deny "${XCVM_PORT}/tcp" 2>/dev/null || true
-    success "UFW: port ${XCVM_PORT} blocked externally, ${MW_PORT} open."
-fi
-
-# =============================================================================
-# 14. Initial XC-VM data migration
-# =============================================================================
-if [[ "$NO_XCVM" != "true" ]]; then
-    info "Migrating all existing middleware data to XC-VM (channels, VOD, users, bouquets)…"
-    cd "$APP_DIR"
-    php artisan xcvm:migrate --no-progress 2>&1 | tail -20 || warn "Initial migration had failures — re-run: php artisan xcvm:migrate"
+    success "UFW: port ${MW_PORT} open."
 fi
 
 # =============================================================================
@@ -664,28 +560,25 @@ supervisorctl restart all 2>/dev/null || true
 # =============================================================================
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║          IPTV Middleware + XC-VM — Installation Complete     ║${NC}"
+echo -e "${GREEN}║       IPTV Middleware — Installation Complete (Standalone)  ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Middleware (Streambox):  ${CYAN}${APP_URL}${NC}"
-echo -e "  XC-VM engine:            ${YELLOW}127.0.0.1:${XCVM_PORT} (loopback only — hidden)${NC}"
+echo -e "  Streambox panel:  ${CYAN}${APP_URL}${NC}"
 echo ""
-echo -e "  MySQL middleware DB:     ${DB_NAME} / ${DB_USER} / ${DB_PASS}"
-echo -e "  MySQL XC-VM DB:          ${XCVM_DB_NAME} / ${XCVM_DB_USER} / ${XCVM_DB_PASS}"
-echo ""
-echo -e "  XC-VM access code:       ${XCVM_ACCESS_CODE}"
-echo -e "  XC-VM API key:           ${XCVM_API_KEY}"
+echo -e "  MySQL DB:         ${DB_NAME} / ${DB_USER} / ${DB_PASS}"
 echo ""
 echo -e "  ${YELLOW}Save the credentials above — they are not shown again.${NC}"
 echo ""
-echo -e "  Default admin login:     ${ADMIN_USERNAME} / ${ADMIN_PASSWORD}"
+echo -e "  Default admin login:  ${ADMIN_USERNAME} / ${ADMIN_PASSWORD}"
+echo ""
+echo -e "  Architecture:  Standalone (FFmpeg + Nginx, no XC-VM)"
+echo -e "  HLS segments:  RAM-backed tmpfs at ${HLS_DIR}"
 echo ""
 echo -e "  Useful commands:"
-echo -e "    Migrate all data to XC-VM:  php artisan xcvm:migrate"
-echo -e "    Dry-run migration:          php artisan xcvm:migrate --dry-run"
-echo -e "    Re-sync channels only:      php artisan xcvm:sync --type=channel"
-echo -e "    Sync UDP channels to XC-VM: php artisan xcvm:sync-udp"
-echo -e "    Scan multicast:             php artisan channels:scan-multicast udp://@239.0.0.1:1234"
+echo -e "    Start all ingests:     php artisan ingest:ensure-all"
+echo -e "    Check channel health:  php artisan channels:auto-check-health"
+echo -e "    Watchdog:              php artisan channels:watchdog"
+echo -e "    Scan multicast:        php artisan channels:scan-multicast udp://@239.0.0.1:1234"
 echo ""
 echo -e "  Logs:"
 echo -e "    Middleware:  ${APP_DIR}/storage/logs/laravel.log"

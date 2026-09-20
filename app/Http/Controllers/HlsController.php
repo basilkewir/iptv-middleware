@@ -7,7 +7,6 @@ namespace App\Http\Controllers;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\File;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class HlsController extends Controller
 {
@@ -21,6 +20,9 @@ class HlsController extends Controller
     /**
      * Serve streaming segments/playlists for a broadcast key.
      * Matches URL: /hls/{key}/{file}
+     *
+     * Uses X-Accel-Redirect to hand off file delivery to Nginx,
+     * keeping PHP overhead at near-zero for segment serving.
      */
     public function serve(Request $request, string $key, string $file)
     {
@@ -97,25 +99,17 @@ class HlsController extends Controller
             }
         }
 
+        // Hand off to Nginx for zero-CPU file delivery from RAM disk.
+        // Nginx reads the file asynchronously without blocking PHP-FPM.
         $mime = $extension === 'm3u8'
             ? 'application/vnd.apple.mpegurl'
             : 'video/mp2t';
 
-        $response = new StreamedResponse(function () use ($absolute) {
-            $handle = fopen($absolute, 'rb');
-            if ($handle === false) {
-                return;
-            }
-
-            fpassthru($handle);
-            fclose($handle);
-        });
-
-        $response->headers->set('Content-Type', $mime);
-        $response->headers->set('Cache-Control', 'no-cache, no-store, must-revalidate');
-        $response->headers->set('X-Accel-Buffering', 'no');
-        $response->headers->set('Access-Control-Allow-Origin', '*');
-
-        return $response;
+        return response('', 200, [
+            'Content-Type'              => $mime,
+            'Cache-Control'             => 'no-cache, no-store, must-revalidate',
+            'Access-Control-Allow-Origin'=> '*',
+            'X-Accel-Redirect'          => "/internal_hls/{$key}/{$file}",
+        ]);
     }
 }

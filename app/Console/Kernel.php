@@ -27,77 +27,31 @@ class Kernel extends ConsoleKernel
             ->everyFiveMinutes()
             ->withoutOverlapping();
 
-        // Ingest is now ON-DEMAND only: streams start when a client
-        // requests them via ensureHlsStream(). This prevents the server
-        // from being overwhelmed by 43+ simultaneous FFmpeg transcodes.
-        // UDP channels use -c copy (no re-encoding) for minimal CPU usage.
-
-        // Check every active channel's source in Flussonic and restart any
-        // that are offline or frozen (bitrate = 0 / no UDP data arriving).
-        // Two consecutive bad checks are required before a restart fires.
-        // NOTE: streams:check-sources was removed — use channels:auto-check-health instead.
-
-        // Source health check runs every 5 minutes instead of every minute
-        // to avoid spawning ingests during overload. On-demand ingest via
-        // ensureHlsStream() is the primary mechanism.
         $schedule->command('channels:auto-check-health')
             ->everyFiveMinutes()
             ->withoutOverlapping();
 
-        // Watchdog runs every minute to detect stale ingests and failover
-        // to backup streams after the 10s grace period.
         $schedule->command('channels:watchdog')
             ->everyMinute()
             ->withoutOverlapping();
 
-        // Refresh per-source statuses (primary + backups) for the admin UI on a
-        // rotating subset every 3 minutes. Keeps live/offline chips real without
-        // overwhelming the box with a full-catalogue ffprobe sweep.
         $schedule->command('channels:probe-sources')
             ->everyThreeMinutes()
             ->withoutOverlapping();
 
-        // Purge orphaned/duplicate/stopped/unused ffmpeg ingests while protecting
-        // multicast group readers and admin playouts. Runs every 5 minutes.
         $schedule->command('channels:purge-ffmpeg')
             ->everyFiveMinutes()
             ->withoutOverlapping();
 
-        // Monitor push processes and auto-restart dead ones
         $schedule->command('push:watch')
             ->everyMinute()
             ->withoutOverlapping();
 
-        // Full XC-VM reconciliation (runs only when the integration is enabled).
-        $this->scheduleXcVmFullSync($schedule);
-
-        // Stream→XC-VM bridge: push source URLs for ALL active channels
-        // (UDP, HTTP, HLS, RTMP, YouTube) and live AdminChannels to XC-VM
-        // every minute so the engine always has a fresh source URL.
-        // Runs only when XC-VM is enabled.
-        $schedule->command('xcvm:sync-udp')
+        // Ensure all active channel ingests are running (persistent background
+        // ingestion — the core of the standalone XC-VM-style architecture).
+        $schedule->command('ingest:ensure-all')
             ->everyMinute()
-            ->withoutOverlapping()
-            ->when(fn () => (bool) config('xcvm.enabled'));
-    }
-
-    private function scheduleXcVmFullSync(Schedule $schedule): void
-    {
-        $spec = trim((string) config('xcvm.full_resync_schedule', ''));
-
-        if ($spec === '') {
-            return;
-        }
-
-        $event = $schedule->command('xcvm:sync', ['--no-progress'])
-            ->withoutOverlapping()
-            ->when(fn () => (bool) config('xcvm.enabled'));
-
-        if (str_contains($spec, '*') || preg_match('/^[0-9]/', $spec)) {
-            $event->cron($spec);
-        } else {
-            $event->{$spec}();
-        }
+            ->withoutOverlapping();
     }
 
     protected function commands(): void

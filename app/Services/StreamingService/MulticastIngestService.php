@@ -63,8 +63,8 @@ class MulticastIngestService
     // apps to ride out the short multicast pauses (ad breaks, blank breaks)
     // without exhausting the player buffer and showing playback errors,
     // while keeping live latency reasonable.
-    private const HLS_SEGMENT_TIME = 4;
-    private const HLS_PLAYLIST_SIZE = 5;
+    private const HLS_SEGMENT_TIME = 2;
+    private const HLS_PLAYLIST_SIZE = 6;
 
     /**
      * Get all active multicast channels grouped by their source URL.
@@ -506,7 +506,12 @@ class MulticastIngestService
             // Always normalize audio to AAC for TV app compatibility — raw
             // AC3/MP2/DTS may not decode on many TV players. The encode cost
             // is negligible compared to the viewer experience improvement.
-            $audioCodec = ' -c:a aac -b:a 128k -ac 2 -ar 48000';
+            // -async 1 locks audio PTS tightly to the video container clock,
+            // preventing per-stream audio drift from stalling the shared demuxer
+            // thread and freezing sibling channels in the same bucket.
+            // -vsync 0 lets the muxer pass through video timestamps as-is
+            // without duplicating or dropping frames to compensate for drift.
+            $audioCodec = ' -c:a aac -b:a 128k -ac 2 -ar 48000 -async 1 -vsync 0';
 
             $outputs[] = sprintf(
                 ' -map 0:p:%d -map_chapters -1 -ignore_unknown'
@@ -514,7 +519,7 @@ class MulticastIngestService
                 . ' -max_muxing_queue_size 65536'
                 . '%s'
             .   ' -f hls -hls_time %d -hls_list_size %d'
-            .   ' -hls_flags delete_segments+temp_file+independent_segments+append_list'
+            .   ' -hls_flags delete_segments+temp_file+independent_segments+append_list+split_by_time+discont_start'
             .   ' -muxdelay 0 -muxpreload 0'
             .   ' -hls_segment_filename %s/segment_%%04d.ts'
                 . ' %s/playlist.m3u8',
