@@ -26,11 +26,19 @@ class XcVmClient
 {
     private GuzzleClient $http;
 
+    private int $consecutiveFailures = 0;
+
+    private ?int $circuitOpenUntil = null;
+
+    private const CIRCUIT_BREAKER_THRESHOLD = 5;
+
+    private const CIRCUIT_BREAKER_COOLDOWN = 30;
+
     public function __construct(?GuzzleClient $http = null)
     {
         $this->http = $http ?? new GuzzleClient([
             'timeout' => config('xcvm.timeout', 20),
-            'connect_timeout' => 10,
+            'connect_timeout' => 5,
             'http_errors' => false,
             'allow_redirects' => true,
         ]);
@@ -73,6 +81,80 @@ class XcVmClient
         $data = $this->request('user_info', 'GET');
 
         return is_array($data) ? $data : [];
+    }
+
+    /**
+     * Quick liveness check — returns true when XC-VM is reachable and
+     * responding to API calls. Used by the player proxy to decide whether
+     * to route through XC-VM or return 503.
+     */
+    public function isHealthy(): bool
+    {
+        if (! $this->isConfigured()) {
+            return false;
+        }
+
+        if ($this->circuitIsOpen()) {
+            return false;
+        }
+
+        try {
+            $this->testConnection();
+            $this->recordSuccess();
+
+            return true;
+        } catch (\Throwable) {
+            $this->recordFailure();
+
+            return false;
+        }
+    }
+
+    /**
+     * Record a successful API call — resets the circuit breaker.
+     */
+    public function recordSuccess(): void
+    {
+        $this->consecutiveFailures = 0;
+        $this->circuitOpenUntil = null;
+    }
+
+    /**
+     * Record a failed API call — trips the circuit breaker after threshold.
+     */
+    public function recordFailure(): void
+    {
+        $this->consecutiveFailures++;
+
+        if ($this->consecutiveFailures >= self::CIRCUIT_BREAKER_THRESHOLD) {
+            $this->circuitOpenUntil = time() + self::CIRCUIT_BREAKER_COOLDOWN;
+
+            Log::warning('XC-VM circuit breaker tripped', [
+                'failures' => $this->consecutiveFailures,
+                'cooldown' => self::CIRCUIT_BREAKER_COOLDOWN . 's',
+            ]);
+        }
+    }
+
+    /**
+     * Check whether the circuit breaker is open (XC-VM considered unreachable).
+     */
+    public function circuitIsOpen(): bool
+    {
+        if ($this->circuitOpenUntil === null) {
+            return false;
+        }
+
+        if (time() > $this->circuitOpenUntil) {
+            $this->circuitOpenUntil = null;
+            $this->consecutiveFailures = 0;
+
+            Log::info('XC-VM circuit breaker reset — retrying');
+
+            return false;
+        }
+
+        return true;
     }
 
     // ── Authentication probe helpers ─────────────────────────────────────────
@@ -533,6 +615,10 @@ class XcVmClient
      */
     private function request(string $action, string $method = 'GET', array $params = []): array
     {
+        if ($this->circuitIsOpen()) {
+            throw new XcVmConnectionException('XC-VM circuit breaker is open — service temporarily unavailable.');
+        }
+
         $uri = $this->baseUrl() . '?api_key=' . rawurlencode((string) config('xcvm.api_key'))
             . '&action=' . rawurlencode($action);
 
@@ -557,13 +643,17 @@ class XcVmClient
 
                 $response = $this->http->request($method, $uri, $options);
 
+                $this->recordSuccess();
+
                 return $this->parseResponse($response, $action);
             } catch (ConnectException $e) {
+                $this->recordFailure();
                 $lastError = new XcVmConnectionException(
                     "Cannot reach XC-VM at {$uri}: {$e->getMessage()}",
                     previous: $e
                 );
             } catch (RequestException $e) {
+                $this->recordFailure();
                 $lastError = new XcVmConnectionException(
                     "XC-VM request failed for action [{$action}]: {$e->getMessage()}",
                     previous: $e

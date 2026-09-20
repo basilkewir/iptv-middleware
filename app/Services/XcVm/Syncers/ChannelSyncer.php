@@ -95,8 +95,8 @@ class ChannelSyncer extends AbstractSyncer
      * the raw udp:// address. The middleware's Nginx serves those segments
      * directly from disk with no PHP overhead.
      *
-     * All other source types (HTTP, HLS, RTMP, YouTube-resolved) are passed
-     * through unchanged — XC-VM handles them natively.
+     * All other source types (HTTP, HLS, RTMP, YouTube-resolved, Flussonic)
+     * are passed through unchanged — XC-VM handles them natively.
      */
     private function resolveStreamSource(Channel $channel): string
     {
@@ -105,10 +105,16 @@ class ChannelSyncer extends AbstractSyncer
         if (str_starts_with($raw, 'udp://') || str_starts_with($raw, 'rtp://')) {
             // Build the loopback HLS URL that the middleware's Nginx serves.
             // XC-VM fetches this over 127.0.0.1 so it never leaves the server.
-            // Use 127.0.0.1 explicitly (not config('app.url')) so the URL always
-            // resolves over loopback even if APP_URL points to a public IP.
             $port = (int) config('stream_server_port', config('xcvm.proxy_port', 25460));
             return "http://127.0.0.1:{$port}/hls/{$channel->id}/playlist.m3u8";
+        }
+
+        // For file-based sources in /storage/, translate to a URL XC-VM can reach.
+        if (str_starts_with($raw, '/storage/') || str_starts_with($raw, 'storage/')) {
+            $translated = \App\Services\XcVm\XcVmUrl::vod($raw);
+            if ($translated !== null) {
+                return $translated;
+            }
         }
 
         return $raw;

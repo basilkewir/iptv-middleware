@@ -105,6 +105,7 @@ class AdminChannelSyncer extends AbstractSyncer
      *   storage/app/streams/hls/admin-channel-{slug}/index.m3u8
      *
      * XC-VM fetches this over loopback via Nginx.
+     * Uses the middleware port (stream_server_port) so XC-VM can reach it.
      */
     private function resolveStreamSource(AdminChannel $channel): string
     {

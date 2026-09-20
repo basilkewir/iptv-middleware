@@ -23,6 +23,7 @@ use App\Services\VOD\VODService;
 use App\Services\XcVm\XcVmClient;
 use App\Services\XcVm\XcVmPlayerProxy;
 use App\Services\XcVm\XcVmSyncService;
+use App\Services\XcVm\XcVmStreamBridge;
 use App\Services\XcVm\UdpXcVmBridge;
 use App\Models\Bouquet;
 use App\Models\Channel;
@@ -156,8 +157,11 @@ class AppServiceProvider extends ServiceProvider
             ]));
         });
 
-        $this->app->singleton(UdpXcVmBridge::class, function ($app) {
-            return new UdpXcVmBridge($app->make(XcVmClient::class));
+        $this->app->singleton(XcVmStreamBridge::class, function ($app) {
+            return new XcVmStreamBridge($app->make(XcVmClient::class));
         });
+
+        // Alias for backward compatibility with existing Artisan commands.
+        $this->app->alias(XcVmStreamBridge::class, UdpXcVmBridge::class);
     }
 }

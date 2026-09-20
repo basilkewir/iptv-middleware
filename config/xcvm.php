@@ -121,4 +121,38 @@ return [
 
     'line_password_length' => (int) env('XC_VM_LINE_PASSWORD_LENGTH', 16),
 
+    /*
+    |--------------------------------------------------------------------------
+    | Ultra-Low Latency HLS Tuning
+    |--------------------------------------------------------------------------
+    | Controls the HLS output parameters for streams managed by XC-VM and
+    | the middleware's fallback ingest. Lower values = faster channel zapping
+    | and lower glass-to-glass latency, at the cost of slightly more CPU
+    | and bandwidth overhead.
+    |
+    | segment_duration: Duration of each .ts segment in seconds (2 = fastest)
+    | playlist_size:   Number of segments in the live playlist (3 = lowest latency)
+    | keyframe_interval: GOP size in frames for transcoded streams (segment_duration × fps)
+    */
+
+    'hls_segment_duration' => (int) env('XC_VM_HLS_SEGMENT_DURATION', 2),
+
+    'hls_playlist_size' => (int) env('XC_VM_HLS_PLAYLIST_SIZE', 3),
+
+    'hls_keyframe_interval' => (int) env('XC_VM_HLS_KEYFRAME_INTERVAL', 50),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Stream Health Monitoring
+    |--------------------------------------------------------------------------
+    | How often (in seconds) the bridge checks whether a channel's source
+    | is still fresh and pushes an updated URL to XC-VM when needed.
+    */
+
+    'stream_health_check_interval' => (int) env('XC_VM_HEALTH_CHECK_INTERVAL', 60),
+
+    // Maximum age (seconds) of a playlist file before the bridge considers
+    // the ingest dead and skips pushing the URL to XC-VM.
+    'max_playlist_age' => (int) env('XC_VM_MAX_PLAYLIST_AGE', 120),
+
 ];

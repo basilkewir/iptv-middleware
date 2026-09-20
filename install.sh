@@ -298,6 +298,10 @@ XC_VM_PROXY_TIMEOUT=60
 XC_VM_VOD_URL_BASE=http://127.0.0.1:${XCVM_PORT}/vod_bridge
 XC_VM_LINE_PASSWORD_SOURCE=m3u_token
 XC_VM_LINE_PASSWORD_LENGTH=16
+XC_VM_HLS_SEGMENT_DURATION=2
+XC_VM_HLS_PLAYLIST_SIZE=3
+XC_VM_HLS_KEYFRAME_INTERVAL=50
+XC_VM_MAX_PLAYLIST_AGE=120
 ENV
 
 success ".env written."
@@ -348,12 +352,6 @@ server {
     tcp_nodelay     on;
     keepalive_timeout 65;
     keepalive_requests 10000;
-
-    # In-memory cache for HLS fragments (RAM-backed delivery tier).
-    # Segments are read from tmpfs/NVMe and cached in shared memory
-    # so thousands of clients read from the same hot cache.
-    proxy_cache_path /dev/shm/nginx_hls_cache levels=1:2
-        keys_zone=HLS_CACHE:64m max_size=1g inactive=30s use_temp_path=off;
 
     # HLS segments and playlists — served directly from disk by nginx.
     # PHP never touches this data; sendfile copies straight to the socket.
@@ -407,6 +405,16 @@ sed -i 's/worker_connections.*/worker_connections 50000;/' /etc/nginx/nginx.conf
 grep -q 'use epoll' /etc/nginx/nginx.conf || \
     sed -i '/worker_connections/a \    use epoll;\n    multi_accept on;' /etc/nginx/nginx.conf
 
+# Add proxy_cache_path directives to the http block (must be outside server {})
+# Write to conf.d/ which is loaded before sites-enabled
+cat > /etc/nginx/conf.d/iptv-cache.conf <<'CACHECONF'
+# HLS segment caches — RAM-backed for ultra-low latency delivery.
+proxy_cache_path /dev/shm/nginx_hls_cache levels=1:2
+    keys_zone=HLS_CACHE:64m max_size=1g inactive=30s use_temp_path=off;
+proxy_cache_path /dev/shm/xcvm_hls_cache levels=1:2
+    keys_zone=XCVM_HLS:32m max_size=512m inactive=10s use_temp_path=off;
+CACHECONF
+
 nginx -t
 systemctl enable --now nginx
 systemctl reload nginx
@@ -424,8 +432,11 @@ net.ipv4.tcp_congestion_control = bbr
 # Large socket buffers for high-bandwidth multicast ingest and HLS delivery
 net.core.rmem_max = 134217728
 net.core.wmem_max = 134217728
-net.ipv4.tcp_rmem = 4096 87380 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
+
+# Reduced TCP buffering for ultra-low latency HLS delivery.
+# Smaller buffers = less buffering delay = faster first-byte on segment requests.
+net.ipv4.tcp_rmem = 4096 32768 16777216
+net.ipv4.tcp_wmem = 4096 32768 16777216
 
 # UDP receive buffer for multicast ingest (32 MB per socket)
 net.core.rmem_default = 33554432
@@ -436,8 +447,13 @@ fs.file-max = 2097152
 # TCP Fast Open — speeds up successive connections from same client
 net.ipv4.tcp_fastopen = 3
 
-# Keep pipe at full speed after idle (no slow-start penalty on channel switch)
+# Disable slow start after idle — instant full-speed delivery on channel switch
 net.ipv4.tcp_slow_start_after_idle = 0
+
+# Keepalive probes — detect dead connections faster
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
 SYSCTL
 sysctl -p /etc/sysctl.d/99-iptv-streaming.conf 2>/dev/null || true
 

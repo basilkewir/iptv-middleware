@@ -71,9 +71,10 @@ class Kernel extends ConsoleKernel
         // Full XC-VM reconciliation (runs only when the integration is enabled).
         $this->scheduleXcVmFullSync($schedule);
 
-        // UDP → XC-VM bridge: push loopback HLS URLs for multicast channels
-        // to XC-VM every minute so the engine always has a fresh source URL
-        // after an ingest restart. Runs only when XC-VM is enabled.
+        // Stream→XC-VM bridge: push source URLs for ALL active channels
+        // (UDP, HTTP, HLS, RTMP, YouTube) and live AdminChannels to XC-VM
+        // every minute so the engine always has a fresh source URL.
+        // Runs only when XC-VM is enabled.
         $schedule->command('xcvm:sync-udp')
             ->everyMinute()
             ->withoutOverlapping()

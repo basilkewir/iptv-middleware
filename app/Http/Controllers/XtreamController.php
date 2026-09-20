@@ -12,6 +12,8 @@ use App\Models\VODMedia;
 use App\Services\StreamingService\ConnectionLimiter;
 use App\Services\StreamingService\EdgeDispatcher;
 use App\Services\StreamingService\MulticastIngestService;
+use App\Services\XcVm\XcVmPlayerProxy;
+use App\Services\XcVm\XcVmStreamBridge;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
@@ -402,9 +404,16 @@ class XtreamController extends Controller
             abort(429, 'Connection limit reached');
         }
 
+        // Try XC-VM player proxy first for TS delivery
+        $proxy = app(XcVmPlayerProxy::class);
+        $streamed = $proxy->tryStream('channel', $channelId, $username, $password, '.ts');
+        if ($streamed !== null) {
+            return $streamed;
+        }
+
+        // Fallback to local HLS segment piping
         $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
 
-        // Ensure the local ingest is running for all source types.
         $this->ensureHlsStream(
             $channelId,
             $sourceUrl,
@@ -422,10 +431,6 @@ class XtreamController extends Controller
             usleep(500000);
         }
 
-        // Pipe segments sequentially as a continuous MPEG-TS stream.
-        // Reads from the local RAM-backed HLS directory — the upstream source
-        // is never contacted from here. Each segment is ~4s of video; we read
-        // them in order and loop on the playlist to follow new segments.
         return response()->stream(function () use ($segDir, $limiter, $user, $streamKey) {
             $lastSeg = -1;
 
@@ -436,7 +441,6 @@ class XtreamController extends Controller
                 $m3u8 = @file_get_contents($playlist);
                 if (! $m3u8) { usleep(500000); continue; }
 
-                // Parse segment filenames from the playlist in order.
                 preg_match_all('/^(segment_(\d+)\.ts)\s*$/m', $m3u8, $matches, PREG_SET_ORDER);
                 foreach ($matches as $m) {
                     $seq  = (int) $m[2];
@@ -451,11 +455,11 @@ class XtreamController extends Controller
                     flush();
 
                     $lastSeg = $seq;
-                    $limiter->acquire($user, $streamKey); // refresh slot
+                    $limiter->acquire($user, $streamKey);
                 }
 
                 if (connection_aborted()) break;
-                usleep(1000000); // poll every 1s for new segments
+                usleep(1000000);
             }
 
             $limiter->release($user->id, $streamKey);
@@ -473,12 +477,13 @@ class XtreamController extends Controller
      * Responsibilities (control plane only — no data transfer here):
      *   1. Authenticate via Redis token cache (< 1ms, no MySQL hit on warm cache)
      *   2. Enforce per-user concurrent connection limit
-     *   3. Ensure the ingest process is running (start if needed)
-     *   4. Dispatch to the least-loaded edge node, or fall back to local
-     *   5. Redirect the player to nginx-served HLS — zero PHP data transfer
+     *   3. Route through XC-VM player proxy (primary streaming engine)
+     *   4. Return 503 when XC-VM is unreachable
      *
-     * Nginx serves .m3u8 and .ts bytes directly from the RAM-backed HLS
-     * directory using sendfile+tcp_nopush. PHP never touches segment data.
+     * XC-VM is the sole streaming engine. The middleware authenticates
+     * every request and proxies the stream through XC-VM's player endpoints.
+     * No local ffmpeg ingest is started from this method — XC-VM handles
+     * all stream pulling and delivery.
      */
     public function streamLive(Request $request, $username, $password, $streamId)
     {
@@ -503,73 +508,56 @@ class XtreamController extends Controller
 
         $rawId = (int) $streamId;
 
-        // Admin / My-Channel streams — served from their own HLS output dir.
+        // ── 3. Route through XC-VM ────────────────────────────────────────────
+        $proxy = app(XcVmPlayerProxy::class);
+
+        // Admin / My-Channel streams
         if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
             $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
-            $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
+
+            $streamed = $proxy->tryStream(
+                'admin_channel',
+                $adminId,
+                $username,
+                $password,
+                strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION)) !== 'm3u8' ? '.m3u8' : null
+            );
+
+            if ($streamed !== null) {
+                return $streamed;
+            }
+
+            // XC-VM unavailable — serve the local HLS output directly.
+            $admin = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
             return redirect(config('app.url') . "/hls/admin-channel-{$admin->channel_slug}/index.m3u8");
         }
 
+        // Regular channel streams
         $channelId = $rawId;
         $channel   = Channel::where('id', $channelId)->where('is_active', true)->firstOrFail();
-        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
 
-        // ── 3. Ensure origin ingest is running ───────────────────────────────
-        // ffmpeg pulls the source once and writes HLS segments to the local
-        // RAM-backed tmpfs. All viewers share this single ingest — the source
-        // sees exactly one connection regardless of viewer count.
-        $this->ensureHlsStream(
+        $streamed = $proxy->tryStream(
+            'channel',
             $channelId,
-            $sourceUrl,
-            $channel->program_number,
-            $channel->local_address,
-            (bool) ($channel->transcoding_enabled ?? false)
+            $username,
+            $password,
+            strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION)) !== 'm3u8' ? '.m3u8' : null
         );
 
-        // ── 4. Edge dispatch ──────────────────────────────────────────────────
-        // Auth and ingest management happen here (control plane). Actual data
-        // delivery is offloaded to the least-loaded edge node. Edge nodes read
-        // HLS segments directly from disk via nginx — no PHP on the data path.
-        $edge = app(EdgeDispatcher::class)->bestEdge();
-        if ($edge !== null) {
-            app(EdgeDispatcher::class)->incrementConnections($edge);
-            return redirect("{$edge}/edge/live/{$username}/{$user->m3u_token}/{$channelId}.m3u8");
+        if ($streamed !== null) {
+            return $streamed;
         }
 
-        // ── 5. Local fallback: redirect to nginx-served HLS ──────────────────
-        // Nginx reads segments from storage/app/streams/hls/{id}/ with
-        // sendfile + tcp_nopush — zero PHP overhead on the data path.
-        $hlsBase  = config('app.url') . "/hls/{$channelId}";
-        $playlist = storage_path("app/streams/hls/{$channelId}/playlist.m3u8");
+        // ── 4. XC-VM unavailable — return 503 ────────────────────────────────
+        // XC-VM is the primary streaming engine. When it's unreachable we
+        // return 503 with Retry-After so players keep retrying instead of
+        // showing a permanent error.
+        Log::warning('XC-VM unavailable for live stream, returning 503', [
+            'channel_id' => $channelId,
+            'user_id'    => $user->id,
+        ]);
 
-        if (strtolower((string) pathinfo($streamId, PATHINFO_EXTENSION)) !== 'm3u8') {
-            return redirect("{$hlsBase}/playlist.m3u8");
-        }
-
-        // Wait up to 8s for the first playlist on cold start.
-        for ($i = 0; $i < 16 && ! file_exists($playlist); $i++) {
-            usleep(500000);
-        }
-
-        if (! file_exists($playlist)) {
-            $cached = Cache::get("hls:stale:live:{$channelId}:playlist");
-            if ($cached !== null) {
-                return response($cached, 200, [
-                    'Content-Type'               => 'application/vnd.apple.mpegurl',
-                    'Cache-Control'              => 'no-cache, no-store, must-revalidate',
-                    'Access-Control-Allow-Origin'=> '*',
-                    'X-HLS-Stale'               => '1',
-                ]);
-            }
-            $offline = config('streaming.offline.hls_dir') . '/playlist.m3u8';
-            if (is_file($offline)) {
-                return redirect(config('app.url') . '/hls/offline/playlist.m3u8');
-            }
-            return response('Service Unavailable', 503, ['Retry-After' => '3']);
-        }
-
-        // Redirect to nginx — nginx serves the file with sendfile, no PHP buffering.
-        return redirect("{$hlsBase}/playlist.m3u8");
+        abort(503, 'Streaming engine temporarily unavailable');
     }
 
     public function ensureHlsStream(int $channelId, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false): void
@@ -1058,8 +1046,16 @@ class XtreamController extends Controller
         if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) abort(401);
 
         $vodId = (int) $streamId;
-        $vod = VODContent::where('id', $vodId)->where('is_active', true)->firstOrFail();
 
+        // Try XC-VM player proxy first
+        $proxy = app(XcVmPlayerProxy::class);
+        $streamed = $proxy->tryStream('vod', $vodId, $username, $password);
+        if ($streamed !== null) {
+            return $streamed;
+        }
+
+        // Fallback to local file serving
+        $vod = VODContent::where('id', $vodId)->where('is_active', true)->firstOrFail();
         $media = $vod->vodMedia()->first();
         if (! $media?->stream_url) abort(404);
 
@@ -1074,8 +1070,16 @@ class XtreamController extends Controller
         if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) abort(401);
 
         $episodeId = (int) $streamId;
-        $media = VODMedia::where('id', $episodeId)->where('is_available', true)->firstOrFail();
 
+        // Try XC-VM player proxy first
+        $proxy = app(XcVmPlayerProxy::class);
+        $streamed = $proxy->tryStream('series', $episodeId, $username, $password);
+        if ($streamed !== null) {
+            return $streamed;
+        }
+
+        // Fallback to local file serving
+        $media = VODMedia::where('id', $episodeId)->where('is_available', true)->firstOrFail();
         if (! $media->stream_url) abort(404);
 
         return $this->serveVodFile($media->stream_url);
@@ -1320,7 +1324,7 @@ class XtreamController extends Controller
     {
         $url = parse_url(config('app.url'));
 
-        return [
+        $info = [
             'url'           => $url['host'] ?? $request->getHost(),
             'port'          => (string) ($url['port'] ?? 80),
             'https_port'    => '443',
@@ -1331,5 +1335,14 @@ class XtreamController extends Controller
             'time_now'      => now()->format('Y-m-d H:i:s'),
             'process'       => true,
         ];
+
+        // When XC-VM is the backend, signal this to players so they know
+        // the panel uses the Streambox/XC-VM hybrid architecture.
+        if (config('xcvm.enabled')) {
+            $info['xc_vm_enabled'] = true;
+            $info['xc_vm_healthy'] = app(XcVmPlayerProxy::class)::xcVmAvailable();
+        }
+
+        return $info;
     }
 }

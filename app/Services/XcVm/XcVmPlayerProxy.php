@@ -29,6 +29,19 @@ class XcVmPlayerProxy
     }
 
     /**
+     * Whether XC-VM is healthy and can serve streams.
+     * Returns false when the circuit breaker is open or XC-VM is not configured.
+     */
+    public static function xcVmAvailable(): bool
+    {
+        if (! self::enabled()) {
+            return false;
+        }
+
+        return app(\App\Services\XcVm\XcVmClient::class)->isHealthy();
+    }
+
+    /**
      * Map a middleware entity to its XC-VM id.
      */
     public function remoteId(string $type, int $localId): ?int
@@ -60,6 +73,10 @@ class XcVmPlayerProxy
         ?string $suffix = null
     ): mixed {
         if (! self::enabled()) {
+            return null;
+        }
+
+        if (! self::xcVmAvailable()) {
             return null;
         }
 
@@ -115,13 +132,20 @@ class XcVmPlayerProxy
 
     /**
      * Stream a non-playlist resource from XC-VM through chunk by chunk.
+     * Returns 204 on XC-VM errors instead of propagating 4xx/5xx, which
+     * keeps players alive during brief XC-VM hiccups.
      */
     protected function proxyStreaming(string $url): mixed
     {
         $response = $this->fetch($url);
 
         if ($response === null) {
-            return null;
+            // Return 204 No Content — players keep polling instead of
+            // showing a "playback error" dialog.
+            return response('', 204, [
+                'Cache-Control' => 'no-cache, no-store',
+                'Access-Control-Allow-Origin' => '*',
+            ]);
         }
 
         $status = $response->getStatusCode();
@@ -139,7 +163,7 @@ class XcVmPlayerProxy
         return response()->stream(
             function () use ($body) {
                 while (! $body->eof()) {
-                    echo $body->read(1024 * 1024);
+                    echo $body->read(2 * 1024 * 1024); // 2MB chunks for better throughput
                     if (ob_get_level() > 0) {
                         ob_flush();
                     }
@@ -155,11 +179,20 @@ class XcVmPlayerProxy
      * Rewrite an XC-VM HLS playlist so that every media reference flows back
      * through the middleware (/live/u/p/…), regardless of whether XC-VM emits
      * absolute (own-host) or bare relative segment names.
+     *
+     * Handles:
+     *   - Absolute URLs with upstream host
+     *   - Absolute paths (/live/..., /movie/..., /series/...)
+     *   - Bare segment filenames (456.ts)
+     *   - Variant/master playlists (#EXT-X-STREAM-INF)
+     *   - Media rendition URIs (#EXT-X-MEDIA URI=)
+     *   - Query strings on segment URLs (token-based auth preservation)
      */
     protected function rewritePlaylist(string $content, string $username, string $password, int $remoteId): string
     {
         $appUrl = rtrim((string) config('app.url'), '/');
 
+        // Strip the upstream base URL prefix (scheme + host + port)
         $content = str_replace(["{$this->upstreamBase()}/", "{$this->upstreamBase()} "], "{$appUrl}/", $content);
 
         // Absolute /live /movie /series paths without a host.
@@ -170,9 +203,33 @@ class XcVmPlayerProxy
         );
 
         // Bare segment names, e.g. "456.ts" or "456.m3u8".
+        // Only match when preceded by a quote, space, or line start to avoid
+        // breaking other numeric values in the playlist.
+        $escapedRemoteId = preg_quote((string) $remoteId, '#');
         $content = preg_replace(
-            '#\b' . preg_quote((string) $remoteId, '#') . '\.(ts|m3u8)(?=[\s"\'<;]|$)#',
-            $appUrl . "/live/{$username}/{$password}/{$remoteId}.\$1",
+            '#([\s"\',/])' . $escapedRemoteId . '\.(ts|m3u8)(?=[\s"\'<;?]|$)#m',
+            '$1' . $appUrl . "/live/{$username}/{$password}/{$remoteId}.\$2",
+            $content
+        );
+
+        // Handle #EXT-X-MEDIA URI= tags (audio/subtitle rendition playlists)
+        $content = preg_replace(
+            '#(URI=")(/(?:live|movie|series)/[^"]+)(")#',
+            '$1' . $appUrl . '$2$3',
+            $content
+        );
+
+        // Handle #EXT-X-STREAM-INF URI= tags (multi-bitrate master playlists)
+        $content = preg_replace(
+            '#(URI=")([^"]+\.m3u8[^"]*)(")#',
+            function ($m) use ($appUrl) {
+                $uri = $m[2];
+                // Only rewrite if it's a relative or upstream-host URL
+                if (str_starts_with($uri, 'http://') || str_starts_with($uri, 'https://')) {
+                    return $m[0]; // Already absolute, leave alone
+                }
+                return $m[1] . $appUrl . '/' . ltrim($uri, '/') . $m[3];
+            },
             $content
         );
 
