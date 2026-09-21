@@ -701,6 +701,17 @@ class XtreamController extends Controller
         // program number) get their own per-channel ingest below.
         $isMulticast = str_starts_with($sourceUrl, 'udp://') || str_starts_with($sourceUrl, 'rtp://');
         if ($isMulticast && $programNumber !== null && $programNumber > 0 && $channelId > 0) {
+            // Fast path: if the playlist is fresh (< 15s), skip the entire
+            // ensureGroupReader() call which acquires a Redis lock and may
+            // scan /proc. This makes zapping near-instant on healthy channels.
+            $playlist = $outputDir . '/playlist.m3u8';
+            if (is_file($playlist)) {
+                $age = time() - (int) @filemtime($playlist);
+                if ($age < 15) {
+                    return;
+                }
+            }
+
             // Kill any orphaned per-channel ingest that may be competing
             // for the same multicast socket (double-join → packet splits).
             // Skip if the PID in ingest.pid belongs to the multicast group
@@ -1012,7 +1023,7 @@ class XtreamController extends Controller
         $inputOpts = $isMulticast
             ? '-fflags +genpts+discardcorrupt+nobuffer -flags low_delay -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -probesize 1M -analyzeduration 500000 -rw_timeout %d -timeout %d -i %s'
             : ($isLiveHttp
-                ? '-fflags +genpts+discardcorrupt+nobuffer -flags low_delay -max_interleave_delta 0 -reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d ' . $hlsOpts . $userAgent . ' -i %s'
+                ? '-fflags +genpts+discardcorrupt+nobuffer -flags low_delay -max_interleave_delta 0 -probesize 320000 -analyzeduration 2000000 -reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d ' . $hlsOpts . $userAgent . ' -i %s'
                 : '-reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d -re -i %s');
 
         // -map p:N only applies to raw UDP MPEG-TS muxes where multiple programs
@@ -1094,7 +1105,7 @@ class XtreamController extends Controller
         $restartClean = '[ "$HAS_SEGS" = "1" ] && rm -f "$ODIR"/playlist.m3u8; ';
 
         return sprintf(
-            'ODIR=%s; L=%s; DELAY=3; '
+            'ODIR=%s; L=%s; DELAY=3; FAILS=0; '
             . $ytInit
             . 'echo "WRAPPER START $$ ppid=$PPID $(date +%%s)" >> "$L"; '
             . 'trap \'echo "WRAPPER EXIT rc=$? ppid=$PPID $(date +%%s)" >> "$L"; exec >> "$L" 2>&1\' EXIT; '
@@ -1122,9 +1133,12 @@ class XtreamController extends Controller
             .   '-hls_segment_filename "$ODIR"/seg_%%06d.ts '
             .   '"$ODIR"/playlist.m3u8 2>>"$L"; '
             .   'NEW_SEGS=0; ls "$ODIR"/seg_*.ts > /dev/null 2>&1 && NEW_SEGS=1; '
-            .   'if [ "$NEW_SEGS" = "1" ]; then DELAY=3; '
-            .   'else DELAY=$((DELAY * 2)); [ $DELAY -gt 30 ] && DELAY=30; fi; '
-            .   'echo "WRAPPER RETRY delay=$DELAY $(date +%%s)" >> "$L"; '
+            .   'if [ "$NEW_SEGS" = "1" ]; then DELAY=3; FAILS=0; '
+            .   'else FAILS=$((FAILS + 1)); DELAY=$((DELAY * 2)); [ $DELAY -gt 30 ] && DELAY=30; fi; '
+            .   'echo "WRAPPER RETRY delay=$DELAY fails=$FAILS $(date +%%s)" >> "$L"; '
+            // After 10 consecutive failures (dead source), exit to free resources.
+            // The watchdog or next client request will restart it.
+            .   ($isMulticast ? '' : '[ "$FAILS" -ge 10 ] && echo "WRAPPER GAVE UP after $FAILS failures" >> "$L" && exit 1; ')
             .   'sleep $DELAY; '
             // UDP channels use a higher hold gate so a busy HTTP-channel
             // load spike doesn't block multicast recovery. UDP ffmpeg is
