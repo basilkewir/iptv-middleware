@@ -1100,8 +1100,10 @@ class XtreamController extends Controller
                 ? $liveMap . ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k' . $gopFlags . ' -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls '
                 : ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . $liveMap . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency' . $gopFlags . ' -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls ')
             : ($isMulticast
-                // Video copy — source GOP preserved. Audio normalized to AAC.
-                ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls '
+                // Video copy — source GOP preserved. Audio passthrough
+                // (copy) avoids decode/re-encode crashes on corrupt input
+                // and reduces CPU. Players handle MP2/AC3 natively.
+                ? ' -threads ' . self::FFMPEG_THREADS_SINGLE . ' -c:v copy -c:a copy -f hls '
                 : ' -threads ' . self::FFMPEG_THREADS_SINGLE . $liveMap . ' -c:v copy -c:a copy -f hls ');
 
         // All channels run permanently — no idle timeout.  This ensures
@@ -1147,7 +1149,9 @@ class XtreamController extends Controller
                 ? 'NEW_URL=$(cd ' . base_path() . ' && php artisan youtube:refresh-url ' . $channelId . ' 2>/dev/null); if [ $? -eq 0 ] && [ -n "$NEW_URL" ]; then SRC_URL="$NEW_URL"; echo "YOUTUBE REFRESHED $SRC_URL" >> "$L"; fi; '
                 : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
-            .   ($isMulticast ? '-hls_time 2 -hls_list_size 6 ' : '-hls_time 2 -hls_list_size 6 ')
+            // 10 segments × 2s = 20s buffer — critical for hotel WiFi
+            // where network jitter causes frequent buffer underruns.
+            .   '-hls_time 2 -hls_list_size 10 '
             // No split_by_time: with -c:v copy it would force segment cuts at
             // exact time boundaries regardless of keyframes — segments start
             // mid-GOP without SPS/PPS and players choke at every boundary
