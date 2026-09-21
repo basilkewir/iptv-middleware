@@ -189,7 +189,7 @@ class PurgeOrphanFfmpeg extends Command
         // Clean only segment files — preserve the directory and control files
         // (.stop, .heartbeat, ingest.pid) so the wrapper can restart cleanly.
         if (is_dir($outputDir)) {
-            foreach (glob("{$outputDir}/segment_*.ts") ?: [] as $seg) {
+            foreach (glob("{$outputDir}/seg_*.ts") ?: [] as $seg) {
                 @unlink($seg);
             }
             @unlink($outputDir . '/playlist.m3u8');
@@ -270,7 +270,7 @@ class PurgeOrphanFfmpeg extends Command
         $cleaned = 0;
 
         foreach (glob($hlsRoot . '/*', GLOB_ONLYDIR) ?: [] as $dir) {
-            $segments = glob("{$dir}/segment_*.ts") ?: [];
+            $segments = glob("{$dir}/seg_*.ts") ?: [];
 
             foreach ($segments as $file) {
                 if ((time() - (int) @filemtime($file)) < $maxAge) {

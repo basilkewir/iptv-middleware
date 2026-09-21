@@ -26,7 +26,7 @@ class ChannelPushService
         ?int $videoBitrate = null,
         ?int $audioBitrate = null,
     ): ChannelPushDestination {
-        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+        $sourceUrl = $this->resolvePushSource($channel);
 
         if (empty($sourceUrl)) {
             throw new \RuntimeException('Channel has no active source URL.');
@@ -46,7 +46,9 @@ class ChannelPushService
         }
 
         $outputUrl = $this->buildOutputUrl($destination, $streamKey);
-        $ffmpegCmd = $this->buildFFmpegCommand($sourceUrl, $outputUrl, $destination->protocol, $videoBitrate, $audioBitrate);
+        $isUdpSource = str_starts_with($channel->stream_url ?? '', 'udp://')
+            || str_starts_with($channel->stream_url ?? '', 'rtp://');
+        $ffmpegCmd = $this->buildFFmpegCommand($sourceUrl, $outputUrl, $destination->protocol, $videoBitrate, $audioBitrate, $isUdpSource);
         $pid = $this->executePushWrapper($ffmpegCmd, $channel->id, $destination->id);
 
         if ($existing) {
@@ -89,6 +91,50 @@ class ChannelPushService
         ]);
 
         return $record;
+    }
+
+    /**
+     * Resolve the best source URL for pushing.
+     *
+     * For UDP/RTP channels: pull from the local HLS playlist instead of the
+     * raw multicast socket. This eliminates the double-ingest race condition
+     * where two FFmpeg processes fight over the same multicast socket, causing
+     * packet drops, macroblocking, and wasted CPU.
+     *
+     * For HTTP/HLS/RTMP channels: use the active source URL directly.
+     */
+    private function resolvePushSource(Channel $channel): string
+    {
+        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+
+        if (empty($sourceUrl)) {
+            return '';
+        }
+
+        // For UDP/RTP multicast: check if the local ingest is already running.
+        // If so, pull from the local HLS playlist — zero CPU, zero socket conflicts.
+        $isMulticast = str_starts_with($sourceUrl, 'udp://') || str_starts_with($sourceUrl, 'rtp://');
+        if ($isMulticast) {
+            $playlist = storage_path("app/streams/hls/{$channel->id}/playlist.m3u8");
+            if (is_file($playlist)) {
+                $age = time() - (int) @filemtime($playlist);
+                // Playlist is fresh (< 90s) — local ingest is alive, use it
+                if ($age < 90) {
+                    // Return the internal HLS URL that Nginx can serve.
+                    // The push FFmpeg reads from the local filesystem directly.
+                    return $playlist;
+                }
+            }
+
+            // Local ingest not running — fall back to raw UDP source
+            // (ChannelPushService will handle it as a standalone ingest)
+            Log::info('Push falling back to raw UDP source (local ingest not running)', [
+                'channel_id' => $channel->id,
+                'source' => $sourceUrl,
+            ]);
+        }
+
+        return $sourceUrl;
     }
 
     public function stopPush(ChannelPushDestination $push): void
@@ -199,21 +245,30 @@ class ChannelPushService
         string $protocol,
         ?int $videoBitrate = null,
         ?int $audioBitrate = null,
+        bool $isLocalHls = false,
     ): string {
         $videoKbps = $videoBitrate ? ($videoBitrate . 'k') : null;
         $audioKbps = $audioBitrate ? ($audioBitrate . 'k') : null;
 
         $inputOpts = [];
-        if (str_starts_with($inputUrl, 'http://') || str_starts_with($inputUrl, 'https://')) {
+        if ($isLocalHls) {
+            // Local HLS playlist from tmpfs — pure stream copy, zero CPU.
+            // The segments are already timestamp-corrected by the primary ingest.
+            $inputOpts[] = '-fflags +genpts+nobuffer -flags low_delay';
+            $inputOpts[] = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 2';
+        } elseif (str_starts_with($inputUrl, 'http://') || str_starts_with($inputUrl, 'https://')) {
             $inputOpts[] = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_on_network_error 1';
         } elseif (str_starts_with($inputUrl, 'rtsp://')) {
             $inputOpts[] = '-rtsp_transport tcp -stimeout 10000000';
         } elseif (str_starts_with($inputUrl, 'udp://') || str_starts_with($inputUrl, 'rtp://')) {
-            $inputOpts[] = '-timeout 5000000 -rw_timeout 5000000';
+            $inputOpts[] = '-fflags +genpts+discardcorrupt+nobuffer -flags low_delay -err_detect ignore_err -avoid_negative_ts make_zero -timeout 5000000 -rw_timeout 5000000';
         }
 
         $videoOpts = [];
-        if ($videoKbps) {
+        if ($isLocalHls) {
+            // Local HLS: always copy — segments are already processed
+            $videoOpts[] = '-c:v copy';
+        } elseif ($videoKbps) {
             $videoOpts[] = '-c:v libx264';
             $videoOpts[] = '-b:v ' . $videoKbps;
             $videoOpts[] = '-preset veryfast';
@@ -224,7 +279,10 @@ class ChannelPushService
         }
 
         $audioOpts = [];
-        if ($audioKbps) {
+        if ($isLocalHls) {
+            // Local HLS: always copy audio
+            $audioOpts[] = '-c:a copy';
+        } elseif ($audioKbps) {
             $audioOpts[] = '-c:a aac';
             $audioOpts[] = '-b:a ' . $audioKbps;
             $audioOpts[] = '-ac 2';

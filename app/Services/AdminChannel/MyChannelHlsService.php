@@ -115,11 +115,11 @@ class MyChannelHlsService
             // When restarting, keep existing segment numbering for seamless HLS
             $startSegment = 0;
             if ($wasRunning || is_dir($streamDir)) {
-                $segments    = glob("{$streamDir}/segment_*.ts") ?: [];
+                $segments    = glob("{$streamDir}/seg_*.ts") ?: [];
                 if (! empty($segments)) {
                     natsort($segments);
                     $last        = basename((string) end($segments), '.ts');
-                    $startSegment = (int) substr($last, 8) + 1;
+                    $startSegment = (int) substr($last, 4) + 1;
                 }
             }
 
@@ -281,7 +281,7 @@ class MyChannelHlsService
             $newest = max($newest, (int) @filemtime($playlist));
         }
 
-        foreach (glob("{$streamDir}/segment_*.ts") ?: [] as $seg) {
+        foreach (glob("{$streamDir}/seg_*.ts") ?: [] as $seg) {
             $newest = max($newest, (int) @filemtime($seg));
         }
 
@@ -633,12 +633,12 @@ class MyChannelHlsService
         $streamDir = $this->streamDir($channel);
 
         // Find next segment number
-        $segments    = glob("{$streamDir}/segment_*.ts") ?: [];
+        $segments    = glob("{$streamDir}/seg_*.ts") ?: [];
         $nextSegment = 0;
         if (! empty($segments)) {
             natsort($segments);
             $last        = basename((string) end($segments), '.ts');
-            $nextSegment = (int) substr($last, 8) + 1;
+            $nextSegment = (int) substr($last, 4) + 1;
         }
 
         // Kill current FFmpeg but leave stream dir intact
@@ -780,7 +780,7 @@ CONCAT="{$concatPath}"
 # Next segment number = highest segment on disk + 1. Keeps the HLS playlist
 # continuous across any crash/restart instead of resetting to 0.
 next_segment() {
-    last=\$(ls "\$STREAM_DIR"/segment_*.ts 2>/dev/null | sed 's/.*segment_0*//;s/\.ts\$//' | sort -n 2>/dev/null | tail -1)
+    last=\$(ls "\$STREAM_DIR"/seg_*.ts 2>/dev/null | sed 's/.*seg_0*//;s/\.ts\$//' | sort -n 2>/dev/null | tail -1)
     if [ -n "\$last" ]; then
         echo \$((last + 1))
     else
@@ -797,7 +797,7 @@ while true; do
     fi
     echo "PLAYOUT START seg=\$N \$(date +%s)" >> "\$STREAM_DIR/ffmpeg.log"
     "\$FFMPEG" -y -hide_banner -loglevel warning \\
-        -fflags +genpts+igndts -f concat -safe 0 -re -i "\$CONCAT" \\
+        -fflags +genpts+igndts+nobuffer -flags low_delay -f concat -safe 0 -re -i "\$CONCAT" \\
         -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \\
         {$inputLines}-c:v {$videoCodec} \\
         -maxrate {$bitrate}k -bufsize {$bitrate}k -g {$gop} -pix_fmt yuv420p \\
@@ -806,14 +806,15 @@ while true; do
         -map '[vout]' -map '[aout]' \\
         -c:a aac -b:a 128k -ac 2 -ar 48000 \\
         -f hls -hls_time {$this->segmentDuration} -hls_list_size {$this->playlistSize} \\
-        -hls_flags independent_segments+delete_segments+append_list+discont_start \\
+        -hls_flags independent_segments+delete_segments+omit_endlist+temp_file+append_list+discont_start \\
         -hls_allow_cache 0 \\
         -hls_segment_type mpegts \\
+        -muxdelay 0 -muxpreload 0 \\
         -max_muxing_queue_size 4096 \\
-        {$startNum}\$START_N -hls_segment_filename "\$STREAM_DIR/segment_%05d.ts" \\
+        {$startNum}\$START_N -hls_segment_filename "\$STREAM_DIR/seg_%06d.ts" \\
         "\$STREAM_DIR/index.m3u8" >> "\$STREAM_DIR/ffmpeg.log" 2>&1
     echo "PLAYOUT EXIT rc=\$? \$(date +%s)" >> "\$STREAM_DIR/ffmpeg.log"
-    sleep 3
+    sleep 2
 done
 BASH;
 

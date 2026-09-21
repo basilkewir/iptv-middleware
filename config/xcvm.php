@@ -42,8 +42,8 @@ return [
     |--------------------------------------------------------------------------
     */
 
-    'hls_segment_duration' => (int) env('XC_VM_HLS_SEGMENT_DURATION', 4),
-    'hls_playlist_size' => (int) env('XC_VM_HLS_PLAYLIST_SIZE', 5),
+    'hls_segment_duration' => (int) env('XC_VM_HLS_SEGMENT_DURATION', 2),
+    'hls_playlist_size' => (int) env('XC_VM_HLS_PLAYLIST_SIZE', 3),
     'hls_keyframe_interval' => (int) env('XC_VM_HLS_KEYFRAME_INTERVAL', 100),
 
     'stream_health_check_interval' => (int) env('XC_VM_HEALTH_CHECK_INTERVAL', 60),

@@ -58,13 +58,12 @@ class MulticastIngestService
     /** Load threshold the group reader waits under before respawning ffmpeg. */
     private const HOLD_GATE = 24;
 
-    // HLS segment duration and playlist size for smooth TV playback.
-    // 4s segments with 5 in playlist = ~20s window — enough buffer for TV
-    // apps to ride out the short multicast pauses (ad breaks, blank breaks)
-    // without exhausting the player buffer and showing playback errors,
-    // while keeping live latency reasonable.
+    // Ultra-low-latency HLS: 2s micro-segments with sliding window of 3.
+    // Players fetch the absolute newest blocks with ~6s total latency
+    // (2s segment + 2s playlist window + 2s network/player buffer).
+    // temp_file flag prevents Nginx from serving half-written segments.
     private const HLS_SEGMENT_TIME = 2;
-    private const HLS_PLAYLIST_SIZE = 6;
+    private const HLS_PLAYLIST_SIZE = 3;
 
     /**
      * Get all active multicast channels grouped by their source URL.
@@ -387,7 +386,7 @@ class MulticastIngestService
             // by streamLive() still reference those files, so players riding
             // through the restart keep receiving data (204 instead of 404/503)
             // instead of a hard "channel playback error". The new ffmpeg simply
-            // overwrites segment_%04d.ts in place as it produces fresh output.
+            // overwrites seg_%06d.ts in place as it produces fresh output.
             foreach ($bucketChannels as $ch) {
                 $dir = storage_path("app/streams/hls/{$ch->id}");
                 if (is_dir($dir)) {
@@ -518,10 +517,11 @@ class MulticastIngestService
                 . '%s'
                 . ' -max_muxing_queue_size 65536'
                 . '%s'
-            .   ' -f hls -hls_time %d -hls_list_size %d'
-            .   ' -hls_flags delete_segments+temp_file+independent_segments+append_list+split_by_time+discont_start'
-            .   ' -muxdelay 0 -muxpreload 0'
-            .   ' -hls_segment_filename %s/segment_%%04d.ts'
+                .   ' -f hls -hls_time %d -hls_list_size %d'
+                .   ' -hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+split_by_time+discont_start'
+                .   ' -hls_segment_type mpegts'
+                .   ' -muxdelay 0 -muxpreload 0'
+                .   ' -hls_segment_filename %s/seg_%%06d.ts'
                 . ' %s/playlist.m3u8',
                 $programNumber,
                 $videoCodec,

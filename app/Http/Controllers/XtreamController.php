@@ -8,7 +8,9 @@ use App\Models\ContentCategory;
 use App\Models\EPGProgram;
 use App\Models\User;
 use App\Models\VODContent;
+use App\Models\VODEpisode;
 use App\Models\VODMedia;
+use App\Models\VODSeason;
 use App\Services\StreamingService\ConnectionLimiter;
 use App\Services\StreamingService\EdgeDispatcher;
 use App\Services\StreamingService\MulticastIngestService;
@@ -241,51 +243,92 @@ class XtreamController extends Controller
         return response()->json($cats);
     }
 
-    // Series info with seasons/episodes
+    // Series info with seasons/episodes — XC-VM spec compliant
     public function seriesInfo(Request $request)
     {
         $user = $this->authenticate($request);
         if (! $user) return response()->json([], 401);
 
-        $series = VODContent::with(['vodMedia', 'categories'])->find($request->series_id);
+        $series = VODContent::with(['categories'])->find($request->series_id);
         if (! $series) return response()->json([]);
 
+        // Use the VODSeason/VODEpisode models for proper relational hierarchy.
+        // XC players require: "episodes": { "1": [...], "2": [...] }
+        // where the key is the string representation of the season number.
+        $seasons  = [];
         $episodes = [];
-        foreach ($series->vodMedia as $ep) {
-            $season = $ep->season_number ?? 1;
-            $episodes[$season][] = [
-                'id'             => (string) $ep->id,
-                'episode_num'    => $ep->episode_number ?? 1,
-                'title'          => $ep->title ?? $series->title,
-                'container_extension' => $ep->stream_type ?? 'mp4',
-                'info' => [
-                    'duration_secs' => $ep->duration ?? 0,
-                    'duration'      => gmdate('H:i:s', $ep->duration ?? 0),
-                    'video' => [],
-                    'audio' => [],
-                ],
-                'custom_sid'     => '',
-                'added'          => (string) $ep->created_at?->timestamp,
-                'season'         => $season,
-                'direct_source'  => '',
+
+        $seasonsModels = VODSeason::where('vod_content_id', $series->id)
+            ->orderBy('season_number')
+            ->get();
+
+        foreach ($seasonsModels as $season) {
+            $seasonKey = (string) $season->season_number;
+
+            $seasons[] = [
+                'id'             => $season->season_number,
+                'season_number'  => $season->season_number,
+                'name'           => $season->title ?: "Season {$season->season_number}",
+                'episode_count'  => $season->episode_count ?? $season->episodes()->count(),
+                'air_date'       => $season->air_date?->format('Y-m-d') ?? '',
+                'overview'       => $season->description ?? '',
             ];
+
+            // Fetch episodes for this season via the VODMedia pivot
+            $seasonEpisodes = VODMedia::where('vod_content_id', $series->id)
+                ->where('season_number', $season->season_number)
+                ->orderBy('episode_number')
+                ->get();
+
+            foreach ($seasonEpisodes as $ep) {
+                $ext = $ep->stream_url
+                    ? pathinfo($ep->stream_url, PATHINFO_EXTENSION) ?: 'mp4'
+                    : 'mp4';
+
+                $episodes[$seasonKey][] = [
+                    'id'                  => $ep->id,
+                    'episode_num'         => $ep->episode_number ?? 1,
+                    'title'               => $ep->episode_title ?? $ep->file_name ?? "Episode {$ep->episode_number}",
+                    'container_extension' => $ext,
+                    'custom_sid'          => '',
+                    'direct_source'       => '',
+                    'season'              => $season->season_number,
+                    'info' => [
+                        'duration_secs' => $ep->duration ?? 0,
+                        'duration'      => gmdate('H:i:s', $ep->duration ?? 0),
+                        'bitrate'       => $ep->bitrate ?? 0,
+                        'movie_image'   => $ep->still_url ?? $ep->file_name ?? '',
+                        'rating'        => '',
+                        'rating_10'     => 0,
+                        'releaseDate'   => $ep->air_date?->format('Y-m-d') ?? '',
+                        'plot'          => '',
+                        'director'      => '',
+                        'cast'          => '',
+                        'duration_secs' => $ep->duration ?? 0,
+                    ],
+                ];
+            }
         }
 
+        // Sort episodes by season number (string keys must be ordered)
+        ksort($episodes);
+
         return response()->json([
-            'seasons' => [],
+            'seasons' => $seasons,
             'info' => [
-                'name'          => $series->title,
-                'cover'         => $series->poster_url ?? '',
-                'plot'          => $series->description ?? '',
-                'cast'          => is_array($series->cast) ? implode(', ', $series->cast) : ($series->cast ?? ''),
-                'director'      => $series->director ?? '',
-                'genre'         => is_array($series->genre) ? implode(', ', $series->genre) : ($series->genre ?? ''),
-                'releaseDate'   => $series->year ?? '',
-                'backdrop_path' => $series->backdrop_url ? [$series->backdrop_url] : [],
+                'name'            => $series->title,
+                'cover'           => $series->poster_url ?? '',
+                'plot'            => $series->description ?? '',
+                'cast'            => is_array($series->cast) ? implode(', ', $series->cast) : ($series->cast ?? ''),
+                'director'        => $series->director ?? '',
+                'genre'           => is_array($series->genre) ? implode(', ', $series->genre) : ($series->genre ?? ''),
+                'releaseDate'     => $series->year ?? '',
+                'backdrop_path'   => $series->backdrop_url ? [$series->backdrop_url] : [],
                 'youtube_trailer' => $series->trailer_url ?? '',
                 'episode_run_time' => '',
-                'category_id'   => $series->categories->first()?->id ?? '',
-                'rating'        => (string) $series->rating,
+                'category_id'     => $series->categories->first()?->id ?? '',
+                'rating'          => (string) $series->rating,
+                'rating_5based'   => round($series->rating / 2, 1),
             ],
             'episodes' => $episodes,
         ]);
@@ -409,7 +452,7 @@ class XtreamController extends Controller
         $segDir = storage_path("app/streams/hls/{$channelId}");
 
         for ($i = 0; $i < 12; $i++) {
-            $segs = glob($segDir . '/segment_*.ts') ?: [];
+            $segs = glob($segDir . '/seg_*.ts') ?: [];
             if (! empty($segs)) break;
             usleep(500000);
         }
@@ -424,7 +467,7 @@ class XtreamController extends Controller
                 $m3u8 = @file_get_contents($playlist);
                 if (! $m3u8) { usleep(500000); continue; }
 
-                preg_match_all('/^(segment_(\d+)\.ts)\s*$/m', $m3u8, $matches, PREG_SET_ORDER);
+                preg_match_all('/^(seg_(\d+)\.ts)\s*$/m', $m3u8, $matches, PREG_SET_ORDER);
                 foreach ($matches as $m) {
                     $seq  = (int) $m[2];
                     $file = $segDir . '/' . $m[1];
@@ -783,7 +826,7 @@ class XtreamController extends Controller
     }
 
     /**
-     * A healthy ingest writes a new segment roughly every 6 seconds. When the
+     * A healthy ingest writes a new segment roughly every 2 seconds. When the
      * most recent segment is older than the staleness window the ingest is
      * considered frozen even if its process is still alive.
      */
@@ -791,7 +834,7 @@ class XtreamController extends Controller
     {
         $newest = 0;
 
-        foreach (glob($outputDir . '/segment_*.ts') ?: [] as $segment) {
+        foreach (glob($outputDir . '/seg_*.ts') ?: [] as $segment) {
             $mtime = @filemtime($segment);
 
             if ($mtime !== false && $mtime > $newest) {
@@ -813,7 +856,7 @@ class XtreamController extends Controller
 
     private function cleanOutputDirectory(string $outputDir): void
     {
-        foreach (glob($outputDir . '/segment_*.ts') ?: [] as $segment) {
+        foreach (glob($outputDir . '/seg_*.ts') ?: [] as $segment) {
             @unlink($segment);
         }
 
@@ -871,6 +914,9 @@ class XtreamController extends Controller
         // +genpts regenerates missing PTS after TS discontinuities and
         // +discardcorrupt drops damaged packets instead of stalling the decode
         // pipeline — both keep multicast ingests alive through rough patches.
+        // +nobuffer tells the demuxer not to read ahead on the socket and
+        // -flags low_delay disables B-frame reordering delay — together with a
+        // small -probesize/-analyzeduration they slash feed-to-screen latency.
         //
         // Live HLS (.m3u8) and HTTP MPEG-TS streams must NOT use -re: they
         // are already paced by the upstream server. Adding -re throttles
@@ -903,7 +949,7 @@ class XtreamController extends Controller
         $inputOpts = $isMulticast
             ? '-fflags +genpts+discardcorrupt+nobuffer -flags low_delay -err_detect ignore_err -avoid_negative_ts make_zero -max_interleave_delta 0 -probesize 1M -analyzeduration 500000 -rw_timeout %d -timeout %d -i %s'
             : ($isLiveHttp
-                ? '-fflags +genpts+discardcorrupt -max_interleave_delta 0 -reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d ' . $hlsOpts . $userAgent . ' -i %s'
+                ? '-fflags +genpts+discardcorrupt+nobuffer -flags low_delay -max_interleave_delta 0 -reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d ' . $hlsOpts . $userAgent . ' -i %s'
                 : '-reconnect 1 -reconnect_streamed 1 -reconnect_on_http_error 404,403 -reconnect_delay_max 5 -rw_timeout %d -timeout %d -re -i %s');
 
         // -map p:N only applies to raw UDP MPEG-TS muxes where multiple programs
@@ -1000,18 +1046,19 @@ class XtreamController extends Controller
             . 'done; '
             . 'while true; do '
             .   '[ -f "$ODIR/.stop" ] && exit 0; '
-            .   'HAS_SEGS=0; ls "$ODIR"/segment_*.ts > /dev/null 2>&1 && HAS_SEGS=1; '
+            .   'HAS_SEGS=0; ls "$ODIR"/seg_*.ts > /dev/null 2>&1 && HAS_SEGS=1; '
             . $restartClean
             .   ($channelId > 0 && str_contains(strtolower($sourceUrl), 'youtube')
                 ? 'NEW_URL=$(cd ' . base_path() . ' && php artisan youtube:refresh-url ' . $channelId . ' 2>/dev/null); if [ $? -eq 0 ] && [ -n "$NEW_URL" ]; then SRC_URL="$NEW_URL"; echo "YOUTUBE REFRESHED $SRC_URL" >> "$L"; fi; '
                 : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
-            .   ($isMulticast ? '-hls_time 2 -hls_list_size 6 ' : '-hls_time 2 -hls_list_size 8 ')
-            .   '-hls_flags delete_segments+temp_file+independent_segments+append_list+split_by_time+discont_start '
+            .   ($isMulticast ? '-hls_time 2 -hls_list_size 3 ' : '-hls_time 2 -hls_list_size 3 ')
+            .   '-hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+split_by_time+discont_start '
+            .   '-hls_segment_type mpegts '
             .   '-muxdelay 0 -muxpreload 0 '
-            .   '-hls_segment_filename "$ODIR"/segment_%%04d.ts '
+            .   '-hls_segment_filename "$ODIR"/seg_%%06d.ts '
             .   '"$ODIR"/playlist.m3u8 2>>"$L"; '
-            .   'NEW_SEGS=0; ls "$ODIR"/segment_*.ts > /dev/null 2>&1 && NEW_SEGS=1; '
+            .   'NEW_SEGS=0; ls "$ODIR"/seg_*.ts > /dev/null 2>&1 && NEW_SEGS=1; '
             .   'if [ "$NEW_SEGS" = "1" ]; then DELAY=3; '
             .   'else DELAY=$((DELAY * 2)); [ $DELAY -gt 30 ] && DELAY=30; fi; '
             .   'echo "WRAPPER RETRY delay=$DELAY $(date +%%s)" >> "$L"; '
@@ -1156,6 +1203,307 @@ class XtreamController extends Controller
             'X-Accel-Redirect'           => '/internal_remote_vod',
             'X-Target-Host'              => $targetHost,
             'X-Target-URI'               => $targetUri,
+        ]);
+    }
+
+    // ─── XC-VM Stream Delivery Methods ───────────────────────────────────────
+
+    /**
+     * Serve a live stream as HTTP-TS (.ts) — fast channel zapping.
+     *
+     * XC-VM route: /{username}/{password}/{stream_id}.ts
+     */
+    public function serveLiveStream(Request $request, string $username, string $password, int|string $streamId): \Symfony\Component\HttpFoundation\Response
+    {
+        $user = User::where('username', $username)->first();
+        if (! $user || ! $user->is_active) abort(401);
+        if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) abort(401);
+
+        $rawId = (int) $streamId;
+
+        // Connection limit
+        $limiter   = app(ConnectionLimiter::class);
+        $streamKey = 'live:' . $rawId;
+        if (! $limiter->acquire($user, $streamKey)) {
+            abort(429, 'Connection limit reached');
+        }
+
+        // Resolve channel (regular or AdminChannel)
+        if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
+            $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
+            $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
+            $slug    = $admin->channel_slug ?? "admin-channel-{$adminId}";
+            $channel = null;
+            $sourceUrl = '';
+        } else {
+            $channel   = Channel::where('id', $rawId)->where('is_active', true)->firstOrFail();
+            $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+
+            $this->ensureHlsStream(
+                $rawId,
+                $sourceUrl,
+                $channel->program_number,
+                $channel->local_address,
+                (bool) ($channel->transcoding_enabled ?? false)
+            );
+            $slug = $rawId;
+        }
+
+        // Serve via HTTP-TS streaming from the local ingest directory
+        $segDir = storage_path("app/streams/hls/{$slug}");
+        for ($i = 0; $i < 12; $i++) {
+            $segs = glob($segDir . '/seg_*.ts') ?: [];
+            if (! empty($segs)) break;
+            usleep(500000);
+        }
+
+        return response()->stream(function () use ($segDir, $limiter, $user, $streamKey) {
+            $lastSeg = -1;
+
+            while (true) {
+                $playlist = $segDir . '/playlist.m3u8';
+                if (! is_file($playlist)) { usleep(500000); continue; }
+
+                $m3u8 = @file_get_contents($playlist);
+                if (! $m3u8) { usleep(500000); continue; }
+
+                preg_match_all('/^(seg_(\d+)\.ts)\s*$/m', $m3u8, $matches, PREG_SET_ORDER);
+                foreach ($matches as $m) {
+                    $seq  = (int) $m[2];
+                    $file = $segDir . '/' . $m[1];
+                    if ($seq <= $lastSeg || ! is_file($file)) continue;
+
+                    $data = @file_get_contents($file);
+                    if ($data === false) continue;
+
+                    echo $data;
+                    if (ob_get_level()) ob_flush();
+                    flush();
+
+                    $lastSeg = $seq;
+                    $limiter->acquire($user, $streamKey);
+                }
+
+                if (connection_aborted()) break;
+                usleep(1000000);
+            }
+
+            $limiter->release($user->id, $streamKey);
+        }, 200, [
+            'Content-Type'               => 'video/mp2t',
+            'Cache-Control'              => 'no-cache, no-store',
+            'Access-Control-Allow-Origin'=> '*',
+            'X-Accel-Buffering'          => 'no',
+        ]);
+    }
+
+    /**
+     * Serve a live stream as HLS (.m3u8) — the standard XC-VM delivery.
+     *
+     * XC-VM route: /{username}/{password}/{stream_id}.m3u8
+     */
+    public function serveLiveHls(Request $request, string $username, string $password, int|string $streamId): \Symfony\Component\HttpFoundation\Response
+    {
+        $user = User::where('username', $username)->first();
+        if (! $user || ! $user->is_active) abort(401);
+        if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) abort(401);
+
+        $cacheKey = 'auth:token:' . md5($username . ':' . $password);
+        if (! Cache::has($cacheKey)) {
+            Cache::put($cacheKey, $user->id, 300);
+        }
+
+        $limiter   = app(ConnectionLimiter::class);
+        $streamKey = 'live:' . (int) $streamId;
+        if (! $limiter->acquire($user, $streamKey)) {
+            abort(429, 'Connection limit reached');
+        }
+
+        $rawId = (int) $streamId;
+
+        // Admin / My-Channel streams
+        if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
+            $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
+            $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
+            $slug    = $admin->channel_slug ?? "admin-channel-{$adminId}";
+            return $this->serveHlsFile($slug, 'playlist.m3u8');
+        }
+
+        // Regular channel streams
+        $channel   = Channel::where('id', $rawId)->where('is_active', true)->firstOrFail();
+        $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
+
+        $this->ensureHlsStream(
+            $rawId,
+            $sourceUrl,
+            $channel->program_number,
+            $channel->local_address,
+            (bool) ($channel->transcoding_enabled ?? false)
+        );
+
+        return $this->serveHlsFile($rawId, 'playlist.m3u8');
+    }
+
+    /**
+     * Serve a VOD movie as a native MP4 byte-range stream.
+     *
+     * XC-VM route: /{username}/{password}/vod/{stream_id}.{extension}
+     * Supports instant seeking (pause, scrub, skip) via ngx_http_mp4_module.
+     */
+    public function serveMovie(Request $request, string $username, string $password, int $streamId, string $extension): \Symfony\Component\HttpFoundation\Response
+    {
+        $user = User::where('username', $username)->first();
+        if (! $user || ! $user->is_active) abort(401);
+        if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) abort(401);
+
+        $limiter   = app(ConnectionLimiter::class);
+        $streamKey = 'vod:' . $streamId;
+        if (! $limiter->acquire($user, $streamKey)) {
+            abort(429, 'Connection limit reached');
+        }
+
+        $vod = VODContent::where('id', $streamId)->where('is_active', true)->firstOrFail();
+        $media = $vod->vodMedia()->first();
+        if (! $media?->stream_url) abort(404);
+
+        return $this->serveMediaFile($media->stream_url, $extension);
+    }
+
+    /**
+     * Serve a series episode as a native MP4 byte-range stream.
+     *
+     * XC-VM route: /{username}/{password}/series/{stream_id}.{extension}
+     * The stream_id is the vod_media.id (episode ID).
+     */
+    public function serveEpisode(Request $request, string $username, string $password, int $streamId, string $extension): \Symfony\Component\HttpFoundation\Response
+    {
+        $user = User::where('username', $username)->first();
+        if (! $user || ! $user->is_active) abort(401);
+        if ($password !== $user->m3u_token && ! Hash::check($password, $user->password)) abort(401);
+
+        $limiter   = app(ConnectionLimiter::class);
+        $streamKey = 'series:' . $streamId;
+        if (! $limiter->acquire($user, $streamKey)) {
+            abort(429, 'Connection limit reached');
+        }
+
+        $media = VODMedia::where('id', $streamId)->where('is_available', true)->firstOrFail();
+        if (! $media->stream_url) abort(404);
+
+        return $this->serveMediaFile($media->stream_url, $extension);
+    }
+
+    /**
+     * Serve a media file (VOD or Series episode) via X-Accel-Redirect.
+     *
+     * Local files → /internal_media/ (mp4 module, byte-range seeking)
+     * Remote URLs → /internal_remote_vod (proxy_pass)
+     */
+    private function serveMediaFile(string $streamUrl, string $extension): \Symfony\Component\HttpFoundation\Response
+    {
+        $mimeMap = [
+            'mp4'  => 'video/mp4',
+            'mkv'  => 'video/x-matroska',
+            'avi'  => 'video/x-msvideo',
+            'mov'  => 'video/quicktime',
+            'webm' => 'video/webm',
+            'flv'  => 'video/x-flv',
+        ];
+        $mime = $mimeMap[strtolower($extension)] ?? 'video/mp4';
+
+        // Local file — serve via X-Accel-Redirect from /internal_media/
+        // The mp4 module handles byte-range requests for instant seeking.
+        if (str_starts_with($streamUrl, '/storage/')) {
+            $relativePath = ltrim(substr($streamUrl, strlen('/storage/')), '/');
+            $diskPath     = storage_path($relativePath);
+
+            if (file_exists($diskPath)) {
+                return response('', 200, [
+                    'Content-Type'               => $mime,
+                    'Accept-Ranges'              => 'bytes',
+                    'Cache-Control'              => 'public, max-age=604800, immutable',
+                    'Access-Control-Allow-Origin'=> '*',
+                    'X-Accel-Redirect'           => '/internal_media/' . $relativePath,
+                ]);
+            }
+        }
+
+        // Remote URL — hand off to Nginx proxy_pass via structured headers.
+        $parsed     = parse_url($streamUrl);
+        $targetHost = ($parsed['scheme'] ?? 'http') . '://' . ($parsed['host'] ?? '');
+        if (isset($parsed['port'])) {
+            $targetHost .= ':' . $parsed['port'];
+        }
+        $targetUri = ($parsed['path'] ?? '/') . (isset($parsed['query']) ? '?' . $parsed['query'] : '');
+
+        return response('', 200, [
+            'Content-Type'               => $mime,
+            'Accept-Ranges'              => 'bytes',
+            'Access-Control-Allow-Origin'=> '*',
+            'X-Accel-Redirect'           => '/internal_remote_vod',
+            'X-Target-Host'              => $targetHost,
+            'X-Target-URI'               => $targetUri,
+        ]);
+    }
+
+    /**
+     * XMLTV EPG endpoint for IPTV players.
+     *
+     * Returns XML electronic program guide data for all channels.
+     */
+    public function xmltv(Request $request): \Symfony\Component\HttpFoundation\Response
+    {
+        $channels = Channel::where('is_active', true)
+            ->whereNotNull('epg_channel_id')
+            ->get(['id', 'epg_channel_id', 'name']);
+
+        $xml = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
+        $xml .= '<!DOCTYPE tv SYSTEM "xmltv.dtd">' . "\n";
+        $xml .= '<tv source-info-name="IPTV Middleware" generator-info-name="Laravel XC-VM">' . "\n";
+
+        // Channel definitions
+        foreach ($channels as $ch) {
+            $xml .= sprintf(
+                '  <channel id="%s">%s  <display-name>%s</display-name>%s</channel>' . "\n",
+                e($ch->epg_channel_id),
+                $ch->logo_url ? "  <icon src=\"" . e($ch->logo_url) . "\"/>\n" : '',
+                e($ch->name),
+                '' // lang attribute
+            );
+        }
+
+        // Programme listings (next 24h)
+        $now  = now();
+        $end  = $now->copy()->addDay();
+
+        $programs = EPGProgram::whereIn('channel_id', $channels->pluck('id'))
+            ->where('start_time', '<', $end)
+            ->where('end_time', '>', $now)
+            ->orderBy('start_time')
+            ->get(['channel_id', 'title', 'description', 'start_time', 'end_time']);
+
+        foreach ($programs as $prog) {
+            $ch = $channels->firstWhere('id', $prog->channel_id);
+            if (! $ch) continue;
+
+            $xml .= sprintf(
+                '  <programme start="%s" stop="%s" channel="%s">%s    <title>%s</title>%s%s  </programme>' . "\n",
+                $prog->start_time->format('YmdHis O'),
+                $prog->end_time->format('YmdHis O'),
+                e($ch->epg_channel_id),
+                "\n",
+                e($prog->title),
+                $prog->description ? "\n    <desc>" . e($prog->description) . '</desc>' : '',
+                "\n"
+            );
+        }
+
+        $xml .= '</tv>';
+
+        return response($xml, 200, [
+            'Content-Type'              => 'application/xml; charset=utf-8',
+            'Cache-Control'             => 'public, max-age=3600',
+            'Access-Control-Allow-Origin'=> '*',
         ]);
     }
 

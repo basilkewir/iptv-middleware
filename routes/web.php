@@ -17,6 +17,7 @@ use App\Http\Controllers\Admin\UserChannelAccessController;
 use App\Http\Controllers\Admin\UserController;
 use App\Http\Controllers\Admin\VODController;
 use App\Http\Controllers\HlsController;
+use App\Http\Controllers\XtreamController;
 use App\Models\Channel;
 use App\Models\ContentCategory;
 use App\Models\Notification;
@@ -711,7 +712,27 @@ Route::middleware(['auth:web', 'license.check'])->prefix('vod')->name('vod.')->g
 });
 
 Route::get('/get.php', [\App\Http\Controllers\XtreamController::class, 'm3u']);
+Route::get('/xmltv.php', [\App\Http\Controllers\XtreamController::class, 'xmltv']);
 Route::get('/playlist/{token}/m3u', [\App\Http\Controllers\PlaylistController::class, 'generate'])->name('playlist.m3u');
+
+// ─── XC-VM Unified Stream Delivery Routes ───────────────────────────────────────
+// Xtream Codes clients (Smarters, TiviMate, Formuler) expect these rigid URL
+// formats. The {username}/{password} prefix authenticates every stream request.
+Route::group(['prefix' => '{username}/{password}'], function () {
+    // Live TV — HLS (.m3u8) and HTTP-TS (.ts)
+    Route::get('/{stream_id}.ts', [XtreamController::class, 'serveLiveStream']);
+    Route::get('/live/{stream_id}.ts', [XtreamController::class, 'serveLiveStream']);
+    Route::get('/{stream_id}.m3u8', [XtreamController::class, 'serveLiveHls']);
+    Route::get('/live/{stream_id}.m3u8', [XtreamController::class, 'serveLiveHls']);
+
+    // VOD / Movies — native .mp4 byte-range seeking
+    Route::get('/vod/{stream_id}.{extension}', [XtreamController::class, 'serveMovie']);
+
+    // Series Episodes — native .mp4 byte-range seeking
+    Route::get('/series/{stream_id}.{extension}', [XtreamController::class, 'serveEpisode']);
+});
+
+// Legacy routes (backward-compatible)
 Route::get('/live/{username}/{password}/{streamId}/{file}', [\App\Http\Controllers\XtreamController::class, 'streamLive'])->where('file', '.+\.(m3u8|ts)');
 Route::get('/live/{username}/{password}/{streamId}', [\App\Http\Controllers\XtreamController::class, 'streamLive'])->where('streamId', '.*');
 Route::get('/ts/{username}/{password}/{streamId}', [\App\Http\Controllers\XtreamController::class, 'streamTs'])->where('streamId', '.*');

@@ -75,7 +75,7 @@ class RefreshStream extends Command
         cache()->forget("ffmpeg:last_restart:{$channel->id}");
 
         // Wipe stale segments so clients get a clean start
-        foreach (glob($outputDir . '/segment_*.ts') ?: [] as $seg) {
+        foreach (glob($outputDir . '/seg_*.ts') ?: [] as $seg) {
             @unlink($seg);
         }
         foreach (glob($outputDir . '/playlist*.m3u8') ?: [] as $pl) {
@@ -96,7 +96,7 @@ class RefreshStream extends Command
         // Wait up to 15s for the first segment to appear
         $deadline = time() + 15;
         while (time() < $deadline) {
-            $segs = glob($outputDir . '/segment_*.ts') ?: [];
+            $segs = glob($outputDir . '/seg_*.ts') ?: [];
             if (! empty($segs)) {
                 $this->info("  ✓ First segment written — stream is live.");
                 return self::SUCCESS;
