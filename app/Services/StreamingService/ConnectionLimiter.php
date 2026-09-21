@@ -27,6 +27,9 @@ class ConnectionLimiter
     /**
      * Try to acquire a stream slot for $user.
      * Returns true if allowed, false if the connection limit is reached.
+     *
+     * Uses Redis MULTI/EXEC for atomic incr+expire to prevent race conditions
+     * where a crashed connection leaves a dangling counter without expiry.
      */
     public function acquire(User $user, string $streamKey): bool
     {
@@ -44,9 +47,15 @@ class ConnectionLimiter
             return true;
         }
 
-        // Atomically increment the counter and check limit.
-        $current = (int) Redis::incr($counterKey);
-        Redis::expire($counterKey, self::SLOT_TTL);
+        // Atomically increment + set TTL in a single Redis transaction.
+        // Prevents race conditions where a crashed connection leaves a
+        // dangling counter without expiry.
+        $results = Redis::transaction(function ($tx) use ($counterKey) {
+            $tx->incr($counterKey);
+            $tx->expire($counterKey, self::SLOT_TTL);
+        });
+
+        $current = (int) ($results[0] ?? 0);
 
         if ($current > $max) {
             // Over limit — revert immediately.

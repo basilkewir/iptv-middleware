@@ -554,7 +554,9 @@ class MulticastIngestService
                 // No split_by_time: in copy mode it forces cuts at exact
                 // time boundaries regardless of keyframes — segments start
                 // mid-GOP without SPS/PPS and players choke every 2s.
-                .   ' -hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+discont_start'
+                // segment_time_delta 0.05: look 50ms ahead for exact timestamp
+                // match, removing irregular micro-length segments.
+                .   ' -hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+discont_start -segment_time_delta 0.05'
                 .   ' -hls_segment_type mpegts'
                 .   ' -muxdelay 0 -muxpreload 0'
                 .   ' -hls_segment_filename %s/seg_%%06d.ts'

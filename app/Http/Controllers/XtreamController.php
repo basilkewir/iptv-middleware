@@ -1121,8 +1121,8 @@ class XtreamController extends Controller
         $videoFilter = $transcode
             // GPU or CPU re-encode with fixed 2s GOP for fast zap.
             ? ($useGpu
-                ? $liveMap . ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k' . $gopFlags . ' -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls '
-                : ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . $liveMap . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency' . $gopFlags . ' -c:a aac -b:a 128k -ac 2 -ar 48000 -f hls ')
+                ? $liveMap . ' -c:v h264_nvenc -preset p4 -tune ll -rc vbr -cq 28 -b:v 0 -maxrate 4000k -bufsize 8000k' . $gopFlags . ' -c:a aac -b:a 128k -ac 2 -ar 48000 -af "async=1:min_hard_comp=0.100000:first_pts=0" -f hls '
+                : ' -threads ' . self::FFMPEG_THREADS_TRANSCODE . $liveMap . ' -c:v libx264 -preset veryfast -crf 26 -tune zerolatency' . $gopFlags . ' -c:a aac -b:a 128k -ac 2 -ar 48000 -af "async=1:min_hard_comp=0.100000:first_pts=0" -f hls ')
             : ($isMulticast
                 // Video copy — source GOP preserved. Audio passthrough
                 // (copy) avoids decode/re-encode crashes on corrupt input
@@ -1182,7 +1182,9 @@ class XtreamController extends Controller
             // ("non-existing PPS" decode errors, buffering, slow zap). Let the
             // muxer cut at the next IDR (default) so every segment is
             // independently decodable.
-            .   '-hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+discont_start '
+            // segment_time_delta 0.05: look 50ms ahead for exact timestamp match,
+            // removing irregular micro-length segments that cause stutter.
+            .   '-hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+discont_start -segment_time_delta 0.05 '
             .   '-hls_segment_type mpegts '
             .   '-muxdelay 0 -muxpreload 0 '
             .   '-hls_segment_filename "$ODIR"/seg_%%06d.ts '
@@ -1294,8 +1296,39 @@ class XtreamController extends Controller
     {
         // Local file — serve via X-Accel-Redirect so Nginx handles the I/O
         // (range requests, keep-alive) without tying up a PHP-FPM worker.
+        //
+        // stream_url format: /storage/vod/filename.ext
+        // Nginx alias:       /internal_local_vod/ → storage/app/public/vod/
+        // Disk path:         storage/app/public/vod/filename.ext
+        // Redirect must be:  /internal_local_vod/filename.ext  (no "vod/" prefix — alias has it)
+        if (str_starts_with($streamUrl, '/storage/vod/')) {
+            $filename = ltrim(substr($streamUrl, strlen('/storage/vod/')), '/');
+            $diskPath = storage_path('app/public/vod/' . $filename);
+            if (file_exists($diskPath)) {
+                $ext  = strtolower(pathinfo($diskPath, PATHINFO_EXTENSION));
+                $mime = [
+                    'mp4'  => 'video/mp4',
+                    'mkv'  => 'video/x-matroska',
+                    'avi'  => 'video/x-msvideo',
+                    'mov'  => 'video/quicktime',
+                    'webm' => 'video/webm',
+                    'flv'  => 'video/x-flv',
+                    'wmv'  => 'video/x-ms-wmv',
+                ][$ext] ?? 'application/octet-stream';
+
+                return response('', 200, [
+                    'Content-Type'               => $mime,
+                    'Accept-Ranges'              => 'bytes',
+                    'Cache-Control'              => 'no-cache',
+                    'Access-Control-Allow-Origin'=> '*',
+                    'X-Accel-Redirect'           => '/internal_local_vod/' . $filename,
+                ]);
+            }
+        }
+
+        // Non-vod-prefixed local paths (e.g. /storage/something/else)
         if (str_starts_with($streamUrl, '/storage/')) {
-            $relativePath = substr($streamUrl, strlen('/storage/'));
+            $relativePath = ltrim(substr($streamUrl, strlen('/storage/')), '/');
             $diskPath = storage_path('app/public/' . $relativePath);
             if (file_exists($diskPath)) {
                 $ext  = strtolower(pathinfo($diskPath, PATHINFO_EXTENSION));
@@ -1314,7 +1347,7 @@ class XtreamController extends Controller
                     'Accept-Ranges'              => 'bytes',
                     'Cache-Control'              => 'no-cache',
                     'Access-Control-Allow-Origin'=> '*',
-                    'X-Accel-Redirect'           => '/internal_local_vod/' . $relativePath,
+                    'X-Accel-Redirect'           => '/internal_media/app/public/' . $relativePath,
                 ]);
             }
         }
@@ -1546,9 +1579,12 @@ class XtreamController extends Controller
 
         // Local file — serve via X-Accel-Redirect from /internal_media/
         // The mp4 module handles byte-range requests for instant seeking.
+        // stream_url format: /storage/vod/filename.ext
+        // Nginx alias:       /internal_media/ → storage/
+        // Disk path:         storage/app/public/vod/filename.ext
         if (str_starts_with($streamUrl, '/storage/')) {
             $relativePath = ltrim(substr($streamUrl, strlen('/storage/')), '/');
-            $diskPath     = storage_path($relativePath);
+            $diskPath     = storage_path('app/public/' . $relativePath);
 
             if (file_exists($diskPath)) {
                 return response('', 200, [
@@ -1556,7 +1592,7 @@ class XtreamController extends Controller
                     'Accept-Ranges'              => 'bytes',
                     'Cache-Control'              => 'public, max-age=604800, immutable',
                     'Access-Control-Allow-Origin'=> '*',
-                    'X-Accel-Redirect'           => '/internal_media/' . $relativePath,
+                    'X-Accel-Redirect'           => '/internal_media/app/public/' . $relativePath,
                 ]);
             }
         }
