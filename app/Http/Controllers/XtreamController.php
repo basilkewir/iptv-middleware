@@ -565,8 +565,7 @@ class XtreamController extends Controller
         // ── 4. Initial request — ensure ingest is running, serve playlist ─────
         // Build the base URL for rewriting relative segment paths to absolute
         // ones. Use /hls/ path so segments are served directly from nginx
-        // (30ms) instead of going through PHP (350ms per segment).
-        $baseUrl = '/hls/' . $rawId . '/';
+        // (3ms) instead of going through PHP.
 
         // Admin / My-Channel streams
         if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
@@ -574,6 +573,8 @@ class XtreamController extends Controller
             $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
 
             $slug = "admin-channel-" . ($admin->channel_slug ?? "{$adminId}");
+            // Use slug in base URL so segments resolve to the correct directory
+            $baseUrl = '/hls/' . $slug . '/';
             return $this->serveHlsFile($slug, 'index.m3u8', $baseUrl);
         }
 
@@ -594,6 +595,7 @@ class XtreamController extends Controller
             (bool) ($channel->transcoding_enabled ?? false)
         );
 
+        $baseUrl = '/hls/' . $channelId . '/';
         return $this->serveHlsFile($channelId, 'playlist.m3u8', $baseUrl);
     }
 
@@ -1009,11 +1011,11 @@ class XtreamController extends Controller
 
         $input = $sourceUrl;
         if ($localAddress !== null && $localAddress !== '' && (str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://'))) {
-            // 32 MB SO_RCVBUF absorbs bursts from multi-program TS muxes without
-            // dropping packets (requires net.core.rmem_max >= 33554432 on host).
+            // 64 MB SO_RCVBUF absorbs bursts from multi-program TS muxes without
+            // dropping packets (requires net.core.rmem_max >= 67108864 on host).
             $input .= (str_contains($input, '?') ? '&' : '?')
                 . 'localaddr=' . $localAddress
-                . '&buffer_size=33554432';
+                . '&buffer_size=67108864';
         }
 
         $isMulticast = str_starts_with($input, 'udp://') || str_starts_with($input, 'rtp://');
