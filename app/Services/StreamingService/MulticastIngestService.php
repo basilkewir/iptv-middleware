@@ -313,6 +313,10 @@ class MulticastIngestService
 
     /**
      * True when every expected bucket reader process is alive.
+     *
+     * If the PID file is missing but an ffmpeg process reading this exact
+     * multicast source is found via /proc scan, the PID file is recreated
+     * so subsequent calls don't spawn duplicate readers.
      */
     private function allBucketsAlive(string $sourceUrl, int $channelCount): bool
     {
@@ -321,25 +325,54 @@ class MulticastIngestService
         for ($i = 0; $i < $buckets; $i++) {
             $pidFile = $this->getGroupPidFile($sourceUrl, $i);
 
-            if (! is_file($pidFile)) {
-                return false;
-            }
+            if (is_file($pidFile)) {
+                $pid = (int) trim((string) @file_get_contents($pidFile));
 
-            $pid = (int) trim((string) @file_get_contents($pidFile));
+                if ($pid > 0 && @file_exists("/proc/{$pid}")) {
+                    $cmdline = @file_get_contents("/proc/{$pid}/cmdline");
+                    if ($cmdline !== false && str_contains($cmdline, 'ffmpeg')) {
+                        continue; // alive
+                    }
+                }
 
-            if ($pid <= 0 || ! @file_exists("/proc/{$pid}")) {
                 @unlink($pidFile);
-                return false;
             }
 
-            $cmdline = @file_get_contents("/proc/{$pid}/cmdline");
-
-            if ($cmdline === false || ! str_contains($cmdline, 'ffmpeg')) {
-                return false;
+            // PID file missing or stale — scan /proc for a running reader
+            // that matches this source URL. This handles PID file cleanup,
+            // system reboots with stale state, or manual kills.
+            $found = $this->findRunningReaderPid($sourceUrl);
+            if ($found !== null) {
+                @mkdir(dirname($pidFile), 0755, true);
+                @file_put_contents($pidFile, (string) $found);
+                continue;
             }
+
+            return false;
         }
 
         return true;
+    }
+
+    /**
+     * Scan /proc for an ffmpeg process whose cmdline contains the given
+     * multicast source URL. Returns the PID or null if none found.
+     */
+    private function findRunningReaderPid(string $sourceUrl): ?int
+    {
+        $escapedUrl = preg_quote($sourceUrl, '/');
+        foreach (glob('/proc/[0-9]*/cmdline') as $cmdPath) {
+            $pid = (int) basename(dirname($cmdPath));
+            $cmdline = @file_get_contents($cmdPath);
+            if ($cmdline !== false
+                && str_contains($cmdline, 'ffmpeg')
+                && preg_match("/{$escapedUrl}/", $cmdline)
+            ) {
+                return $pid;
+            }
+        }
+
+        return null;
     }
 
     /**
