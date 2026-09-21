@@ -154,7 +154,7 @@ class XcVmStreamBridge
      */
     public function syncAdminChannel(AdminChannel $channel): bool
     {
-        $slug = $channel->channel_slug ?? "admin-channel-{$channel->id}";
+        $slug = "admin-channel-" . ($channel->channel_slug ?? "{$channel->id}");
         $hlsPlaylist = storage_path("app/streams/hls/{$slug}/index.m3u8");
 
         if (! is_file($hlsPlaylist)) {

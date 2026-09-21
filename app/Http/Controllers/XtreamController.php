@@ -540,17 +540,28 @@ class XtreamController extends Controller
         // via this route. Each request is authenticated, then served via
         // X-Accel-Redirect so Nginx handles the I/O at near-zero CPU cost.
         if ($file !== null) {
+            if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
+                $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
+                $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->first();
+                $slug    = "admin-channel-" . ($admin->channel_slug ?? "{$adminId}");
+                return $this->serveHlsFile($slug, $file);
+            }
             return $this->serveHlsFile($rawId, $file);
         }
 
         // ── 4. Initial request — ensure ingest is running, serve playlist ─────
+        // Build the base URL for rewriting relative segment paths to absolute
+        // ones.  Without this the player resolves "segment_1234.ts" relative to
+        // /live/user/pass/ which never matches the /{streamId}/{file} route.
+        $baseUrl = '/live/' . rawurlencode($username) . '/' . rawurlencode($password) . '/' . $rawId . '/';
+
         // Admin / My-Channel streams
         if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
             $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
             $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
 
-            $slug = $admin->channel_slug ?? "admin-channel-{$adminId}";
-            return $this->serveHlsFile($slug, 'index.m3u8');
+            $slug = "admin-channel-" . ($admin->channel_slug ?? "{$adminId}");
+            return $this->serveHlsFile($slug, 'index.m3u8', $baseUrl);
         }
 
         // Regular channel streams
@@ -570,7 +581,7 @@ class XtreamController extends Controller
             (bool) ($channel->transcoding_enabled ?? false)
         );
 
-        return $this->serveHlsFile($channelId, 'playlist.m3u8');
+        return $this->serveHlsFile($channelId, 'playlist.m3u8', $baseUrl);
     }
 
     /**
@@ -581,7 +592,7 @@ class XtreamController extends Controller
      * gap gracefully: missing playlists serve stale cache (503 + Retry-After
      * as fallback), missing segments return 204 (keeps players polling).
      */
-    private function serveHlsFile(int|string $channelId, string $file): \Symfony\Component\HttpFoundation\Response
+    private function serveHlsFile(int|string $channelId, string $file, ?string $rewriteBase = null): \Symfony\Component\HttpFoundation\Response
     {
         $file = basename($file);
         $ext  = strtolower(pathinfo($file, PATHINFO_EXTENSION));
@@ -605,7 +616,10 @@ class XtreamController extends Controller
                 $cached   = Cache::get($cacheKey);
 
                 if ($cached !== null) {
-                    return response($cached, 200, [
+                    $served = $rewriteBase !== null
+                        ? $this->rewriteHlsSegmentUrls($cached, $rewriteBase)
+                        : $cached;
+                    return response($served, 200, [
                         'Content-Type'              => 'application/vnd.apple.mpegurl',
                         'Cache-Control'             => 'no-cache, no-store, must-revalidate',
                         'Access-Control-Allow-Origin'=> '*',
@@ -632,6 +646,18 @@ class XtreamController extends Controller
             $content = file_get_contents($absolute);
             if ($content !== false && strlen($content) > 10) {
                 Cache::put("hls:stale:{$channelId}:playlist", $content, 30);
+
+                // Rewrite relative segment URLs to absolute so the player
+                // resolves them through the /{streamId}/{file} route.
+                if ($rewriteBase !== null) {
+                    $content = $this->rewriteHlsSegmentUrls($content, $rewriteBase);
+                }
+
+                return response($content, 200, [
+                    'Content-Type'              => 'application/vnd.apple.mpegurl',
+                    'Cache-Control'             => 'no-cache, no-store, must-revalidate',
+                    'Access-Control-Allow-Origin'=> '*',
+                ]);
             }
         }
 
@@ -643,6 +669,21 @@ class XtreamController extends Controller
             'Access-Control-Allow-Origin'=> '*',
             'X-Accel-Redirect'          => "/internal_hls/{$channelId}/{$file}",
         ]);
+    }
+
+    /**
+     * Rewrite relative segment URLs in an M3U8 playlist to absolute paths.
+     *
+     * Converts "segment_1234.ts" → "{baseUrl}segment_1234.ts" so the player
+     * resolves them through the authenticated /{streamId}/{file} route.
+     */
+    private function rewriteHlsSegmentUrls(string $content, string $baseUrl): string
+    {
+        return preg_replace_callback(
+            '/^(?!#)(?!https?:\/\/)(?!\/)(.+)$/m',
+            fn (array $m) => $baseUrl . $m[1],
+            $content,
+        );
     }
 
     public function ensureHlsStream(int $channelId, string $sourceUrl, ?int $programNumber = null, ?string $localAddress = null, bool $transcode = false): void
@@ -1232,7 +1273,7 @@ class XtreamController extends Controller
         if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
             $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
             $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
-            $slug    = $admin->channel_slug ?? "admin-channel-{$adminId}";
+            $slug    = "admin-channel-" . ($admin->channel_slug ?? "{$adminId}");
             $channel = null;
             $sourceUrl = '';
         } else {
@@ -1320,13 +1361,14 @@ class XtreamController extends Controller
         }
 
         $rawId = (int) $streamId;
+        $baseUrl = '/live/' . rawurlencode($username) . '/' . rawurlencode($password) . '/' . $rawId . '/';
 
         // Admin / My-Channel streams
         if ($rawId >= self::ADMIN_CHANNEL_OFFSET) {
             $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
             $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
-            $slug    = $admin->channel_slug ?? "admin-channel-{$adminId}";
-            return $this->serveHlsFile($slug, 'playlist.m3u8');
+            $slug    = "admin-channel-" . ($admin->channel_slug ?? "{$adminId}");
+            return $this->serveHlsFile($slug, 'playlist.m3u8', $baseUrl);
         }
 
         // Regular channel streams
@@ -1341,7 +1383,7 @@ class XtreamController extends Controller
             (bool) ($channel->transcoding_enabled ?? false)
         );
 
-        return $this->serveHlsFile($rawId, 'playlist.m3u8');
+        return $this->serveHlsFile($rawId, 'playlist.m3u8', $baseUrl);
     }
 
     /**

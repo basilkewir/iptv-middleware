@@ -110,7 +110,7 @@ class AdminChannelSyncer extends AbstractSyncer
     private function resolveStreamSource(AdminChannel $channel): string
     {
         $port = (int) config('stream_server_port', config('xcvm.proxy_port', 25460));
-        $slug = $channel->channel_slug ?? "admin-channel-{$channel->id}";
+        $slug = "admin-channel-" . ($channel->channel_slug ?? "{$channel->id}");
 
         return "http://127.0.0.1:{$port}/hls/{$slug}/index.m3u8";
     }
