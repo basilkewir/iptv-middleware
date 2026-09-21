@@ -551,7 +551,10 @@ class MulticastIngestService
                 . ' -max_muxing_queue_size 65536'
                 . '%s'
                 .   ' -f hls -hls_time %d -hls_list_size %d'
-                .   ' -hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+split_by_time+discont_start'
+                // No split_by_time: in copy mode it forces cuts at exact
+                // time boundaries regardless of keyframes — segments start
+                // mid-GOP without SPS/PPS and players choke every 2s.
+                .   ' -hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+discont_start'
                 .   ' -hls_segment_type mpegts'
                 .   ' -muxdelay 0 -muxpreload 0'
                 .   ' -hls_segment_filename %s/seg_%%06d.ts'

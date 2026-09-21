@@ -917,12 +917,22 @@ class XtreamController extends Controller
         }
 
         if ($newest === 0) {
-            // No segments at all. With the self-restarting wrapper the
-            // process may simply still be connecting and writing its first
-            // segment, so treat this as "not stale yet" rather than frozen.
-            // A truly hung process gives up via its own I/O timeouts and the
-            // dead-process path takes over from there.
-            return false;
+            // No segments at all. Check if the directory has existed long
+            // enough that a healthy ingest should have produced at least one
+            // segment. If the dir is > 30s old and still empty, the wrapper
+            // is alive but ffmpeg is failing inside it (e.g. bad source,
+            // unsupported option, no streams detected).
+            $playlist = $outputDir . '/playlist.m3u8';
+            if (is_file($playlist)) {
+                return false; // Playlist exists — ingest is alive, just between segments
+            }
+
+            $dirAge = time() - (int) @filemtime($outputDir);
+            if ($dirAge < 30) {
+                return false; // Fresh dir — give it time to produce first segment
+            }
+
+            return true; // No segments AND no playlist AND dir is old → frozen
         }
 
         return (time() - $newest) > self::INGEST_STALE_SECONDS;
@@ -1138,7 +1148,13 @@ class XtreamController extends Controller
                 : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
             .   ($isMulticast ? '-hls_time 2 -hls_list_size 6 ' : '-hls_time 2 -hls_list_size 6 ')
-            .   '-hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+split_by_time+discont_start '
+            // No split_by_time: with -c:v copy it would force segment cuts at
+            // exact time boundaries regardless of keyframes — segments start
+            // mid-GOP without SPS/PPS and players choke at every boundary
+            // ("non-existing PPS" decode errors, buffering, slow zap). Let the
+            // muxer cut at the next IDR (default) so every segment is
+            // independently decodable.
+            .   '-hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+discont_start '
             .   '-hls_segment_type mpegts '
             .   '-muxdelay 0 -muxpreload 0 '
             .   '-hls_segment_filename "$ODIR"/seg_%%06d.ts '
