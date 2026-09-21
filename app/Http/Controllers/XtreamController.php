@@ -701,6 +701,28 @@ class XtreamController extends Controller
         // program number) get their own per-channel ingest below.
         $isMulticast = str_starts_with($sourceUrl, 'udp://') || str_starts_with($sourceUrl, 'rtp://');
         if ($isMulticast && $programNumber !== null && $programNumber > 0 && $channelId > 0) {
+            // Kill any orphaned per-channel ingest that may be competing
+            // for the same multicast socket (double-join → packet splits).
+            // Skip if the PID in ingest.pid belongs to the multicast group
+            // reader (wrapper writes its PID there too via ensureGroupReader).
+            if (is_file($pidFile)) {
+                $oldPid = (int) trim((string) file_get_contents($pidFile));
+                if ($oldPid > 0 && @file_exists("/proc/{$oldPid}")) {
+                    $cmdline = @file_get_contents("/proc/{$oldPid}/cmdline") ?: '';
+                    $isGroupReader = str_contains($cmdline, 'multicast_reader')
+                        || str_contains($cmdline, 'storage/app/multicast/');
+                    if (! $isGroupReader) {
+                        Log::info('Killing orphaned per-channel ingest for multicast channel', [
+                            'channel_id' => $channelId,
+                            'pid' => $oldPid,
+                        ]);
+                        @exec("kill -TERM -{$oldPid} 2>/dev/null");
+                        usleep(200000);
+                        @exec("kill -KILL -{$oldPid} 2>/dev/null");
+                    }
+                }
+                @unlink($pidFile);
+            }
             $channel = Channel::find($channelId);
             if ($channel) {
                 app(MulticastIngestService::class)->ensureGroupReader($channel);
