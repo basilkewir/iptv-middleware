@@ -23,6 +23,7 @@ class Role extends Model
 
     public const PERMISSIONS = [
         'my_channels' => 'Manage My Channels',
+        'vod_management' => 'Manage VOD (Movies & Series)',
         'user_management' => 'User Management',
         'role_management' => 'Role Management',
         'full_access' => 'Full System Access',

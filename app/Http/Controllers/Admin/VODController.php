@@ -941,6 +941,19 @@ class VODController extends Controller
                 $seasonNum = $season['season_number'] ?? 0;
                 if ($seasonNum === 0) continue;
                 $seasonsCount++;
+
+                // Create VODSeason record
+                \App\Models\VODSeason::create([
+                    'vod_content_id' => $vod->id,
+                    'season_number'  => $seasonNum,
+                    'title'          => $season['name'] ?? "Season {$seasonNum}",
+                    'description'    => $season['overview'] ?? null,
+                    'poster_url'     => $season['poster_url'] ?? null,
+                    'air_date'       => $season['air_date'] ?? null,
+                    'episode_count'  => $season['episode_count'] ?? 0,
+                    'is_available'   => true,
+                ]);
+
                 $episodes = $this->tmdbService->getTVEpisodes($validated['tmdb_id'], $seasonNum);
                 foreach ($episodes as $ep) {
                     \App\Models\VODMedia::create([

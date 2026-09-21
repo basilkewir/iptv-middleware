@@ -25,8 +25,8 @@ class RoleSeeder extends Seeder
             [
                 'name' => 'moderator',
                 'label' => 'Moderator',
-                'description' => 'Manages content and my channels, no user management.',
-                'permissions' => ['my_channels', 'content_management'],
+                'description' => 'Manages VOD content and my channels, no user management.',
+                'permissions' => ['my_channels', 'vod_management'],
             ],
             [
                 'name' => 'support',
