@@ -60,10 +60,10 @@ class MulticastIngestService
 
     // Ultra-low-latency HLS: 2s micro-segments with sliding window of 3.
     // Players fetch the absolute newest blocks with ~6s total latency
-    // (2s segment + 2s playlist window + 2s network/player buffer).
+    // (2s segment × 6 playlist window = 12s buffer).
     // temp_file flag prevents Nginx from serving half-written segments.
     private const HLS_SEGMENT_TIME = 2;
-    private const HLS_PLAYLIST_SIZE = 3;
+    private const HLS_PLAYLIST_SIZE = 6;
 
     /**
      * Get all active multicast channels grouped by their source URL.

@@ -1093,7 +1093,7 @@ class XtreamController extends Controller
                 ? 'NEW_URL=$(cd ' . base_path() . ' && php artisan youtube:refresh-url ' . $channelId . ' 2>/dev/null); if [ $? -eq 0 ] && [ -n "$NEW_URL" ]; then SRC_URL="$NEW_URL"; echo "YOUTUBE REFRESHED $SRC_URL" >> "$L"; fi; '
                 : '')
             .   'nice -n ' . self::INGEST_NICE_LEVEL . ' ffmpeg ' . $inputOpts . '%s ' . $videoFilter
-            .   ($isMulticast ? '-hls_time 2 -hls_list_size 3 ' : '-hls_time 2 -hls_list_size 3 ')
+            .   ($isMulticast ? '-hls_time 2 -hls_list_size 6 ' : '-hls_time 2 -hls_list_size 6 ')
             .   '-hls_flags delete_segments+omit_endlist+temp_file+independent_segments+append_list+split_by_time+discont_start '
             .   '-hls_segment_type mpegts '
             .   '-muxdelay 0 -muxpreload 0 '
