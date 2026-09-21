@@ -1007,9 +1007,20 @@ class XtreamController extends Controller
         // "URL ... is not in allowed_segment_extensions" and aborts the ingest.
         // extension_picky=0 disables the extension check (allowed_extensions=
         // ALL alone is not enough in newer FFmpeg).
-        // extension_picky was added in FFmpeg 6.x — skip it on older builds.
-        $ffmpegVersion = (int) shell_exec('ffmpeg -version 2>&1 | grep -oP "ffmpeg version \\K\\d+" | head -1');
-        $hlsOpts = ($isHls && $ffmpegVersion >= 6) ? '-extension_picky 0 ' : '';
+        // Detect actual support instead of relying on version number —
+        // some distro builds (e.g. Ubuntu 6.1.1) strip this option.
+        static $hlsExtPicky = null;
+        static $hlsAllowedExt = null;
+        if ($hlsExtPicky === null) {
+            $test = @shell_exec('ffmpeg -hide_banner -h muxer=hls 2>&1 | grep -c extension_picky');
+            $hlsExtPicky = ((int) ($test ?? 0)) > 0;
+        }
+        if ($hlsAllowedExt === null) {
+            $test2 = @shell_exec('ffmpeg -hide_banner -h muxer=hls 2>&1 | grep -c allowed_extensions');
+            $hlsAllowedExt = ((int) ($test2 ?? 0)) > 0;
+        }
+        $hlsOpts = ($isHls && $hlsExtPicky) ? '-extension_picky 0 '
+            : (($isHls && $hlsAllowedExt) ? '-allowed_extensions ALL ' : '');
         // For UDP: +genpts fixes missing PTS after TS discontinuities,
         // +discardcorrupt drops damaged packets, -err_detect ignore_err skips
         // corrupt frames without stalling, -avoid_negative_ts make_zero fixes
