@@ -656,20 +656,46 @@ class XtreamController extends Controller
 
         // Cache successful playlists for stale serving during restarts
         if ($ext === 'm3u8') {
+            // Production optimization: rewrite playlist URLs and serve via
+            // X-Accel-Redirect. PHP authenticates (< 1ms Redis), rewrites
+            // URLs, writes to a temp file, and hands off to Nginx (3ms).
+            // This prevents PHP-FPM exhaustion at 500+ concurrent users.
+            $cacheKey = "hls:playlist:{$channelId}:" . ($rewriteBase ?? 'raw');
+            $cached   = Cache::get($cacheKey);
+
+            if ($cached !== null) {
+                // Serve cached rewritten playlist via X-Accel-Redirect
+                $tmpFile = storage_path("app/streams/hls/{$channelId}/.playlist_cache.m3u8");
+                @file_put_contents($tmpFile, $cached);
+
+                return response('', 200, [
+                    'Content-Type'              => 'application/vnd.apple.mpegurl',
+                    'Cache-Control'             => 'no-cache, no-store, must-revalidate',
+                    'Access-Control-Allow-Origin'=> '*',
+                    'X-Accel-Redirect'          => "/hls/{$channelId}/.playlist_cache.m3u8",
+                ]);
+            }
+
             $content = file_get_contents($absolute);
             if ($content !== false && strlen($content) > 10) {
-                Cache::put("hls:stale:{$channelId}:playlist", $content, 30);
-
-                // Rewrite relative segment URLs to absolute so the player
-                // resolves them through the /{streamId}/{file} route.
+                // Rewrite relative segment URLs to absolute /hls/ path
                 if ($rewriteBase !== null) {
                     $content = $this->rewriteHlsSegmentUrls($content, $rewriteBase);
                 }
 
-                return response($content, 200, [
+                // Cache rewritten playlist for 30s (matches segment duration)
+                Cache::put($cacheKey, $content, 30);
+                Cache::put("hls:stale:{$channelId}:playlist", $content, 30);
+
+                // Write to temp file for X-Accel-Redirect (nginx serves at 3ms)
+                $tmpFile = storage_path("app/streams/hls/{$channelId}/.playlist_cache.m3u8");
+                @file_put_contents($tmpFile, $content);
+
+                return response('', 200, [
                     'Content-Type'              => 'application/vnd.apple.mpegurl',
                     'Cache-Control'             => 'no-cache, no-store, must-revalidate',
                     'Access-Control-Allow-Origin'=> '*',
+                    'X-Accel-Redirect'          => "/hls/{$channelId}/.playlist_cache.m3u8",
                 ]);
             }
         }
