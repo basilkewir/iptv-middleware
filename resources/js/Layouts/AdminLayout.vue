@@ -78,12 +78,12 @@ const authUser = page.props.auth?.user
 
 const landing = authUser && !authUser.can_manage_all ? '/admin/channels/admin' : '/admin/dashboard'
 
-// Non-admin panel users only get items matching their permissions.
+// Non-admin panel users only see items matching their explicit permissions.
 const canSee = (item) => {
   if (!authUser) return false
   if (authUser.can_manage_all) return true
-  // If item has no permissions restriction, show it to all panel users
-  if (!item.permissions) return true
+  // Items without permissions are admin-only (hidden from moderators)
+  if (!item.permissions) return false
   // Check if user has ANY of the required permissions
   const required = Array.isArray(item.permissions) ? item.permissions : [item.permissions]
   return required.some(p => authUser.permissions?.includes(p))
@@ -107,7 +107,7 @@ const icon = (path) => ({
 })
 
 const navItems = [
-  { href: '/admin/dashboard', label: 'Dashboard', icon: icon('M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z') },
+  { href: '/admin/dashboard', label: 'Dashboard', permissions: ['my_channels', 'vod_management'], icon: icon('M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z') },
   { href: '/admin/users', label: 'Users', icon: icon('M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z') },
   { href: '/admin/clients', label: 'Clients', icon: icon('M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z') },
   { href: '/admin/channels', label: 'Channels', icon: icon('M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z') },
