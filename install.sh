@@ -467,22 +467,71 @@ success "Supervisor configured."
 # =============================================================================
 info "Installing systemd services…"
 
-for svc in iptv-watchdog iptv-ingest iptv-purge-ffmpeg; do
+# XC-VM is optional. The flag lives in .env; a missing or empty value means
+# "no XC-VM" so nodes without it never get the unit installed.
+XCVM_ENABLED=$(grep -E "^XC_VM_ENABLED=" "${APP_DIR}/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "false")
+XCVM_ENABLED="${XCVM_ENABLED:-false}"
+
+SERVICES=("iptv-watchdog" "iptv-ingest" "iptv-purge-ffmpeg")
+if [[ "$XCVM_ENABLED" == "true" ]]; then
+    SERVICES+=("xcvm")
+fi
+
+for svc in "${SERVICES[@]}"; do
     src="${APP_DIR}/deploy/${svc}.service"
     if [[ -f "$src" ]]; then
+        # __APP_DIR__ must keep being substituted — iptv-*.service are built
+        # around it, so a plain cp would install an unusable unit.
         sed "s|__APP_DIR__|${APP_DIR}|g" "$src" > "/etc/systemd/system/${svc}.service"
+        chmod 644 "/etc/systemd/system/${svc}.service"
     fi
 done
 for timer in iptv-watchdog iptv-purge-ffmpeg; do
     src="${APP_DIR}/deploy/${timer}.timer"
-    [[ -f "$src" ]] && cp "$src" "/etc/systemd/system/${timer}.timer"
+    if [[ -f "$src" ]]; then
+        cp "$src" "/etc/systemd/system/${timer}.timer"
+        chmod 644 "/etc/systemd/system/${timer}.timer"
+    fi
 done
+
+# ── Per-channel playout: template unit + privileged control wrapper ─────────
+# iptv-playout@.service is a TEMPLATE (it carries %i), so it cannot go through
+# the per-service loop above.
+if [[ -f "${APP_DIR}/deploy/iptv-playout@.service" ]]; then
+    sed "s|__APP_DIR__|${APP_DIR}|g" "${APP_DIR}/deploy/iptv-playout@.service" \
+        > "/etc/systemd/system/iptv-playout@.service"
+    chmod 644 "/etc/systemd/system/iptv-playout@.service"
+fi
+
+if [[ -f "${APP_DIR}/deploy/iptv-playout-ctl" ]]; then
+    install -o root -g root -m 0755 "${APP_DIR}/deploy/iptv-playout-ctl" /usr/local/sbin/iptv-playout-ctl
+fi
+
+# The sudoers grant is only useful if the wrapper validates its arguments, so
+# install the pair together and refuse to keep a rule that fails to parse.
+if [[ -f "${APP_DIR}/deploy/iptv-playout.sudoers" ]]; then
+    install -o root -g root -m 0440 "${APP_DIR}/deploy/iptv-playout.sudoers" /etc/sudoers.d/iptv-playout
+    if ! visudo -cf /etc/sudoers.d/iptv-playout >/dev/null 2>&1; then
+        rm -f /etc/sudoers.d/iptv-playout
+        warn "sudoers.d/iptv-playout failed validation and was removed — playout falls back to setsid"
+    fi
+fi
 
 systemctl daemon-reload
 
+# Only units carrying an [Install] stanza are enabled. iptv-watchdog.service
+# and iptv-purge-ffmpeg.service are Type=oneshot driven by their timers and
+# deliberately have no [Install] section, so enabling them always fails.
 for unit in iptv-watchdog.timer iptv-purge-ffmpeg.timer iptv-ingest.service; do
     systemctl enable "$unit" 2>/dev/null && systemctl start "$unit" 2>/dev/null || true
 done
+
+# xcvm.service is Type=simple — the only unit here whose file changes need a
+# real restart to take effect.
+if [[ "$XCVM_ENABLED" == "true" && -f "/etc/systemd/system/xcvm.service" ]]; then
+    systemctl enable "xcvm.service" 2>/dev/null || true
+    systemctl restart "xcvm.service" 2>/dev/null || systemctl start "xcvm.service" 2>/dev/null || true
+fi
 
 success "Systemd services installed."
 

@@ -211,14 +211,47 @@ fi
 # 6. Update systemd service files
 # =============================================================================
 info "Updating systemd service files..."
-for svc in iptv-watchdog iptv-ingest iptv-purge-ffmpeg; do
+
+SERVICES=("iptv-watchdog" "iptv-ingest" "iptv-purge-ffmpeg")
+if [[ "$XCVM_ENABLED" == "true" ]]; then
+    SERVICES+=("xcvm")
+fi
+
+for svc in "${SERVICES[@]}"; do
     src="${APP_DIR}/deploy/${svc}.service"
-    [[ -f "$src" ]] && sed "s|__APP_DIR__|${APP_DIR}|g" "$src" > "/etc/systemd/system/${svc}.service"
+    if [[ -f "$src" ]]; then
+        # Substituting __APP_DIR__ is mandatory: iptv-*.service are templates.
+        sed "s|__APP_DIR__|${APP_DIR}|g" "$src" > "/etc/systemd/system/${svc}.service"
+        chmod 644 "/etc/systemd/system/${svc}.service"
+    fi
 done
 for timer in iptv-watchdog iptv-purge-ffmpeg; do
     src="${APP_DIR}/deploy/${timer}.timer"
-    [[ -f "$src" ]] && cp "$src" "/etc/systemd/system/${timer}.timer"
+    if [[ -f "$src" ]]; then
+        cp "$src" "/etc/systemd/system/${timer}.timer"
+        chmod 644 "/etc/systemd/system/${timer}.timer"
+    fi
 done
+
+# ── Per-channel playout: template unit + privileged control wrapper ─────────
+# The wrapper is code, so it is reinstalled on every deploy; the sudoers rule
+# is re-validated so a malformed edit can never survive a deploy.
+if [[ -f "${APP_DIR}/deploy/iptv-playout@.service" ]]; then
+    sed "s|__APP_DIR__|${APP_DIR}|g" "${APP_DIR}/deploy/iptv-playout@.service" \
+        > "/etc/systemd/system/iptv-playout@.service"
+    chmod 644 "/etc/systemd/system/iptv-playout@.service"
+fi
+if [[ -f "${APP_DIR}/deploy/iptv-playout-ctl" ]]; then
+    install -o root -g root -m 0755 "${APP_DIR}/deploy/iptv-playout-ctl" /usr/local/sbin/iptv-playout-ctl
+fi
+if [[ -f "${APP_DIR}/deploy/iptv-playout.sudoers" ]]; then
+    install -o root -g root -m 0440 "${APP_DIR}/deploy/iptv-playout.sudoers" /etc/sudoers.d/iptv-playout
+    if ! visudo -cf /etc/sudoers.d/iptv-playout >/dev/null 2>&1; then
+        rm -f /etc/sudoers.d/iptv-playout
+        warn "sudoers.d/iptv-playout failed validation and was removed — playout falls back to setsid"
+    fi
+fi
+
 systemctl daemon-reload
 success "Service files updated."
 
@@ -256,11 +289,22 @@ fi
 info "Reloading services..."
 systemctl reload "php${PHP_VER}-fpm" 2>/dev/null || systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
 systemctl reload nginx 2>/dev/null || true
-# Restart queue worker (systemd unit takes priority over supervisor)
-if systemctl is-active --quiet middleware-queue 2>/dev/null; then
-    systemctl restart middleware-queue
-elif systemctl is-active --quiet supervisor 2>/dev/null; then
-    supervisorctl restart iptv-queue 2>/dev/null || true
+
+# xcvm.service is Type=simple, so a rewritten unit file is inert until the
+# unit is actually cycled. Oneshot units (iptv-watchdog, iptv-ingest,
+# iptv-purge-ffmpeg) need no restart — they re-read everything on each run.
+if [[ "$XCVM_ENABLED" == "true" ]]; then
+    info "Restarting XC-VM..."
+    systemctl restart xcvm.service 2>/dev/null || warn "xcvm.service not restarted (not installed or not active)"
+fi
+
+# Queue workers are owned by Supervisor: install.sh §10 registers the
+# iptv-queue and iptv-scheduler programs. There is no middleware-queue
+# systemd unit anywhere in this repository, so the old "systemd takes
+# priority over supervisor" branch was dead code.
+info "Restarting queue workers..."
+if systemctl is-active --quiet supervisor 2>/dev/null; then
+    supervisorctl restart iptv-queue 2>/dev/null || warn "supervisorctl iptv-queue restart failed"
 fi
 success "Services reloaded."
 

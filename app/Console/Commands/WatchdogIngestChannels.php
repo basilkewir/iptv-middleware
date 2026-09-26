@@ -160,11 +160,11 @@ class WatchdogIngestChannels extends Command
         }
 
         Cache::forget($staleKey);
-        }
+    }
 
     private function watchAdminChannel(MyChannelHlsService $hls, AdminChannel $channel): void
     {
-        if (! $this->isPlayoutAlive($channel)) {
+        if (! $hls->isRunning($channel)) {
             // Respect explicit End Broadcast: only auto-restart channels the
             // admin has put live. A stopped channel stays stopped.
             if ($channel->broadcast_status !== 'live') {
@@ -218,38 +218,5 @@ class WatchdogIngestChannels extends Command
         }
 
         return (time() - (int) @filemtime($playlist)) > XtreamController::INGEST_STALE_SECONDS;
-    }
-
-    private function isPlayoutAlive(AdminChannel $channel): bool
-    {
-        $streamDir = storage_path("app/streams/hls/admin-channel-{$channel->channel_slug}");
-        $slug      = basename($streamDir);
-
-        $pids = [];
-
-        $cached = cache()->get("mychannel_hls:{$channel->id}");
-        if ($cached) {
-            $pids[] = (int) $cached;
-        }
-
-        $pidFile = "{$streamDir}/playout.pid";
-        if (is_file($pidFile)) {
-            $fromFile = (int) trim((string) @file_get_contents($pidFile));
-            if ($fromFile > 0) {
-                $pids[] = $fromFile;
-            }
-        }
-
-        foreach (array_unique(array_filter($pids)) as $pid) {
-            if (! @file_exists("/proc/{$pid}")) {
-                continue;
-            }
-            $cmdline = @file_get_contents("/proc/{$pid}/cmdline");
-            if ($cmdline !== false && str_contains($cmdline, $slug)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 }

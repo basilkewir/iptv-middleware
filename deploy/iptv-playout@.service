@@ -1,0 +1,45 @@
+[Unit]
+Description=IPTV Middleware - two-stage playout for admin channel %i
+# Flussonic and XC-VM must already be up: playout is the last thing to start
+# and the first thing the load gate gives up.
+After=network-online.target mysql.service redis-server.service nginx.service xcvm.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=__APP_DIR__
+# %i is the channel slug. The instance name is validated character-by-character
+# by /usr/local/sbin/iptv-playout-ctl before systemctl is ever invoked, and
+# systemd additionally rejects any instance name that is not a plain path
+# segment — so a slug can never turn into an argument-injection vector.
+ExecStart=/bin/bash __APP_DIR__/storage/app/streams/hls/admin-channel-%i/playout.sh
+
+# The wrapper is a supervisor: if it ever exits, systemd brings the whole
+# pipeline (Stage 1 + Stage 2) back with a freshly rewritten script.
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+# Kill the entire cgroup, not just the wrapper — Stage 1 and Stage 2 are
+# children of subshells and would otherwise outlive a plain stop.
+KillMode=control-group
+
+# ── Resource isolation ──────────────────────────────────────────────────────
+# One channel may never take more than 4 cores or 2 GB from a box that also
+# runs Flussonic and XC-VM. Nice/IO scheduling are set here AND in the wrapper
+# so they hold even if the unit file's values are ever edited away.
+CPUQuota=400%
+CPUWeight=100
+MemoryMax=2G
+MemoryHigh=1536M
+Nice=10
+IOSchedulingClass=idle
+# Deliberately expendable: if memory runs out, playout dies before Flussonic.
+OOMScoreAdjust=200
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iptv-playout-%i
+
+[Install]
+WantedBy=multi-user.target

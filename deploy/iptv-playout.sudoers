@@ -1,0 +1,11 @@
+# IPTV Middleware — playout control
+#
+# The web application runs as www-data and needs to start/stop the per-channel
+# playout template units. systemctl itself is far too powerful to hand over, so
+# all calls go through the validating wrapper at
+# /usr/local/sbin/iptv-playout-ctl, which rejects any instance name that is not
+# a plain channel slug ([A-Za-z0-9_.-]{1,64}).
+#
+# A sudoers command entry with no argument list matches any arguments — the
+# wrapper's validation, not the sudoers line, is what constrains this grant.
+www-data ALL=(root) NOPASSWD: /usr/local/sbin/iptv-playout-ctl

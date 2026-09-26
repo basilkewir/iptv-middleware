@@ -1042,23 +1042,28 @@ class AdminChannelController extends Controller
         $qualityLevel = 'hd';
 
         try {
-            $ffprobe = app('ffmpeg.ffprobe', ['ffmpeg' => '/usr/bin/ffmpeg', 'ffprobe' => '/usr/bin/ffprobe']);
-            $probe = $ffprobe->open(Storage::disk('public')->path($path));
-            $format = $probe->getFormat();
+            // Probed with a raw ffprobe exec, the same way every other probe in
+            // this controller is done — there is no 'ffmpeg.ffprobe' container
+            // binding, so the previous code threw on every upload and every
+            // field below silently ended up null.
+            $probe = $this->probeMedia(Storage::disk('public')->path($path));
 
-            if ($format) {
-                $duration = (int) $format->getDuration();
-                $bitrate = (int) $format->getBitRate();
-                $videoStream = collect($probe->getStreams())->first(fn($s) => $s->get('codec_type') === 'video');
+            if (! empty($probe['format'])) {
+                $format = $probe['format'];
+                $duration = (int) ($format['duration'] ?? 0);
+                $bitrate = (int) ($format['bit_rate'] ?? 0);
+
+                $streams = collect($probe['streams'] ?? []);
+                $videoStream = $streams->first(fn ($s) => ($s['codec_type'] ?? '') === 'video');
                 if ($videoStream) {
-                    $width = (int) $videoStream->get('width');
-                    $height = (int) $videoStream->get('height');
-                    $videoCodec = $videoStream->get('codec_name');
-                    $frameRate = $videoStream->get('avg_frame_rate');
+                    $width = (int) ($videoStream['width'] ?? 0);
+                    $height = (int) ($videoStream['height'] ?? 0);
+                    $videoCodec = $videoStream['codec_name'] ?? null;
+                    $frameRate = $videoStream['avg_frame_rate'] ?? null;
                 }
-                $audioStream = collect($probe->getStreams())->first(fn($s) => $s->get('codec_type') === 'audio');
+                $audioStream = $streams->first(fn ($s) => ($s['codec_type'] ?? '') === 'audio');
                 if ($audioStream) {
-                    $audioCodec = $audioStream->get('codec_name');
+                    $audioCodec = $audioStream['codec_name'] ?? null;
                 }
 
                 if ($height >= 2160) $qualityLevel = '4k';
@@ -1101,6 +1106,32 @@ class AdminChannelController extends Controller
         }
 
         return response()->json(['content' => $content]);
+    }
+
+    /**
+     * ffprobe a local file into an array, or null if it cannot be probed.
+     *
+     * There is no ffmpeg library binding in this app — every other probe in
+     * this controller shells out to ffprobe, and that is what this mirrors.
+     */
+    private function probeMedia(string $path): ?array
+    {
+        $ffprobe = config('streaming.transcoding.ffprobe_path', '/usr/bin/ffprobe');
+
+        $cmd = sprintf(
+            '%s -v error -show_streams -show_format -of json -analyzeduration 10M -probesize 1M %s 2>&1',
+            escapeshellarg($ffprobe),
+            escapeshellarg($path)
+        );
+
+        exec($cmd, $out, $rc);
+        if ($rc !== 0 || $out === []) {
+            return null;
+        }
+
+        $data = json_decode(implode("\n", $out), true);
+
+        return is_array($data) ? $data : null;
     }
 
     protected function generateThumbnail(string $videoPath, int $channelId): ?string
@@ -1410,14 +1441,25 @@ class AdminChannelController extends Controller
             'watermark_opacity'      => 'sometimes|numeric|min:0|max:1',
         ]);
 
+        // Diff against what was actually stored: the overlay form posts every
+        // field on save, and treating "present in the payload" as "changed"
+        // would restart the encoder on every keystroke of an unrelated field.
+        $before = $channel->only(array_keys($data));
+        $changed = [];
+        foreach ($data as $key => $value) {
+            if (! array_key_exists($key, $before) || $before[$key] != $value) {
+                $changed[$key] = $value;
+            }
+        }
+
         $channel->update($data);
 
-        // Apply overlay changes to a live channel.
-        // Text-only changes (ticker_text, ticker_color, etc.) update instantly
-        // via ticker.txt reload — no restart. Image/position/opacity changes
-        // trigger a seamless restart from the next segment number.
-        if ($this->isChannelLive($channel)) {
-            app(MyChannelHlsService::class)->applyOverlayUpdate($channel->fresh(), $data);
+        // Ticker text and (in the default canvas mode) logo/watermark edits are
+        // picked up by the live encoder from files it re-reads every frame;
+        // anything compiled into the filtergraph restarts Stage 2 only — Stage
+        // 1, the concat list and the segment numbering are never touched.
+        if ($changed !== [] && $this->isChannelLive($channel)) {
+            app(MyChannelHlsService::class)->applyOverlayUpdate($channel->fresh(), $changed);
         }
 
         return response()->json(['channel' => $channel->fresh()]);

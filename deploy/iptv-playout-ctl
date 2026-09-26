@@ -1,0 +1,47 @@
+#!/bin/bash
+# =============================================================================
+# iptv-playout-ctl — the ONLY privileged entry point the web app gets for
+# playout units.
+#
+# Installed to /usr/local/sbin/iptv-playout-ctl and granted in
+# /etc/sudoers.d/iptv-playout as:
+#
+#     www-data ALL=(root) NOPASSWD: /usr/local/sbin/iptv-playout-ctl
+#
+# Because a sudoers command with no argument list matches ANY arguments, this
+# script's own validation is what makes the grant safe: the slug is matched
+# against a strict allow-list before it is ever placed in a systemctl argv.
+# Without it the rule would amount to "www-data may run systemctl as root".
+#
+# Usage: iptv-playout-ctl {start|stop|restart|status|show} <channel-slug>
+# =============================================================================
+set -euo pipefail
+
+ACTION="${1:-}"
+SLUG="${2:-}"
+
+usage() {
+    echo "usage: $0 {start|stop|restart|status|show} <channel-slug>" >&2
+    exit 64
+}
+
+case "$ACTION" in
+    start|stop|restart|status|show) ;;
+    *) usage ;;
+esac
+
+# Strict allow-list. No spaces, no ';' , no '$', no '/', no systemd specifier
+# characters (%), nothing that could change how systemd parses the instance.
+# This is the line that keeps the sudoers grant narrow.
+if ! [[ "$SLUG" =~ ^[A-Za-z0-9_.-]{1,64}$ ]]; then
+    echo "iptv-playout-ctl: invalid channel slug: '$SLUG'" >&2
+    exit 64
+fi
+
+UNIT="iptv-playout@${SLUG}.service"
+
+# systemctl is the only binary we ever exec, always with a fixed argv shape.
+case "$ACTION" in
+    show) exec /usr/bin/systemctl show "$UNIT" --property=MainPID ;;
+    *)    exec /usr/bin/systemctl "$ACTION" "$UNIT" ;;
+esac

@@ -95,7 +95,7 @@ class EnsureAllIngest extends Command
         $adminChannels = AdminChannel::where('is_active', true)->get();
 
         foreach ($adminChannels as $channel) {
-            if ($this->isPlayoutAlive($channel)) {
+            if ($hls->isRunning($channel)) {
                 if ($hls->isStalled($channel) && $channel->broadcast_status === 'live') {
                     $this->line("  RELAUNCH {$channel->channel_name} (stalled)");
                     $hls->restartKeepingSegments($channel);
@@ -151,23 +151,6 @@ class EnsureAllIngest extends Command
         }
 
         return true;
-    }
-
-    private function isPlayoutAlive(AdminChannel $channel): bool
-    {
-        $pid = cache()->get("mychannel_hls:{$channel->id}");
-
-        if (! $pid) {
-            return false;
-        }
-
-        if (! @file_exists("/proc/{$pid}")) {
-            return false;
-        }
-
-        $cmdline = @file_get_contents("/proc/{$pid}/cmdline");
-
-        return $cmdline !== false && str_contains($cmdline, 'ffmpeg');
     }
 
     private function startPlayout(AdminChannel $channel, MyChannelHlsService $hls): bool
