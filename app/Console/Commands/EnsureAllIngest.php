@@ -15,7 +15,7 @@ use Illuminate\Support\Str;
 /**
  * Ensure all active channel ingests are running.
  *
- * This is the core command for the standalone XC-VM-style architecture.
+ * This is the core command for the standalone ingest architecture.
  * It starts one persistent FFmpeg process per active channel (or per
  * multicast group for UDP sources) and keeps them running.
  *

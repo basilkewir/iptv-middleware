@@ -1,6 +1,6 @@
 [Unit]
 Description=IPTV Middleware - Start all ingest on boot
-After=network-online.target mysql.service redis-server.service nginx.service xcvm.service
+After=network-online.target mysql.service redis-server.service nginx.service
 Wants=network-online.target
 
 [Service]

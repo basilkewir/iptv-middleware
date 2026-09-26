@@ -428,7 +428,9 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
         Route::post('/epg/programs', [EpgController::class, 'storeProgram'])->name('epg.programs.store');
         Route::put('/epg/programs/{program}', [EpgController::class, 'updateProgram'])->name('epg.programs.update');
         Route::delete('/epg/programs/{program}', [EpgController::class, 'destroyProgram'])->name('epg.programs.destroy');
-        Route::post('/epg/update-all', [EpgController::class, 'updateNow'])->name('epg.update-all');
+        Route::post('/epg/update-all', [EpgController::class, 'updateAll'])->name('epg.update-all');
+        Route::post('/epg/import', [EpgController::class, 'import'])->name('epg.import');
+        Route::post('/epg/refresh', [EpgController::class, 'refresh'])->name('epg.refresh');
         Route::post('/epg/clear-expired', [EpgController::class, 'clearExpired'])->name('epg.clear-expired');
         Route::get('/epg/programs/export', [EpgController::class, 'exportPrograms'])->name('epg.programs.export');
         Route::post('/epg/update-trigger', [EpgController::class, 'triggerUpdate'])->name('epg.update.trigger');
@@ -715,7 +717,7 @@ Route::get('/get.php', [\App\Http\Controllers\XtreamController::class, 'm3u']);
 Route::get('/xmltv.php', [\App\Http\Controllers\XtreamController::class, 'xmltv']);
 Route::get('/playlist/{token}/m3u', [\App\Http\Controllers\PlaylistController::class, 'generate'])->name('playlist.m3u');
 
-// ─── XC-VM Unified Stream Delivery Routes ───────────────────────────────────────
+// ─── Stream Delivery Routes ───────────────────────────────────────────────────
 // Xtream Codes clients (Smarters, TiviMate, Formuler) expect these rigid URL
 // formats. The {username}/{password} prefix authenticates every stream request.
 Route::group(['prefix' => '{username}/{password}'], function () {

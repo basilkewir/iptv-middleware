@@ -44,7 +44,7 @@ class OfflineVideoController extends Controller
 
         Artisan::call('streams:prepare-offline');
 
-        return back()->with('success', 'Offline HLS stream is being generated in the background.');
+        return back()->with('success', 'Offline HLS 24/7 loop prepared (one-time encode + rolling playlist — plays until the channel returns).');
     }
 
     public function destroy(): RedirectResponse

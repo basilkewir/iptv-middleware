@@ -29,7 +29,7 @@ return [
     | CPU / IO budget
     |--------------------------------------------------------------------------
     | threads is capped at nproc/4 so a single channel can never monopolise
-    | the box that also runs Flussonic and XC-VM.
+    | the box that also runs Flussonic.
     */
     'threads' => (int) env('PLAYOUT_THREADS', 2),
     'nice' => (int) env('PLAYOUT_NICE', 10),

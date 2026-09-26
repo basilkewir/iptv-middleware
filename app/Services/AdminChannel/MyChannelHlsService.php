@@ -165,7 +165,7 @@ class MyChannelHlsService
         }
 
         // Admission gate: encoding on a box that is already saturated would
-        // starve Flussonic and XC-VM. Refuse rather than freeze everything.
+        // starve Flussonic. Refuse rather than freeze everything.
         if (! $this->loadGateOpen()) {
             $msg = 'Server load too high to start playout (load gate)';
             $broadcast->update(['status' => 'error', 'error_message' => $msg]);
@@ -963,7 +963,7 @@ class MyChannelHlsService
 
     /**
      * Admission control: refuse to start a new encoder while the box is
-     * already saturated, so playout can never starve Flussonic / XC-VM.
+     * already saturated, so playout can never starve Flussonic.
      */
     private function loadGateOpen(): bool
     {
@@ -1268,7 +1268,7 @@ load_1min() {
 }
 
 # Priority: CPU nice + best-effort/idle IO so playout never preempts
-# Flussonic, XC-VM or the web request path.
+# Flussonic or the web request path.
 NICE="nice -n {$nice}"
 IONICE=""
 command -v ionice >/dev/null 2>&1 && IONICE="ionice -c3 -n7"

@@ -553,9 +553,11 @@ class ChannelController extends Controller
             foreach ($validated['items'] as $index => $item) {
                 $number = $index + 1;
                 if ($item['type'] === 'channel') {
-                    Channel::where('id', $item['id'])->update(['channel_number' => $number]);
+                    // Model update rather than the query builder, so casts,
+                    // dirty tracking and updated_at all apply.
+                    Channel::where('id', $item['id'])->first()?->update(['channel_number' => $number]);
                 } else {
-                    AdminChannel::where('id', $item['id'])->update(['channel_number' => (string) $number]);
+                    AdminChannel::where('id', $item['id'])->first()?->update(['channel_number' => (string) $number]);
                 }
             }
         });

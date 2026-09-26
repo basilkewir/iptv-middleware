@@ -197,27 +197,11 @@ NGINX
 fi
 
 # =============================================================================
-# 5b. Patch .env XC-VM settings if XC-VM is enabled
-# =============================================================================
-XCVM_ENABLED=$(grep -E "^XC_VM_ENABLED=" "$APP_DIR/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "false")
-if [[ "$XCVM_ENABLED" == "true" ]]; then
-    grep -q "^XC_VM_PROXY_PLAYER=" "$APP_DIR/.env" \
-        && sed -i 's/^XC_VM_PROXY_PLAYER=.*/XC_VM_PROXY_PLAYER=true/' "$APP_DIR/.env" \
-        || echo "XC_VM_PROXY_PLAYER=true" >> "$APP_DIR/.env"
-    success "XC_VM_PROXY_PLAYER=true"
-fi
-
-# =============================================================================
 # 6. Update systemd service files
 # =============================================================================
 info "Updating systemd service files..."
 
-SERVICES=("iptv-watchdog" "iptv-ingest" "iptv-purge-ffmpeg")
-if [[ "$XCVM_ENABLED" == "true" ]]; then
-    SERVICES+=("xcvm")
-fi
-
-for svc in "${SERVICES[@]}"; do
+for svc in iptv-watchdog iptv-ingest iptv-purge-ffmpeg; do
     src="${APP_DIR}/deploy/${svc}.service"
     if [[ -f "$src" ]]; then
         # Substituting __APP_DIR__ is mandatory: iptv-*.service are templates.
@@ -276,27 +260,14 @@ mkdir -p "$APP_DIR/storage/app/streams/hls"
 chown -R www-data:www-data "$APP_DIR/storage/app/streams"
 
 # =============================================================================
-# 9. XC-VM re-sync
-# =============================================================================
-if [[ "$XCVM_ENABLED" == "true" ]]; then
-    info "Re-syncing to XC-VM..."
-    php artisan xcvm:sync --no-progress 2>&1 | tail -5 || warn "XC-VM sync had issues — re-run: php artisan xcvm:sync"
-fi
-
-# =============================================================================
-# 10. Graceful reload
+# 9. Graceful reload
 # =============================================================================
 info "Reloading services..."
 systemctl reload "php${PHP_VER}-fpm" 2>/dev/null || systemctl restart "php${PHP_VER}-fpm" 2>/dev/null || true
 systemctl reload nginx 2>/dev/null || true
 
-# xcvm.service is Type=simple, so a rewritten unit file is inert until the
-# unit is actually cycled. Oneshot units (iptv-watchdog, iptv-ingest,
-# iptv-purge-ffmpeg) need no restart — they re-read everything on each run.
-if [[ "$XCVM_ENABLED" == "true" ]]; then
-    info "Restarting XC-VM..."
-    systemctl restart xcvm.service 2>/dev/null || warn "xcvm.service not restarted (not installed or not active)"
-fi
+# Oneshot units (iptv-watchdog, iptv-ingest, iptv-purge-ffmpeg) need no
+# restart — they re-read everything on each run.
 
 # Queue workers are owned by Supervisor: install.sh §10 registers the
 # iptv-queue and iptv-scheduler programs. There is no middleware-queue

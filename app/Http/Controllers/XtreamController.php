@@ -243,7 +243,7 @@ class XtreamController extends Controller
         return response()->json($cats);
     }
 
-    // Series info with seasons/episodes — XC-VM spec compliant
+    // Series info with seasons/episodes — Xtream Codes spec compliant
     public function seriesInfo(Request $request)
     {
         $user = $this->authenticate($request);
@@ -500,7 +500,7 @@ class XtreamController extends Controller
     /**
      * Control-plane entry point for live streams (Xtream Codes protocol).
      *
-     * Architecture (XC-VM-style split stream):
+     * Architecture (single-pass split stream):
      *   1. Authenticate via Redis token cache (< 1ms, no MySQL hit on warm cache)
      *   2. Enforce per-user concurrent connection limit
      *   3. Ensure persistent background FFmpeg ingest is running (one per channel)
@@ -585,7 +585,7 @@ class XtreamController extends Controller
         $sourceUrl = $channel->active_stream_url ?? $channel->stream_url;
 
         // Start persistent background FFmpeg ingest (one process per channel).
-        // This is the core of the XC-VM architecture: FFmpeg runs ONCE and
+        // FFmpeg runs ONCE and
         // writes HLS segments to disk; Nginx serves them to all viewers.
         $this->ensureHlsStream(
             $channelId,
@@ -1371,12 +1371,12 @@ class XtreamController extends Controller
         ]);
     }
 
-    // ─── XC-VM Stream Delivery Methods ───────────────────────────────────────
+    // ─── Stream Delivery Methods ──────────────────────────────────────────────
 
     /**
      * Serve a live stream as HTTP-TS (.ts) — fast channel zapping.
      *
-     * XC-VM route: /{username}/{password}/{stream_id}.ts
+     * Route: /{username}/{password}/{stream_id}.ts
      */
     public function serveLiveStream(Request $request, string $username, string $password, int|string $streamId): \Symfony\Component\HttpFoundation\Response
     {
@@ -1463,9 +1463,9 @@ class XtreamController extends Controller
     }
 
     /**
-     * Serve a live stream as HLS (.m3u8) — the standard XC-VM delivery.
+     * Serve a live stream as HLS (.m3u8).
      *
-     * XC-VM route: /{username}/{password}/{stream_id}.m3u8
+     * Route: /{username}/{password}/{stream_id}.m3u8
      */
     public function serveLiveHls(Request $request, string $username, string $password, int|string $streamId): \Symfony\Component\HttpFoundation\Response
     {
@@ -1513,7 +1513,7 @@ class XtreamController extends Controller
     /**
      * Serve a VOD movie as a native MP4 byte-range stream.
      *
-     * XC-VM route: /{username}/{password}/vod/{stream_id}.{extension}
+     * Route: /{username}/{password}/vod/{stream_id}.{extension}
      * Supports instant seeking (pause, scrub, skip) via ngx_http_mp4_module.
      */
     public function serveMovie(Request $request, string $username, string $password, int $streamId, string $extension): \Symfony\Component\HttpFoundation\Response
@@ -1538,7 +1538,7 @@ class XtreamController extends Controller
     /**
      * Serve a series episode as a native MP4 byte-range stream.
      *
-     * XC-VM route: /{username}/{password}/series/{stream_id}.{extension}
+     * Route: /{username}/{password}/series/{stream_id}.{extension}
      * The stream_id is the vod_media.id (episode ID).
      */
     public function serveEpisode(Request $request, string $username, string $password, int $streamId, string $extension): \Symfony\Component\HttpFoundation\Response
@@ -1628,7 +1628,7 @@ class XtreamController extends Controller
 
         $xml = '<?xml version="1.0" encoding="UTF-8"?>' . "\n";
         $xml .= '<!DOCTYPE tv SYSTEM "xmltv.dtd">' . "\n";
-        $xml .= '<tv source-info-name="IPTV Middleware" generator-info-name="Laravel XC-VM">' . "\n";
+        $xml .= '<tv source-info-name="IPTV Middleware" generator-info-name="Laravel IPTV Middleware">' . "\n";
 
         // Channel definitions
         foreach ($channels as $ch) {
@@ -1691,7 +1691,8 @@ class XtreamController extends Controller
         }
         $token = $user->m3u_token;
 
-        $lines = ['#EXTM3U'];
+        $tvgUrl = $base . '/xmltv.php';
+        $lines = ['#EXTM3U x-tvg-url="' . $tvgUrl . '"'];
 
         $regular = Channel::with('categories')->where('is_active', true)->get()
             ->map(fn ($ch) => [

@@ -143,9 +143,7 @@
         <p class="text-gray-300 font-medium flex items-center gap-2"><Info class="w-4 h-4 text-indigo-400" /> How it works</p>
         <ol class="list-decimal list-inside space-y-1 ml-1">
           <li>Upload your "channel offline" video (MP4 recommended).</li>
-          <li>Click <strong class="text-gray-300">Prepare HLS Stream</strong> — ffmpeg converts it to a looping HLS stream.</li>
-          <li>Whenever a channel has no active ingest, viewers are automatically redirected to this stream.</li>
-          <li>Re-prepare any time you replace the video.</li>
+          <li>Click <strong class="text-gray-300">Prepare HLS Stream</strong> — ffmpeg builds a local looping HLS preview (backup only).</li>
         </ol>
       </div>
 

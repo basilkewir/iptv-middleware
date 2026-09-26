@@ -1,6 +1,6 @@
 [Unit]
 Description=IPTV Middleware - Watchdog restart dead ingestors
-After=iptv-ingest.service xcvm.service
+After=iptv-ingest.service
 
 [Service]
 Type=oneshot

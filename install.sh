@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # =============================================================================
-# IPTV Middleware — Bare-Metal Auto-Installer (Standalone, no XC-VM)
+# IPTV Middleware — Bare-Metal Auto-Installer (Standalone)
 # =============================================================================
 # Installs on Ubuntu 22.04 / 24.04 (no Docker).
-# The middleware handles ALL streaming directly using the XC-VM-style
-# split-stream architecture: background FFmpeg + Nginx.
+# The middleware handles ALL streaming directly using a split-stream
+# architecture: background FFmpeg + Nginx.
 #
 # Usage:
 #   sudo bash install.sh [--domain example.com] [--port 25460] [--fresh]
@@ -241,7 +241,7 @@ TMDB_CACHE_TTL=86400
 
 OFFLINE_VIDEO_PATH=${APP_DIR}/storage/app/offline/channel-offline.mp4
 
-# ── Standalone Streaming (no XC-VM dependency) ──────────────────────────────
+# ── Standalone Streaming ─────────────────────────────────────────────────────
 XC_VM_HLS_SEGMENT_DURATION=4
 XC_VM_HLS_PLAYLIST_SIZE=5
 XC_VM_HLS_KEYFRAME_INTERVAL=100
@@ -285,7 +285,7 @@ fi
 info "Using PHP-FPM socket: /run/php/php${PHP_VER}-fpm.sock"
 
 cat > /etc/nginx/sites-available/iptv-middleware <<NGINX
-# IPTV Middleware — standalone streaming (XC-VM-style architecture)
+# IPTV Middleware — standalone streaming
 # Segments served directly from RAM-backed tmpfs by nginx.
 # PHP-FPM only handles the control plane (auth, playlist redirect).
 server {
@@ -467,17 +467,7 @@ success "Supervisor configured."
 # =============================================================================
 info "Installing systemd services…"
 
-# XC-VM is optional. The flag lives in .env; a missing or empty value means
-# "no XC-VM" so nodes without it never get the unit installed.
-XCVM_ENABLED=$(grep -E "^XC_VM_ENABLED=" "${APP_DIR}/.env" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "false")
-XCVM_ENABLED="${XCVM_ENABLED:-false}"
-
-SERVICES=("iptv-watchdog" "iptv-ingest" "iptv-purge-ffmpeg")
-if [[ "$XCVM_ENABLED" == "true" ]]; then
-    SERVICES+=("xcvm")
-fi
-
-for svc in "${SERVICES[@]}"; do
+for svc in iptv-watchdog iptv-ingest iptv-purge-ffmpeg; do
     src="${APP_DIR}/deploy/${svc}.service"
     if [[ -f "$src" ]]; then
         # __APP_DIR__ must keep being substituted — iptv-*.service are built
@@ -525,13 +515,6 @@ systemctl daemon-reload
 for unit in iptv-watchdog.timer iptv-purge-ffmpeg.timer iptv-ingest.service; do
     systemctl enable "$unit" 2>/dev/null && systemctl start "$unit" 2>/dev/null || true
 done
-
-# xcvm.service is Type=simple — the only unit here whose file changes need a
-# real restart to take effect.
-if [[ "$XCVM_ENABLED" == "true" && -f "/etc/systemd/system/xcvm.service" ]]; then
-    systemctl enable "xcvm.service" 2>/dev/null || true
-    systemctl restart "xcvm.service" 2>/dev/null || systemctl start "xcvm.service" 2>/dev/null || true
-fi
 
 success "Systemd services installed."
 
@@ -620,7 +603,7 @@ echo -e "  ${YELLOW}Save the credentials above — they are not shown again.${NC
 echo ""
 echo -e "  Default admin login:  ${ADMIN_USERNAME} / ${ADMIN_PASSWORD}"
 echo ""
-echo -e "  Architecture:  Standalone (FFmpeg + Nginx, no XC-VM)"
+echo -e "  Architecture:  Standalone (FFmpeg + Nginx)"
 echo -e "  HLS segments:  RAM-backed tmpfs at ${HLS_DIR}"
 echo ""
 echo -e "  Useful commands:"
