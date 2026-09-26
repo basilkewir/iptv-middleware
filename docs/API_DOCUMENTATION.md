@@ -3,10 +3,10 @@
 > Comprehensive API reference for mobile application developers integrating with the
 > **IPTV Middleware** (Streambox) platform and the **HMS — Hotel / License Management System**.
 >
-> - **Middleware version:** Laravel 10 / Streambox (XC-VM architecture)
+> - **Middleware version:** Laravel 10 / Streambox (standalone FFmpeg + Nginx)
 > - **Default HTTP port:** `25460` (configurable via `STREAM_SERVER_PORT`)
 > - **API version prefix:** `/api/v1`
-> - **Source commit:** `dda031e` on `main`
+> - **Source commit:** `00ec8e7` on `main`
 
 ---
 
@@ -33,8 +33,8 @@
 
 The platform consists of two layers. The **HMS (Hotel Management System)** governs
 license validation for hotel deployments. The **IPTV Middleware** serves content
-catalogs, user data, and live/VOD streaming to clients. A **XC-VM streaming engine**
-(FFmpeg + Nginx) delivers HLS segments with one-to-many efficiency.
+catalogs, user data, and live/VOD streaming to clients. Its **FFmpeg + Nginx
+streaming engine** delivers HLS segments with one-to-many efficiency.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -45,8 +45,8 @@ catalogs, user data, and live/VOD streaming to clients. A **XC-VM streaming engi
 ├─────────────────────────────────────────────────────────────┤
 │                    IPTV Middleware (Laravel)               │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
-│  │  License     │  │  Content     │  │  XC-VM Streaming │ │
-│  │  System      │  │  Catalog     │  │  Engine          │ │
+│  │  License     │  │  Content     │  │  Playout Engine  │ │
+│  │  System      │  │  Catalog     │  │  (FFmpeg)        │ │
 │  └──────┬───────┘  └──────┬───────┘  └────────┬─────────┘ │
 │  kewirdev.com←remote→ MySQL DB ←←→ FFmpeg/HLS + Nginx       │
 └─────────────────────────────────────────────────────────────┘
@@ -67,10 +67,12 @@ catalogs, user data, and live/VOD streaming to clients. A **XC-VM streaming engi
 - **License JWT** (Bearer token) for license-protected endpoints via the `license`
   middleware (profile, favorites, watch history, reviews, subscriptions, payments).
 
-### XC-VM Streaming Engine
+### Streaming Engine
 
-FFmpeg runs **once per channel** in a background process, writing HLS segments to
-disk. Nginx serves segments to all viewers via `X-Accel-Redirect` (near-zero PHP
+Each channel runs as two supervised FFmpeg processes: Stage 1 stream-copies a
+looping playlist into a FIFO (no re-encode, so the loop point never freezes),
+Stage 2 encodes once and burns in the overlays, writing HLS segments to disk.
+Nginx serves segments to all viewers via `X-Accel-Redirect` (near-zero PHP
 overhead per segment). The Xtream Codes API (`/player_api.php`) maintains player
 compatibility (TiviMate, Smarters, Formuler, GSE, IPTV Smarters).
 
@@ -1089,7 +1091,7 @@ Episodes are keyed by season number (string): `{"1": [...], "2": [...]}`.
 
 ## 7. Streaming Playback URLs
 
-The XC-VM streaming engine uses URL patterns compatible with Xtream Codes clients.
+The streaming engine uses URL patterns compatible with Xtream Codes clients.
 All stream requests are authenticated via URL-encoded `username` / `password`.
 
 ### Live TV — HLS (primary)

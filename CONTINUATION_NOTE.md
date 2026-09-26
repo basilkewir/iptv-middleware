@@ -1,7 +1,7 @@
 # Continuation Note — Dashboard "Restart Ingest" Fix & Follow-ups
 
 > **Generated:** Session continuation after reviewing `FIX_SUMMARY.md` and the full codebase.
-> **Last commit:** `40d4a0f` — `install.sh: fix masked MySQL, real XC-VM installer, auto-start all services`
+> **Last commit:** `00ec8e7` — `refactor!: remove the XC-VM (GuestVue) integration entirely`
 > **Status:** Working tree was clean at start of session. Changes below applied during this session.
 
 ---
@@ -137,15 +137,12 @@ must be regenerated: `php artisan ziggy:generate`).
 
 ## 5. Architecture Context for Next Session
 
-### Key files for the streaming/XcVm subsystem
+### Key files for the streaming subsystem
 | File | Role |
 |---|---|
-| `app/Services/XcVm/XcVmClient.php` | Low-level HTTP client wrapping the XC-VM REST API (streams, movies, series, episodes, users, bouquets, categories, settings) |
-| `app/Services/XcVm/XcVmSyncService.php` | Orchestrates full sync, incremental sync, prune |
-| `app/Services/XcVm/UdpXcVmBridge.php` | Pushes local UDP HLS URLs into XC-VM for proxy streaming |
-| `app/Services/XcVm/XcVmPlayerProxy.php` | Proxies authenticated player requests to XC-VM |
-| `app/Services/XcVm/XcVmUrl.php` | Builds XC-VM stream/playlist URLs |
-| `app/Services/XcVm/Syncers/ChannelSyncer.php` | Per-entity sync logic for channels |
+| `app/Services/AdminChannel/MyChannelHlsService.php` | Two-stage playout engine: normalisation, concat list, Stage 1 `-c copy` loop, Stage 2 encode + overlays, restart policy |
+| `config/playout.php` | Playout tuning — thread budget, FIFO paths, canvas/overlay assets |
+| `deploy/iptv-playout@.service` / `deploy/iptv-playout-ctl` | systemd per-channel unit and its allow-listed sudoers entry point |
 | `app/Services/StreamingService/MulticastIngestService.php` | Manages the shared UDP multicast group reader (one ffmpeg per mux, multiple HLS outputs) |
 | `app/Services/StreamingService/FlussonicService.php` | Flussonic playout API wrapper |
 | `app/Http/Controllers/XtreamController.php` | Xtream Codes-compatible API + HLS ingest management |
@@ -157,15 +154,17 @@ must be regenerated: `php artisan ziggy:generate`).
 | `channels:auto-check-health` | Every 60s | Probe all active sources, auto-failover to backups |
 | `channels:probe-sources` | Every 3min | Per-source health status for admin UI |
 | `channels:watchdog` | Every 30s | Restart stale UDP ingests, cleanup dead processes |
-| `xcvm:sync` | Every 5min (configurable) | Full XC-VM data sync |
-| `xcvm:sync-udp` | — | Bridge UDP→XC-VM for proxied playback |
+| `ingest:ensure-all` | Every 1min | Make sure every channel's HLS ingest process is alive |
+| `streams:ensure-offline` | Every 1min | Restart the offline "channel is down" loop if dead |
 | `streams:prepare-offline` | — | Prepare offline "channel is down" HLS fallback |
 
 ### Deployment
-- `install.sh` — bare-metal installer (Ubuntu 22.04/24.04, no Docker). Installs MariaDB, Redis, Nginx, PHP deps, XC-VM, supervisor, systemd units.
-- XC-VM is bound to `127.0.0.1:25462` only (never exposed). Middleware proxies player requests to it.
-- Systemd units: `xcvm.service`, `iptv-watchdog.{service,timer}`, `iptv-ingest.service`, `iptv-purge-ffmpeg.{service,timer}`.
+- `install.sh` — bare-metal installer (Ubuntu 22.04/24.04, no Docker). Installs MySQL, Redis, Nginx, PHP deps, supervisor, systemd units.
+- Standalone: FFmpeg + Nginx only. No second streaming engine, no loopback proxy port.
+- Systemd units: `iptv-playout@<slug>.service`, `iptv-watchdog.{service,timer}`, `iptv-ingest.service`, `iptv-purge-ffmpeg.{service,timer}`.
+- `iptv-playout-ctl` is the sole root-privileged entry point for web-triggered start/stop (allow-listed in `deploy/iptv-playout.sudoers`).
 - Supervisor manages the scheduler and queue workers.
+- HLS segments live on a RAM-backed tmpfs mounted by `install.sh` §13.
 
 ---
 
