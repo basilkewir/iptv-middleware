@@ -31,7 +31,8 @@ class PlaylistController extends Controller
         }
 
         $base = rtrim(config('app.url'), '/');
-        $lines = ['#EXTM3U'];
+        $tvgUrl = $base . '/xmltv.php';
+        $lines = ['#EXTM3U x-tvg-url="' . $tvgUrl . '"'];
 
         // Get channels from assigned bouquets
         $bouquetIds = $user->bouquets()->pluck('bouquets.id');

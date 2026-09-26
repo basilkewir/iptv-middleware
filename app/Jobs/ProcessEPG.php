@@ -3,13 +3,13 @@
 namespace App\Jobs;
 
 use App\Models\Channel;
-use App\Models\EPGEntry;
+use App\Models\EPGProgram;
+use App\Services\EPGService\EPGManager;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 class ProcessEPG implements ShouldQueue
@@ -24,52 +24,57 @@ class ProcessEPG implements ShouldQueue
         public ?int $channelId = null
     ) {}
 
-    public function handle(): void
+    public function handle(EPGManager $epgManager): void
     {
         try {
-            $response = Http::timeout(120)->get($this->epgUrl);
+            $result = $epgManager->fetchEPG($this->epgUrl);
+            $programs = $result['programs'] ?? [];
+            $count = 0;
 
-            if ($response->failed()) {
-                Log::error('Failed to fetch EPG data', ['url' => $this->epgUrl]);
-                return;
-            }
+            foreach ($programs as $program) {
+                $epgChannelId = $program['epg_channel_id'] ?? null;
 
-            $xml = simplexml_load_string($response->body());
-
-            if ($xml === false) {
-                Log::error('Invalid EPG XML', ['url' => $this->epgUrl]);
-                return;
-            }
-
-            foreach ($xml->programme as $programme) {
-                $channel = $this->resolveChannel((string) $programme['channel']);
-
-                if (! $channel) {
+                if (!$epgChannelId) {
                     continue;
                 }
 
-                EPGEntry::updateOrCreate(
+                $channel = $this->resolveChannel($epgChannelId);
+
+                if (!$channel) {
+                    continue;
+                }
+
+                EPGProgram::updateOrCreate(
                     [
-                        'channel_id' => $channel->id,
-                        'external_id' => (string) $programme['id'],
+                        'program_id'    => $program['external_id'],
+                        'channel_id'    => $channel->id,
                     ],
                     [
-                        'title' => (string) $programme->title,
-                        'description' => (string) $programme->desc ?? '',
-                        'start_time' => $this->parseEpgTime((string) $programme['start']),
-                        'end_time' => $this->parseEpgTime((string) $programme['stop']),
-                        'language' => (string) $programme->title['lang'] ?? 'en',
-                        'category' => (string) $programme->category ?? null,
-                        'icon' => (string) $programme->icon['src'] ?? null,
+                        'title'         => $program['title'],
+                        'description'   => $program['description'] ?? '',
+                        'start_time'    => $program['start_time'],
+                        'end_time'      => $program['end_time'],
+                        'category'      => $program['genre'] ?? null,
+                        'language'      => $program['language'] ?? null,
+                        'rating'        => $program['rating'] ?? null,
+                        'season'        => $program['season'] ?? null,
+                        'episode'       => $program['episode'] ?? null,
+                        'episode_title' => $program['episode_title'] ?? null,
                     ]
                 );
+
+                $count++;
             }
 
-            Log::info('EPG processed successfully', ['url' => $this->epgUrl]);
+            Log::info('EPG processed successfully', [
+                'url'         => $this->epgUrl,
+                'programs'    => $count,
+                'total_parse' => count($programs),
+            ]);
 
         } catch (\Exception $e) {
             Log::error('EPG processing failed', [
-                'url' => $this->epgUrl,
+                'url'   => $this->epgUrl,
                 'error' => $e->getMessage(),
             ]);
 
@@ -83,13 +88,8 @@ class ProcessEPG implements ShouldQueue
             return Channel::find($this->channelId);
         }
 
-        return Channel::where('epg_id', $epgChannelId)->first();
-    }
-
-    private function parseEpgTime(string $time): \Carbon\Carbon
-    {
-        $formatted = substr($time, 0, 4) . '-' . substr($time, 4, 2) . '-' . substr($time, 6, 2) . ' ' . substr($time, 8, 2) . ':' . substr($time, 10, 2) . ':' . substr($time, 12, 2);
-
-        return \Carbon\Carbon::parse($formatted);
+        return Channel::where('epg_channel_id', $epgChannelId)
+            ->orWhere('epg_id', $epgChannelId)
+            ->first();
     }
 }

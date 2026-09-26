@@ -215,7 +215,7 @@ class MulticastIngestService
         }
 
         if ($this->allBucketsAlive($sourceUrl, count($groups[$sourceUrl]))) {
-            if ($this->anyBucketStale($groups[$sourceUrl])) {
+            if ($this->anyBucketStale($sourceUrl, $groups[$sourceUrl])) {
                 // Processes are alive but their outputs stopped advancing —
                 // e.g. one stalled encoder head-of-line blocks every output
                 // sharing the same input. Kill the frozen readers so the
@@ -241,7 +241,7 @@ class MulticastIngestService
         try {
             // Double-check after acquiring lock
             if ($this->allBucketsAlive($sourceUrl, count($groups[$sourceUrl]))) {
-                if ($this->anyBucketStale($groups[$sourceUrl])) {
+                if ($this->anyBucketStale($sourceUrl, $groups[$sourceUrl])) {
                     $this->killGroupReaders($sourceUrl, count($groups[$sourceUrl]));
                 } else {
                     $this->touchHeartbeat($channel);
@@ -260,7 +260,7 @@ class MulticastIngestService
      * has not been updated within the staleness window even though the reader
      * process is still running.
      */
-    private function anyBucketStale($groupChannels): bool
+    private function anyBucketStale(string $sourceUrl, $groupChannels): bool
     {
         $now = time();
 
@@ -268,6 +268,22 @@ class MulticastIngestService
             $playlist = storage_path("app/streams/hls/{$ch->id}/playlist.m3u8");
 
             if (! is_file($playlist)) {
+                // A playlist that never appears is the worst case, not a
+                // health signal: an adopted reader from an earlier deployment
+                // (or one built before the channel row was re-imported) can be
+                // alive while writing to output directories that no longer
+                // belong to any channel. Previously this was skipped, so the
+                // dead reader was judged healthy and never respawned — the
+                // channel stayed black forever.
+                //
+                // Only treat the absence as stale once the reader has had a
+                // fair chance to produce output (pid file older than the stale
+                // window), otherwise a freshly spawned bucket would be killed
+                // in a restart loop before ffmpeg writes its first segment.
+                if ($this->readerStartAge($sourceUrl, $ch) > self::STALE_SECONDS) {
+                    return true;
+                }
+
                 continue;
             }
 
@@ -279,6 +295,31 @@ class MulticastIngestService
         }
 
         return false;
+    }
+
+    /**
+     * Seconds since the bucket reader that should be producing this channel's
+     * playlist was spawned. Uses the bucket pid file mtime as a proxy for
+     * process start; returns 0 when the bucket (or its pid file) is unknown,
+     * which keeps a not-yet-spawned bucket from being judged stale.
+     */
+    private function readerStartAge(string $sourceUrl, Channel $channel): int
+    {
+        $bucket = $this->bucketIndexOf($channel);
+
+        if ($bucket === null) {
+            return 0;
+        }
+
+        $pidFile = $this->getGroupPidFile($sourceUrl, $bucket);
+
+        if (! is_file($pidFile)) {
+            return 0;
+        }
+
+        $spawnedAt = @filemtime($pidFile);
+
+        return $spawnedAt === false ? 0 : max(0, time() - $spawnedAt);
     }
 
     /**
@@ -367,6 +408,10 @@ class MulticastIngestService
             if ($cmdline !== false
                 && str_contains($cmdline, 'ffmpeg')
                 && preg_match("/{$escapedUrl}/", $cmdline)
+                // Only adopt readers with the correct buffer_size (64MB).
+                // Old PHP-generated readers use 33554432 (32MB) and must
+                // NOT be adopted — they compete for multicast sockets.
+                && str_contains($cmdline, 'buffer_size=67108864')
             ) {
                 return $pid;
             }

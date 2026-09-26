@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Models\Role;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -10,6 +11,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Response;
 use Illuminate\Validation\Rules\Password;
+use Illuminate\Validation\Rule;
 use Inertia\Inertia;
 use Inertia\Response as InertiaResponse;
 
@@ -84,7 +86,7 @@ class UserController extends Controller
             'is_active' => 'nullable|boolean',
             'is_admin' => 'nullable|boolean',
             'is_reseller' => 'nullable|boolean',
-            'role' => 'nullable|string|in:super_admin,admin,reseller,moderator,support,client',
+            'role' => ['nullable', 'string', Rule::in(Role::pluck('name')->all())],
             'max_connections' => 'nullable|integer|min:1',
             'credits' => 'nullable|numeric|min:0',
             'credit_limit' => 'nullable|numeric|min:0',
@@ -153,7 +155,7 @@ class UserController extends Controller
             'is_active' => 'sometimes|boolean',
             'is_admin' => 'sometimes|boolean',
             'is_reseller' => 'sometimes|boolean',
-            'role' => 'sometimes|string|in:super_admin,admin,reseller,moderator,support,client',
+            'role' => ['sometimes', 'string', Rule::in(Role::pluck('name')->all())],
             'max_connections' => 'sometimes|integer|min:1',
             'credits' => 'sometimes|numeric|min:0',
             'mac_address' => 'sometimes|nullable|string|max:17',

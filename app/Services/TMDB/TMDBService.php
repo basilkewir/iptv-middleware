@@ -209,6 +209,7 @@ class TMDBService
             }
 
             $updateData = [
+                'tmdb_id' => $tmdbId,
                 'description' => $details['overview'] ?? $vodContent->description,
                 'rating' => $details['vote_average'] ?? $vodContent->rating,
                 'poster_url' => $this->getImageUrl($details['poster_path']) ?? $vodContent->poster_url,
@@ -219,6 +220,14 @@ class TMDBService
                 'director' => $details['director'] ?? $vodContent->director,
                 'year' => $details['release_year'] ?? $vodContent->year,
             ];
+
+            if (! empty($details['imdb_id'])) {
+                $updateData['imdb_id'] = $details['imdb_id'];
+            }
+
+            if (! empty($details['release_date'])) {
+                $updateData['released_at'] = $details['release_date'];
+            }
 
             $vodContent->update($updateData);
 

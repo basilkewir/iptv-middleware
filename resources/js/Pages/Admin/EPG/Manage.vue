@@ -14,7 +14,7 @@
             <Clock class="w-4 h-4" />
             Schedule
           </button>
-          <button @click="updateEpg('all')" :disabled="updating" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center gap-2 disabled:opacity-50">
+          <button @click="updateAllSources" :disabled="updating" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center gap-2 disabled:opacity-50">
             <RefreshCw :class="{ 'animate-spin': updating }" class="w-4 h-4" />
             {{ updating ? 'Updating...' : 'Update All' }}
           </button>
@@ -73,7 +73,7 @@
       <div class="bg-gray-800 rounded-xl p-6 border border-gray-700">
         <h3 class="text-lg font-semibold text-white mb-4">Update EPG Data</h3>
         <div class="flex flex-wrap gap-4">
-          <button @click="updateEpg('all')" :disabled="updating" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center gap-2 disabled:opacity-50">
+          <button @click="updateAllSources" :disabled="updating" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition flex items-center gap-2 disabled:opacity-50">
             <RefreshCw :class="{ 'animate-spin': updating }" class="w-4 h-4" />
             {{ updating ? 'Updating...' : 'Update All Sources' }}
           </button>
@@ -129,7 +129,7 @@
                 </td>
                 <td class="px-6 py-4">
                   <span class="px-2 py-1 text-xs rounded-full" :class="sourceTypeBadge(source)">
-                    {{ source.source_type || 'XMLTV' }}
+                    {{ source.type?.toUpperCase() || 'XMLTV' }}
                   </span>
                 </td>
                 <td class="px-6 py-4">
@@ -147,7 +147,7 @@
                   <span class="text-gray-400 text-sm">{{ source.last_fetched_at ? formatRelativeTime(source.last_fetched_at) : 'Never' }}</span>
                 </td>
                 <td class="px-6 py-4">
-                  <span class="text-gray-400 text-sm">Every {{ source.fetch_interval || 24 }}h</span>
+                  <span class="text-gray-400 text-sm">Every {{ formatInterval(source.update_interval) }}</span>
                 </td>
                 <td class="px-6 py-4">
                   <div class="flex items-center gap-2">
@@ -262,10 +262,10 @@ const filteredSources = computed(() => {
 })
 
 const nextScheduled = computed(() => {
-  const activeSources = (props.sources || []).filter(s => s.is_active && s.fetch_interval)
+  const activeSources = (props.sources || []).filter(s => s.is_active && s.update_interval)
   if (!activeSources.length) return 'N/A'
   const next = activeSources.reduce((closest, s) => {
-    const interval = (s.fetch_interval || 24) * 3600000
+    const interval = (s.update_interval || 14400) * 1000
     const lastFetch = s.last_fetched_at ? new Date(s.last_fetched_at).getTime() : 0
     const nextFetch = lastFetch + interval
     return nextFetch < closest ? nextFetch : closest
@@ -285,7 +285,7 @@ const freshness = computed(() => {
   const fresh = sources.filter(s => {
     if (!s.last_fetched_at) return false
     const hoursSince = (Date.now() - new Date(s.last_fetched_at).getTime()) / 3600000
-    return hoursSince < (s.fetch_interval || 24) * 2
+    return hoursSince < (s.update_interval || 14400) / 3600 * 2
   })
   return Math.round((fresh.length / sources.length) * 100)
 })
@@ -293,16 +293,15 @@ const freshness = computed(() => {
 const scheduleItems = computed(() => {
   return (props.sources || []).filter(s => s.is_active).slice(0, 5).map(s => ({
     source: s.name,
-    time: s.fetch_interval ? `Every ${s.fetch_interval}h` : 'Manual',
-    urgent: s.last_fetched_at ? (Date.now() - new Date(s.last_fetched_at).getTime()) / 3600000 > (s.fetch_interval || 24) : false
+    time: s.update_interval ? `Every ${formatInterval(s.update_interval)}` : 'Manual',
+    urgent: s.last_fetched_at ? (Date.now() - new Date(s.last_fetched_at).getTime()) / 3600000 > (s.update_interval || 14400) / 3600 : false
   }))
 })
 
 const sourceTypeBadge = (source) => ({
-  'bg-indigo-500/20 text-indigo-400': source.source_type === 'XMLTV' || !source.source_type,
-  'bg-green-500/20 text-green-400': source.source_type === 'XTREAM',
-  'bg-purple-500/20 text-purple-400': source.source_type === 'M3U',
-  'bg-yellow-500/20 text-yellow-400': source.source_type === 'JSON',
+  'bg-indigo-500/20 text-indigo-400': source.type === 'xmltv' || !source.type,
+  'bg-green-500/20 text-green-400': source.type === 'json',
+  'bg-yellow-500/20 text-yellow-400': source.type === 'custom',
 })
 
 const formatRelativeTime = (date) => {
@@ -315,12 +314,13 @@ const formatRelativeTime = (date) => {
   return `${days}d ago`
 }
 
-const updateEpg = (sourceId) => {
+const updateAllSources = () => {
+  if (!confirm('Fetch EPG data from all active sources now?')) return
   updating.value = true
   updateStatus.value = null
-  router.post(route('admin.epg.update.trigger'), { source_id: sourceId }, {
+  router.post(route('admin.epg.update-all'), {}, {
     onFinish: () => { updating.value = false },
-    onSuccess: () => { updateStatus.value = { success: true, message: 'EPG update triggered successfully!' } },
+    onSuccess: () => { updateStatus.value = { success: true, message: 'EPG update triggered for all sources!' } },
     onError: () => { updateStatus.value = { success: false, message: 'Failed to trigger EPG update.' } },
   })
 }
@@ -336,9 +336,16 @@ const toggleSource = (source) => {
   router.put(route('admin.epg.update', source.id), { ...source, is_active: !source.is_active })
 }
 
+const formatInterval = (seconds) => {
+  if (!seconds) return '4h'
+  const hours = Math.floor(seconds / 3600)
+  if (hours < 1) return `${Math.floor(seconds / 60)}m`
+  return `${hours}h`
+}
+
 const forceUpdate = () => {
   if (confirm('Force update all EPG sources? This may take a while.')) {
-    updateEpg('all')
+    updateAllSources()
   }
 }
 

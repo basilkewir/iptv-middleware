@@ -255,8 +255,9 @@ const adminPermissions = [
 ]
 
 const adminRoleOptions = computed(() => {
-  const names = new Set(props.roles.map(r => r.name))
-  return props.roles.filter(r => ['super_admin', 'admin', 'moderator', 'support'].includes(r.name) || names.has(r.name))
+  // Panel roles only — `reseller` and `client` are selected from their own tabs.
+  const adminRoles = ['super_admin', 'admin', 'moderator', 'support', 'channel_vod_manager']
+  return props.roles.filter(r => adminRoles.includes(r.name))
 })
 
 const resellerFeatures = [

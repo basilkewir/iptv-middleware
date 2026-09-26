@@ -86,8 +86,14 @@ class PurgeOrphanFfmpeg extends Command
             if ($this->isGroupReaderCmd($info['cmd'])) {
                 continue;
             }
-            // Protect admin / My-Channel playouts.
+            // Skip admin / My-Channel playouts.
             if (str_contains($info['cmd'], 'admin-channel-')) {
+                continue;
+            }
+            // Skip the offline "channel is down" fallback loop (24/7 supervisor).
+            if (str_contains($info['cmd'], '/hls/offline')
+                || str_contains($info['cmd'], 'offline-loop')
+                || str_contains($info['cmd'], 'offline/playlist.m3u8')) {
                 continue;
             }
             if (! preg_match_all('#streams/hls/(\d+)#', $info['cmd'], $m)) {
@@ -229,6 +235,11 @@ class PurgeOrphanFfmpeg extends Command
                 continue;
             }
 
+            // Never delete the offline fallback HLS directory.
+            if ($id === 'offline') {
+                continue;
+            }
+
             // Skip directories for channels that still exist in the DB
             // (active or inactive — they may be served via Flussonic or
             // reactivated later).
@@ -270,6 +281,14 @@ class PurgeOrphanFfmpeg extends Command
         $cleaned = 0;
 
         foreach (glob($hlsRoot . '/*', GLOB_ONLYDIR) ?: [] as $dir) {
+            $id = basename($dir);
+
+            // Offline fallback is a continuous 24/7 loop — its segments are
+            // the live window, not leftovers. Never age them out.
+            if ($id === 'offline') {
+                continue;
+            }
+
             $segments = glob("{$dir}/seg_*.ts") ?: [];
 
             foreach ($segments as $file) {

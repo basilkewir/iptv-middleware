@@ -48,8 +48,13 @@ class Kernel extends ConsoleKernel
             ->withoutOverlapping();
 
         // Ensure all active channel ingests are running (persistent background
-        // ingestion — the core of the standalone XC-VM-style architecture).
+        // ingestion — the core of the standalone streaming architecture).
         $schedule->command('ingest:ensure-all')
+            ->everyMinute()
+            ->withoutOverlapping();
+
+        // Offline "channel is down" card — stream-copy loop only; restart if dead.
+        $schedule->command('streams:ensure-offline')
             ->everyMinute()
             ->withoutOverlapping();
     }

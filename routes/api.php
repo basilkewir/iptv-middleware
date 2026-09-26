@@ -48,10 +48,10 @@ Route::group([], function () {
     Route::get('/vod/{vod}/similar', [VODController::class, 'similar']);
     Route::get('/vod/{vod}/seasons', [VODController::class, 'seasons']);
 
-    Route::get('/epg/{channel}', [EPGController::class, 'channelEPG']);
-    Route::get('/epg', [EPGController::class, 'programs']);
     Route::get('/epg/current', [EPGController::class, 'current']);
     Route::get('/epg/upcoming', [EPGController::class, 'upcoming']);
+    Route::get('/epg', [EPGController::class, 'programs']);
+    Route::get('/epg/{channel}', [EPGController::class, 'channelEPG']);
 
     // License validation endpoint (POST only, no middleware - public for initial license check)
     Route::post('/license/validate', [LicenseController::class, 'validate']);

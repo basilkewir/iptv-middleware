@@ -29,6 +29,12 @@ class RoleSeeder extends Seeder
                 'permissions' => ['my_channels', 'vod_management'],
             ],
             [
+                'name' => 'channel_vod_manager',
+                'label' => 'Channels & VOD Manager',
+                'description' => 'Manages My Channels and VOD (movies & series) only — no user, role, billing or system settings access.',
+                'permissions' => ['my_channels', 'vod_management'],
+            ],
+            [
                 'name' => 'support',
                 'label' => 'Support',
                 'description' => 'View-only access for support staff.',
