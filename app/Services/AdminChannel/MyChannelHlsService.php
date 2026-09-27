@@ -792,6 +792,19 @@ class MyChannelHlsService
     }
 
     /**
+     * Transparent full-frame base for the overlay canvas.
+     *
+     * The trailing format=rgba is mandatory: without it the colour source
+     * negotiates yuv420p (no alpha plane), the @0.0 opacity is thrown away and
+     * the canvas comes out fully opaque black — the stage-2 overlay filter
+     * would then hide the video completely (black picture).
+     */
+    private function canvasBaseSource(int $width, int $height): string
+    {
+        return sprintf('color=c=black@0.0:s=%dx%d:r=1:d=1,format=rgba', $width, $height);
+    }
+
+    /**
      * Render the overlay canvas: a transparent full-frame RGBA PNG with the
      * logo and watermark composited onto it, sitting on the RAM disk.
      *
@@ -824,7 +837,7 @@ class MyChannelHlsService
         $cmd = sprintf(
             '%s -y -hide_banner -loglevel error -f lavfi -i %s%s -filter_complex %s -map [cout] -frames:v 1 -c:v png -pix_fmt rgba -f image2 %s 2>&1',
             $this->ffmpeg,
-            escapeshellarg(sprintf('color=c=black@0.0:s=%dx%d:r=1:d=1', $width, $height)),
+            escapeshellarg($this->canvasBaseSource($width, $height)),
             $inputs,
             escapeshellarg($graph),
             escapeshellarg($tmp)

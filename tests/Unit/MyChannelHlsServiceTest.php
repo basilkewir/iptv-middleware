@@ -238,6 +238,14 @@ class MyChannelHlsServiceTest extends TestCase
         $this->assertStringStartsWith('[0:v]format=rgba[cout]', $vf);
     }
 
+    public function test_canvas_base_source_keeps_its_alpha_plane(): void
+    {
+        // Without format=rgba the colour source negotiates yuv420p, drops the
+        // @0.0 opacity and the finished canvas is opaque black — stage 2 then
+        // overlays a black rectangle over the whole picture.
+        $this->assertStringEndsWith(',format=rgba', $this->invoke('canvasBaseSource', 1280, 720));
+    }
+
     // ── Overlay update contract ──────────────────────────────────────────────
 
     public function test_ticker_text_change_needs_no_restart(): void
