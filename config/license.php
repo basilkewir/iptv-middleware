@@ -174,7 +174,7 @@ return [
 
     // Feature Flags
     'features' => [
-        'enable_offline_mode' => env('LICENSE_ENABLE_OFFLINE_MODE', true),
+        'enable_offline_mode' => env('LICENSE_ENABLE_OFFLINE_MODE', false),
         'enable_device_transfer' => env('LICENSE_ENABLE_DEVICE_TRANSFER', false),
         'enable_license_sharing' => env('LICENSE_ENABLE_LICENSE_SHARING', false),
         'enable_usage_analytics' => env('LICENSE_ENABLE_USAGE_ANALYTICS', true),

@@ -12,8 +12,8 @@
       </div>
 
       <div class="bg-gray-900 rounded-2xl shadow-2xl p-8 border border-gray-800">
-        <div v-if="$page.props.flash?.status" class="mb-6 p-3 bg-green-500/10 border border-green-500/20 rounded-lg">
-          <p class="text-green-400 text-sm">{{ $page.props.flash.status }}</p>
+        <div v-if="$page.props.flash?.success" class="mb-6 p-3 bg-green-500/10 border border-green-500/20 rounded-lg">
+          <p class="text-green-400 text-sm">{{ $page.props.flash.success }}</p>
         </div>
 
         <form @submit.prevent="submit">
@@ -29,7 +29,8 @@
               type="text"
               required
               autofocus
-              placeholder="XXXX-XXXX-XXXX-XXXX"
+              maxlength="35"
+              placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX"
               class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all font-mono uppercase tracking-wider"
               :class="{ 'border-red-500': form.errors.license_key }"
             />

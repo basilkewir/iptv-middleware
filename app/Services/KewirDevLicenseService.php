@@ -2,41 +2,63 @@
 
 namespace App\Services;
 
+use App\Models\License;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 class KewirDevLicenseService
 {
+    public const STATUS_OK = 'ok';
+    public const STATUS_REJECTED = 'rejected';
+    public const STATUS_UNREACHABLE = 'unreachable';
+    public const STATUS_ERROR = 'error';
+    public const STATUS_CONFIG = 'config';
+
     protected string $baseUrl;
-    protected string $secret;
+    protected ?string $secret;
     protected int $timeout;
-    protected int $retries;
 
     public function __construct()
     {
-        $this->baseUrl = config('license.api.base_url', 'https://kewirdev.com/api/license');
-        $this->secret  = config('license.api.secret', config('license.jwt_secret'));
-        $this->timeout = config('license.api.timeout', 30);
-        $this->retries = config('license.api.retry_attempts', 3);
+        $this->baseUrl = rtrim((string) (config('license.api.base_url') ?: 'https://kewirdev.com/api/license'), '/');
+        $this->secret = config('license.api.secret') ?: config('license.jwt_secret') ?: null;
+        $this->timeout = max(1, (int) (config('license.api.timeout') ?: 30));
     }
 
     /**
      * Validate a license key against the remote kewirdev.com server.
      *
-     * @return array{success: bool, message?: string, license?: array, device_id?: int, token?: string, features?: array}
+     * There is no offline mode: the remote server is the only authority. Every
+     * non-success response carries a `status` so callers can tell apart a bad key
+     * (rejected) from an outage (unreachable/error) or a misconfigured server.
+     *
+     * @return array{success: bool, status: string, message?: string}
      */
     public function validateLicense(string $licenseKey, array $deviceInfo): array
     {
+        if ($this->secret === null || $this->secret === '') {
+            Log::error('License signing secret is not configured', [
+                'env_keys' => 'KEWIRDEV_API_SECRET or LICENSE_JWT_SECRET',
+            ]);
+
+            return [
+                'success' => false,
+                'status'  => self::STATUS_CONFIG,
+                'message' => 'License signing secret is not configured on this server. '
+                    .'Set KEWIRDEV_API_SECRET (or LICENSE_JWT_SECRET) in .env, then run: php artisan config:clear',
+            ];
+        }
+
         $payload = json_encode([
-            'license_key' => $licenseKey,
-            'device_id'   => $deviceInfo['device_id'] ?? '',
-            'device_type' => $deviceInfo['device_type'] ?? 'unknown',
-            'device_name' => $deviceInfo['device_name'] ?? '',
-            'device_model'=> $deviceInfo['device_model'] ?? '',
-            'device_os'   => $deviceInfo['device_os'] ?? '',
+            'license_key'      => $licenseKey,
+            'device_id'        => $deviceInfo['device_id'] ?? '',
+            'device_type'      => $deviceInfo['device_type'] ?? 'unknown',
+            'device_name'      => $deviceInfo['device_name'] ?? '',
+            'device_model'     => $deviceInfo['device_model'] ?? '',
+            'device_os'        => $deviceInfo['device_os'] ?? '',
             'device_os_version' => $deviceInfo['device_os_version'] ?? '',
-            'app_version' => $deviceInfo['app_version'] ?? '',
+            'app_version'      => $deviceInfo['app_version'] ?? '',
         ]);
 
         $signature = hash_hmac('sha256', $payload, $this->secret);
@@ -54,8 +76,16 @@ class KewirDevLicenseService
 
             $json = $response->json();
 
-            if ($response->successful()) {
-                return $json;
+            if ($response->successful() && is_array($json)) {
+                if (! empty($json['success'])) {
+                    return array_merge($json, ['status' => self::STATUS_OK]);
+                }
+
+                return [
+                    'success' => false,
+                    'status'  => self::STATUS_REJECTED,
+                    'message' => self::extractMessage($json),
+                ];
             }
 
             Log::warning('kewirdev.com validation rejected', [
@@ -65,26 +95,187 @@ class KewirDevLicenseService
 
             return [
                 'success' => false,
-                'message' => $json['error'] ?? $json['message'] ?? 'Remote validation failed',
+                'status'  => self::STATUS_REJECTED,
+                'message' => is_array($json)
+                    ? self::extractMessage($json)
+                    : 'Remote validation failed (HTTP '.$response->status().').',
             ];
-        } catch (\Illuminate\Http\Client\ConnectionException $e) {
-            Log::warning('kewirdev.com API connection failed, falling back to local', [
-                'error' => $e->getMessage(),
-            ]);
+        } catch (ConnectionException $e) {
+            Log::warning('kewirdev.com API connection failed', ['error' => $e->getMessage()]);
 
             return [
                 'success' => false,
-                'message' => 'License server unreachable. Falling back to local validation.',
+                'status'  => self::STATUS_UNREACHABLE,
+                'message' => 'License server (kewirdev.com) is unreachable. An internet connection is required.',
             ];
-        } catch (\Exception $e) {
-            Log::error('kewirdev.com API error', [
-                'error' => $e->getMessage(),
-            ]);
+        } catch (\Throwable $e) {
+            Log::error('kewirdev.com API error', ['error' => $e->getMessage()]);
 
             return [
                 'success' => false,
-                'message' => 'License server error. Falling back to local validation.',
+                'status'  => self::STATUS_ERROR,
+                'message' => 'Could not talk to the license server (kewirdev.com). Please try again later.',
             ];
         }
+    }
+
+    /**
+     * Fetch the authoritative license record for an already-validated token.
+     *
+     * The validate response only carries a short-lived JWT (its `expires_at` is
+     * the *token* expiry, not the licence expiry), so the licence details come
+     * from /info. Returns null when the details cannot be fetched.
+     */
+    public function fetchLicenseInfo(string $token): ?array
+    {
+        if ($token === '') {
+            return null;
+        }
+
+        try {
+            $response = Http::withHeaders([
+                'Authorization' => 'Bearer '.$token,
+                'Accept'        => 'application/json',
+                'User-Agent'    => config('license.api.user_agent', 'HMS-IPTV/1.0'),
+            ])
+            ->timeout($this->timeout)
+            ->get($this->baseUrl.'/info');
+
+            $json = $response->json();
+
+            if ($response->successful() && is_array($json) && ! empty($json['success']) && is_array($json['data'] ?? null)) {
+                return $json['data'];
+            }
+
+            Log::warning('kewirdev.com license info fetch failed', [
+                'status' => $response->status(),
+                'body'   => $json,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('kewirdev.com license info fetch error', ['error' => $e->getMessage()]);
+        }
+
+        return null;
+    }
+
+    /**
+     * Activate a license online: validate the key at kewirdev.com, pull the
+     * license details and mirror them into the local `licenses` table (a cache
+     * the middleware gate reads). Never trusts the local DB for validity.
+     *
+     * @return array{success: bool, message: string}
+     */
+    public function activate(string $licenseKey, array $deviceInfo = []): array
+    {
+        $deviceInfo = array_merge([
+            'device_id'   => gethostname() ?: 'web-'.php_uname('n'),
+            'device_type' => 'admin_panel',
+            'device_name' => 'IPTV Middleware Admin',
+        ], $deviceInfo);
+
+        $result = $this->validateLicense($licenseKey, $deviceInfo);
+
+        if (empty($result['success'])) {
+            return ['success' => false, 'message' => self::failureMessage($result)];
+        }
+
+        $info = $this->fetchLicenseInfo((string) ($result['token'] ?? ''));
+
+        $values = [
+            'hotel_name'   => $info['hotel_name'] ?? 'Licensed',
+            'license_type' => self::normalizeLicenseType($info['license_type'] ?? null),
+            'status'       => License::STATUS_ACTIVE,
+            'max_devices'  => self::normalizeMaxDevices($info),
+            'expires_at'   => $info['expires_at'] ?? null,
+            'features'     => self::normalizeFeatures($info['features'] ?? $result['features'] ?? null),
+        ];
+
+        $license = License::where('license_key', $licenseKey)->first();
+
+        if ($license) {
+            $license->update($values);
+        } else {
+            License::create(array_merge($values, [
+                'license_key'     => $licenseKey,
+                'hotel_id'        => $info['hotel_id'] ?? $licenseKey,
+                'current_devices' => 0,
+            ]));
+        }
+
+        return [
+            'success' => true,
+            'message' => 'License validated at kewirdev.com. The system is licensed — you can now sign in.',
+        ];
+    }
+
+    /**
+     * Human-readable message for a failed activation attempt.
+     */
+    public static function failureMessage(array $result): string
+    {
+        return match ($result['status'] ?? self::STATUS_ERROR) {
+            self::STATUS_REJECTED => $result['message'] ?? 'This license key is invalid, expired, or inactive.',
+            self::STATUS_UNREACHABLE,
+            self::STATUS_ERROR => $result['message']
+                ?? 'Could not reach the license server (kewirdev.com). Online activation is required.',
+            default => $result['message'] ?? 'License activation failed.',
+        };
+    }
+
+    /**
+     * kewirdev.com accepts only these licence types; map anything else to enterprise.
+     */
+    public static function normalizeLicenseType(?string $type): string
+    {
+        $allowed = ['trial', 'basic', 'premium', 'enterprise', 'perpetual'];
+
+        return $type !== null && in_array($type, $allowed, true) ? $type : License::LICENSE_TYPE_ENTERPRISE;
+    }
+
+    public static function normalizeFeatures($features): array
+    {
+        if (is_array($features)) {
+            return $features;
+        }
+
+        if (is_string($features) && $features !== '') {
+            $decoded = json_decode($features, true);
+
+            return is_array($decoded) ? $decoded : ['*'];
+        }
+
+        return ['*'];
+    }
+
+    protected static function normalizeMaxDevices(?array $info): int
+    {
+        $max = $info['device_usage']['maximum'] ?? $info['max_devices'] ?? null;
+
+        return is_numeric($max) && (int) $max > 0 ? (int) $max : 50;
+    }
+
+    /**
+     * Flatten the kewirdev error payload (error/message/details) into one line.
+     */
+    protected static function extractMessage(array $json): string
+    {
+        $message = $json['error'] ?? $json['message'] ?? null;
+
+        if (is_array($message)) {
+            $message = collect($message)->flatten()->implode(' ');
+        }
+
+        if (is_string($message) && $message !== '') {
+            return $message;
+        }
+
+        if (is_array($json['details'] ?? null)) {
+            $details = collect($json['details'])->flatten()->implode(' ');
+            if ($details !== '') {
+                return $details;
+            }
+        }
+
+        return 'This license key is invalid, expired, or inactive.';
     }
 }

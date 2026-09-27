@@ -41,7 +41,8 @@
             v-model="form.license_key"
             type="text"
             required
-            placeholder="XXXX-XXXX-XXXX-XXXX"
+            maxlength="35"
+            placeholder="XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX"
             class="flex-1 px-4 py-2.5 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 font-mono uppercase tracking-wider"
             :class="{ 'border-red-500': form.errors.license_key }"
           />

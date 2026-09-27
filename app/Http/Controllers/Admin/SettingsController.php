@@ -157,7 +157,20 @@ class SettingsController extends Controller
 
     public function license(): Response
     {
-        $license = \App\Models\License::with('licenseDevices')->first();
+        $licenseModel = \App\Models\License::class;
+
+        // Show the license that actually opens the system (there can be more
+        // than one row after a key change), falling back to the most recent.
+        $license = $licenseModel::query()
+            ->where('status', $licenseModel::STATUS_ACTIVE)
+            ->where(function ($q) {
+                $q->whereNull('expires_at')->orWhere('expires_at', '>', now());
+            })
+            ->orderByDesc('id')
+            ->first()
+            ?? $licenseModel::query()->latest('id')->first();
+
+        $license?->load('licenseDevices');
 
         return Inertia::render('Admin/Settings/License', [
             'license' => $license ? [
@@ -193,67 +206,39 @@ class SettingsController extends Controller
     public function activateLicense(Request $request): RedirectResponse
     {
         $validated = $request->validate([
-            'license_key' => 'required|string',
+            'license_key' => ['required', 'string', 'size:35'],
+        ], [
+            'license_key.size' => 'License keys are 35 characters (XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX).',
         ]);
 
         $licenseKey = trim($validated['license_key']);
-        $kewirService = app(\App\Services\KewirDevLicenseService::class);
 
-        // Validate against kewirdev.com first
-        $result = $kewirService->validateLicense($licenseKey, [
-            'device_id' => gethostname() ?: 'web-'.php_uname('n'),
-            'device_type' => 'admin_panel',
-            'device_name' => 'IPTV Middleware Admin',
-        ]);
+        try {
+            $result = app(\App\Services\KewirDevLicenseService::class)->activate($licenseKey);
+        } catch (\Throwable $e) {
+            report($e);
 
-        if (! empty($result['success'])) {
-            $features = $result['features'] ?? ['*'];
-            $expiresAt = $result['expires_at'] ?? now()->addYear();
-            $license = \App\Models\License::where('license_key', $licenseKey)->first();
-
-            if ($license) {
-                $license->update([
-                    'status' => 'active',
-                    'features' => $features,
-                    'expires_at' => $expiresAt,
-                ]);
-            } else {
-                \App\Models\License::create([
-                    'license_key' => $licenseKey,
-                    'status' => 'active',
-                    'license_type' => 'enterprise',
-                    'hotel_name' => $result['hotel_name'] ?? 'Licensed',
-                    'max_devices' => $result['max_devices'] ?? 50,
-                    'expires_at' => $expiresAt,
-                    'features' => $features,
-                ]);
-            }
-
-            return back()->with('success', "License {$licenseKey} validated via kewirdev.com. System is licensed.");
+            return back()->withErrors([
+                'license_key' => 'License activation failed unexpectedly. See storage/logs/laravel.log.',
+            ]);
         }
 
-        // Fallback: check local DB (offline mode)
-        $license = \App\Models\License::where('license_key', $licenseKey)->first();
-        if ($license && $license->isValid()) {
-            if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
-                $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
-            }
-
-            return back()->with('success', "License {$license->license_key} is active (offline). System is licensed.");
+        if (empty($result['success'])) {
+            return back()->withErrors([
+                'license_key' => $result['message'],
+            ]);
         }
 
-        return back()->withErrors([
-            'license_key' => 'This license key is invalid, expired, or inactive.',
-        ]);
+        return back()->with('success', $result['message']);
     }
 
     public function deactivateLicense(): RedirectResponse
     {
-        $license = \App\Models\License::query()->latest('id')->first();
-
-        if ($license) {
-            $license->update(['status' => \App\Models\License::STATUS_SUSPENDED]);
-        }
+        // Suspend every stored license — leaving an older active row behind
+        // would keep the system unlocked.
+        \App\Models\License::query()
+            ->where('status', '!=', \App\Models\License::STATUS_SUSPENDED)
+            ->update(['status' => \App\Models\License::STATUS_SUSPENDED]);
 
         return redirect()->route('login')->with('success', 'License deactivated. Enter a valid license key to regain access.');
     }

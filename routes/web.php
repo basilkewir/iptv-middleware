@@ -49,58 +49,30 @@ Route::middleware('web')->group(function () {
 
     Route::post('/license/activate', function (\Illuminate\Http\Request $request) {
         $validated = $request->validate([
-            'license_key' => 'required|string',
+            'license_key' => ['required', 'string', 'size:35'],
+        ], [
+            'license_key.size' => 'License keys are 35 characters (XXXXXXXX-XXXXXXXX-XXXXXXXX-XXXXXXXX).',
         ]);
 
         $licenseKey = trim($validated['license_key']);
-        $kewirService = app(\App\Services\KewirDevLicenseService::class);
 
-        // Validate against kewirdev.com first
-        $result = $kewirService->validateLicense($licenseKey, [
-            'device_id' => gethostname() ?: 'web-'.php_uname('n'),
-            'device_type' => 'admin_panel',
-            'device_name' => 'IPTV Middleware Admin',
-        ]);
-
-        if (! empty($result['success'])) {
-            $features = $result['features'] ?? ['*'];
-            $expiresAt = $result['expires_at'] ?? now()->addYear();
-            $license = \App\Models\License::where('license_key', $licenseKey)->first();
-
-            if ($license) {
-                $license->update([
-                    'status' => 'active',
-                    'features' => $features,
-                    'expires_at' => $expiresAt,
-                ]);
-            } else {
-                \App\Models\License::create([
-                    'license_key' => $licenseKey,
-                    'status' => 'active',
-                    'license_type' => 'enterprise',
-                    'hotel_name' => $result['hotel_name'] ?? 'Licensed',
-                    'max_devices' => $result['max_devices'] ?? 50,
-                    'expires_at' => $expiresAt,
-                    'features' => $features,
-                ]);
-            }
-
-            return redirect()->route('login')->with('success', 'License activated via kewirdev.com. You can now sign in.');
+        try {
+            $result = app(\App\Services\KewirDevLicenseService::class)->activate($licenseKey);
+        } catch (\Throwable $e) {
+            report($e);
+            $result = [
+                'success' => false,
+                'message' => 'License activation failed unexpectedly. See storage/logs/laravel.log.',
+            ];
         }
 
-        // Fallback: check local DB (offline mode)
-        $license = \App\Models\License::where('license_key', $licenseKey)->first();
-        if ($license && $license->isValid()) {
-            if ($license->status === \App\Models\License::STATUS_SUSPENDED) {
-                $license->update(['status' => \App\Models\License::STATUS_ACTIVE]);
-            }
-
-            return redirect()->route('login')->with('success', 'License activated (offline). You can now sign in.');
+        if (empty($result['success'])) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'license_key' => $result['message'],
+            ]);
         }
 
-        throw \Illuminate\Validation\ValidationException::withMessages([
-            'license_key' => 'This license key is invalid, expired, or inactive.',
-        ]);
+        return redirect()->route('login')->with('success', $result['message']);
     })->name('license.activate');
 });
 

@@ -20,33 +20,44 @@ class LicenseService
 
     public function __construct()
     {
-        $jwtSecret = config('license.jwt_secret');
-        if (empty($jwtSecret)) {
-            throw new \RuntimeException(
-                'LICENSE_JWT_SECRET is not set. Run: php artisan tinker --execute="echo base64_encode(random_bytes(32));"'
-            );
+        $this->jwtSecret = config('license.jwt_secret') ?: null;
+        if (empty($this->jwtSecret)) {
+            // Never fatal here: report a clear error instead of a bare 500.
+            Log::error('LICENSE_JWT_SECRET is not set — license validation will fail until it is configured', [
+                'env_keys' => 'LICENSE_JWT_SECRET / KEWIRDEV_API_SECRET',
+            ]);
         }
-        $this->jwtSecret = $jwtSecret;
-        $this->tokenExpiration = (int) config('license.token_expiration', 3600);
+        $this->tokenExpiration = (int) (config('license.token_expiration') ?: 3600);
         $this->kewirDev = new KewirDevLicenseService();
     }
 
     /**
-     * Validate license key with device binding
+     * Validate license key with device binding.
      *
-     * Flow: call kewirdev.com first → sync to local DB → generate local JWT.
-     * Falls back to local DB only if the remote server is unreachable.
+     * kewirdev.com is the only authority — there is no offline fallback. A valid
+     * remote answer is mirrored into the local DB (the middleware gate reads it)
+     * and turned into a local JWT; anything else is rejected.
      */
     public function validateLicense(string $licenseKey, array $deviceInfo): array
     {
         $startTime = microtime(true);
 
+        if (empty($this->jwtSecret)) {
+            return $this->createValidationResponse(
+                false,
+                'License signing secret is not configured on this server (LICENSE_JWT_SECRET / KEWIRDEV_API_SECRET).',
+                null,
+                $licenseKey,
+                $deviceInfo,
+                $startTime,
+                LicenseValidationLog::STATUS_FAILED
+            );
+        }
+
         try {
-            // ── 1. Remote validation against kewirdev.com ──────────────────────
+            // ── Remote validation against kewirdev.com ─────────────────────────
             $remoteResult = $this->kewirDev->validateLicense($licenseKey, $deviceInfo);
-            $remoteReachable = ! str_contains(
-                $remoteResult['message'] ?? '', 'unreachable'
-            ) && ! str_contains($remoteResult['message'] ?? '', 'error');
+            $remoteStatus = $remoteResult['status'] ?? KewirDevLicenseService::STATUS_ERROR;
 
             if (! empty($remoteResult['success'])) {
                 // Remote says valid — sync license + device to local DB
@@ -90,113 +101,70 @@ class LicenseService
                 );
             }
 
-            // Remote explicitly rejected (not just unreachable) — pass through
-            if ($remoteReachable) {
-                return $this->createValidationResponse(
-                    false,
-                    $remoteResult['message'] ?? 'Invalid license key',
-                    null,
-                    $licenseKey,
-                    $deviceInfo,
-                    $startTime,
-                    LicenseValidationLog::STATUS_INVALID
-                );
+            // Remote rejected the key — offline validation is not allowed.
+            if ($remoteStatus !== KewirDevLicenseService::STATUS_REJECTED) {
+                Log::warning('License validation unavailable, online validation is required', [
+                    'license_key' => $licenseKey,
+                    'status'      => $remoteStatus,
+                ]);
             }
 
-            // ── 2. Remote unreachable — fall back to local DB ──────────────────
-            Log::info('Remote unreachable, falling back to local validation', [
-                'license_key' => $licenseKey,
-            ]);
-
-        } catch (\Exception $e) {
-            Log::error('License validation error, falling back to local', ['error' => $e->getMessage()]);
-        }
-
-        // ── Local-only fallback path ──────────────────────────────────────────
-        $license = License::where('license_key', $licenseKey)->first();
-
-        if (! $license) {
             return $this->createValidationResponse(
-                false, 'Invalid license key', null,
-                $licenseKey, $deviceInfo, $startTime, LicenseValidationLog::STATUS_INVALID
+                false,
+                KewirDevLicenseService::failureMessage($remoteResult),
+                null,
+                $licenseKey,
+                $deviceInfo,
+                $startTime,
+                $remoteStatus === KewirDevLicenseService::STATUS_REJECTED
+                    ? LicenseValidationLog::STATUS_INVALID
+                    : LicenseValidationLog::STATUS_FAILED
             );
-        }
-
-        if (! $license->isValid()) {
-            $status = $license->isExpired()
-                ? LicenseValidationLog::STATUS_EXPIRED
-                : LicenseValidationLog::STATUS_INVALID;
+        } catch (\Throwable $e) {
+            Log::error('License validation error', ['error' => $e->getMessage()]);
 
             return $this->createValidationResponse(
-                false, 'License is not valid or expired', $license,
-                $licenseKey, $deviceInfo, $startTime, $status
+                false,
+                'License validation failed: '.$e->getMessage(),
+                null,
+                $licenseKey,
+                $deviceInfo,
+                $startTime,
+                LicenseValidationLog::STATUS_FAILED
             );
         }
-
-        $deviceFingerprint = LicenseDevice::generateFingerprint($deviceInfo);
-        $device = $this->handleDeviceBinding($license, $deviceInfo, $deviceFingerprint);
-
-        if (! $device) {
-            return $this->createValidationResponse(
-                false, 'Device limit reached or device blocked', $license,
-                $licenseKey, $deviceInfo, $startTime, LicenseValidationLog::STATUS_BLOCKED
-            );
-        }
-
-        $license->updateValidation();
-        $device->updateLastSeen();
-
-        $token = $this->generateJWTToken($license, $device);
-        $this->cacheValidationResult($licenseKey, $deviceFingerprint, true);
-
-        return $this->createValidationResponse(
-            true,
-            'License validated successfully (local fallback)',
-            $license,
-            $licenseKey,
-            $deviceInfo,
-            $startTime,
-            LicenseValidationLog::STATUS_SUCCESS,
-            [
-                'token'      => $token,
-                'expires_at' => now()->addSeconds($this->tokenExpiration)->toISOString(),
-                'features'   => $license->getAvailableFeatures(),
-                'device_id'  => $device->id,
-            ]
-        );
     }
 
     /**
-     * Sync a remotely-validated license + device into the local database.
+     * Sync a remotely-validated license into the local database.
+     *
+     * Details come from kewirdev.com /info (via the token from the validate
+     * response); the validate payload itself only carries a short-lived JWT.
      */
     protected function syncLicenseFromRemote(array $remote, string $licenseKey, array $deviceInfo): License
     {
-        $licenseData = $remote['license'] ?? [];
+        $info = $this->kewirDev->fetchLicenseInfo((string) ($remote['token'] ?? '')) ?: [];
+        $licenseData = array_merge($info, is_array($remote['license'] ?? null) ? $remote['license'] : []);
 
-        $license = License::firstOrCreate(
-            ['license_key' => $licenseKey],
-            [
-                'hotel_id'      => $licenseData['hotel_id']      ?? $licenseKey,
-                'hotel_name'    => $licenseData['hotel_name']    ?? 'Licensed Hotel',
-                'license_type'  => $licenseData['license_type']  ?? 'premium',
-                'status'        => License::STATUS_ACTIVE,
-                'max_devices'   => $licenseData['max_devices']   ?? 5,
-                'current_devices' => 0,
-                'features'      => $licenseData['features']      ?? ['live_tv','vod','epg','favorites','watch_history'],
-            ]
-        );
+        $values = [
+            'hotel_id'      => $licenseData['hotel_id']      ?? $licenseKey,
+            'hotel_name'    => $licenseData['hotel_name']    ?? 'Licensed Hotel',
+            'license_type'  => KewirDevLicenseService::normalizeLicenseType($licenseData['license_type'] ?? null),
+            'status'        => License::STATUS_ACTIVE,
+            'max_devices'   => $licenseData['device_usage']['maximum'] ?? $licenseData['max_devices'] ?? 5,
+            'features'      => KewirDevLicenseService::normalizeFeatures($licenseData['features'] ?? null),
+            'expires_at'    => $licenseData['expires_at']    ?? null,
+        ];
 
-        // Keep local record in sync with the authoritative remote data
-        $fieldsToUpdate = array_filter([
-            'license_type' => $licenseData['license_type'] ?? null,
-            'max_devices'  => $licenseData['max_devices']  ?? null,
-            'status'       => License::STATUS_ACTIVE,
-            'features'     => $licenseData['features']     ?? null,
-            'expires_at'   => $licenseData['expires_at']   ?? null,
-        ], fn ($v) => $v !== null);
+        $license = License::firstOrCreate(['license_key' => $licenseKey], $values);
 
-        if ($fieldsToUpdate) {
-            $license->update($fieldsToUpdate);
+        // Keep the local record in sync with the authoritative remote data.
+        $synced = array_intersect_key($values, array_flip([
+            'hotel_name', 'license_type', 'status', 'max_devices', 'features', 'expires_at',
+        ]));
+
+        if ($synced) {
+            $license->update($synced);
         }
 
         return $license->fresh();
@@ -207,6 +175,10 @@ class LicenseService
      */
     public function validateToken(string $token): array
     {
+        if (empty($this->jwtSecret)) {
+            return ['valid' => false, 'error' => 'License signing secret is not configured on this server.'];
+        }
+
         try {
             $decoded = $this->manualJWTDecode($token, $this->jwtSecret);
             if (!$decoded) {
@@ -308,6 +280,12 @@ class LicenseService
      */
     private function generateJWTToken(License $license, LicenseDevice $device): string
     {
+        if (empty($this->jwtSecret)) {
+            throw new \RuntimeException(
+                'LICENSE_JWT_SECRET is not set. Run: php artisan tinker --execute="echo base64_encode(random_bytes(32));"'
+            );
+        }
+
         $payload = [
             'iss' => config('app.url'),
             'aud' => 'hotel-iptv-app',
