@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Console\Commands;
 
 use App\Http\Controllers\XtreamController;
+use App\Jobs\RefreshMyChannelPlayout;
 use App\Models\AdminChannel\AdminChannel;
 use App\Models\AdminChannel\MyChannelBroadcast;
 use App\Models\Channel;
@@ -185,6 +186,13 @@ class WatchdogIngestChannels extends Command
             $hls->restartKeepingSegments($channel);
             return;
         } else {
+            // Alive and advancing — but it can keep advancing while looping a
+            // STALE concat list: Stage 1 only reads concat.txt when ffmpeg
+            // opens it, so a playlist edit whose queued refresh was lost
+            // (worker restart, failed prepare) would silently play the old
+            // items forever. Cheap drift check; the dispatch itself is
+            // signature-based, so a confirmed drift costs one job.
+            $this->detectPlaylistDrift($hls, $channel);
             return;
         }
 
@@ -198,6 +206,40 @@ class WatchdogIngestChannels extends Command
         ]);
 
         $hls->start($broadcast);
+    }
+
+    /**
+     * Queue a live playlist refresh when a running playout's concat list no
+     * longer matches the channel's current playlist. Rate-limited per channel
+     * so a persistently drifting channel cannot flood the queue.
+     */
+    private function detectPlaylistDrift(MyChannelHlsService $hls, AdminChannel $channel): void
+    {
+        if ($channel->broadcast_status !== 'live' || ! $channel->is_my_channel) {
+            return;
+        }
+
+        $lockKey = "watchdog:playlist_drift_handled:{$channel->id}";
+
+        if (Cache::has($lockKey)) {
+            return;
+        }
+
+        if (! $hls->playlistDrifted($channel)) {
+            return;
+        }
+
+        // Held for 5 minutes: covers the queue delay of the refresh we are
+        // dispatching now, and re-arms shortly after if it fixed the drift.
+        Cache::put($lockKey, true, 300);
+
+        $this->line("  - admin playout '{$channel->channel_name}' plays a stale playlist, queuing refresh");
+        Log::warning('My channel concat list drifted from playlist, queueing refresh', [
+            'channel_id'   => $channel->id,
+            'channel_name' => $channel->channel_name,
+        ]);
+
+        RefreshMyChannelPlayout::dispatch($channel->id);
     }
 
     private function isStale(string $outputDir): bool

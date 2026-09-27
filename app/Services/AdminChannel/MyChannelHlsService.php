@@ -39,6 +39,8 @@ use Illuminate\Support\Facades\Storage;
  *    segment number always continues from what is on disk.
  * 5. WATCHDOG — process death *and* freeze detection (stream stopped advancing)
  *    both trigger a restart; a broadcast only ends when the admin stops it.
+ *    It also re-applies playlist edits that a live channel somehow missed, so
+ *    an edit can never leave Stage 1 looping a stale concat list forever.
  */
 class MyChannelHlsService
 {
@@ -1235,10 +1237,7 @@ class MyChannelHlsService
         // it writes into the FIFO keep climbing across playlist wraps.
         // (The old 500× repetition of this list was a workaround for exactly
         // this, and made edits slow.)
-        File::put(
-            $concatPath,
-            implode("\n", array_map(fn ($f) => 'file ' . escapeshellarg($f), $files)) . "\n"
-        );
+        File::put($concatPath, $this->concatContent($files));
 
         $this->writeStage2Script($streamDir, $channel, $canvasMode);
 
@@ -1247,6 +1246,7 @@ class MyChannelHlsService
         $fifo       = "{$streamDir}/playout.pipe";
         $log        = "{$streamDir}/ffmpeg.log";
         $ffmpeg     = $this->ffmpeg;
+        $reloadFlag = "{$streamDir}/.reload-stage1";
 
         $nice = (int) config('playout.nice', 10);
         $loadGate = (int) config('playout.load_gate', 40);
@@ -1262,6 +1262,7 @@ STAGE2="{$stage2}"
 FIFO="{$fifo}"
 LOG="{$log}"
 LOAD_GATE={$loadGate}
+RELOAD_FLAG="{$reloadFlag}"
 
 log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" >> "\$LOG"; }
 
@@ -1298,6 +1299,7 @@ trap 'term' TERM INT HUP
 # ── Stage 1: playout, -c copy, never touches the encoder ────────────────────
 stage1_loop() {
     while :; do
+        rm -f "\$RELOAD_FLAG"
         T0=\$(date +%s)
         log "STAGE1 start"
         \$NICE \$IONICE "\$FFMPEG" -y -hide_banner -loglevel warning \\
@@ -1305,10 +1307,37 @@ stage1_loop() {
             -re -stream_loop -1 -f concat -safe 0 -i "\$CONCAT" \\
             -map 0:v:0 -map 0:a:0 \\
             -c copy -f mpegts -muxdelay 0 -muxpreload 0 \\
-            "\$FIFO" >> "\$LOG" 2>&1
+            "\$FIFO" >> "\$LOG" 2>&1 &
+        S1FFMPEG=\$!
+        echo "\$S1FFMPEG" > "\$STREAM_DIR/stage1.ffmpeg.pid"
+        # A playlist edit rewrites CONCAT and touches RELOAD_FLAG; killing this
+        # ffmpeg is the whole restart — the concat demuxer only reads the list
+        # at open, and the loop below respawns it against the fresh file.
+        # The flag is consumed on signalling, and TERM escalates to KILL:
+        # an ffmpeg wedged in a FIFO write ignores a single TERM forever.
+        RELOADED=0
+        TERM_AT=0
+        while kill -0 "\$S1FFMPEG" 2>/dev/null; do
+            if [ -f "\$RELOAD_FLAG" ] && [ "\$RELOADED" = "0" ]; then
+                log "STAGE1 reload signal"
+                rm -f "\$RELOAD_FLAG"
+                RELOADED=1
+                TERM_AT=\$(date +%s)
+                kill -TERM "\$S1FFMPEG" 2>/dev/null
+            elif [ "\$RELOADED" = "1" ] && [ \$((\$(date +%s) - TERM_AT)) -ge 3 ]; then
+                log "STAGE1 TERM ignored, escalating"
+                kill -KILL "\$S1FFMPEG" 2>/dev/null
+            fi
+            sleep 1
+        done
+        wait "\$S1FFMPEG"
         RC=\$?
+        rm -f "\$STREAM_DIR/stage1.ffmpeg.pid"
         T1=\$(date +%s)
         log "STAGE1 exit rc=\$RC after=\$((T1 - T0))s"
+        # A deliberate reload restarts at once, whatever the runtime was — the
+        # new list may even be shorter than the old uptime.
+        if [ "\$RELOADED" = "1" ]; then sleep 1; continue; fi
         # Die immediately => missing/broken input: back off so a persistent
         # failure cannot spin a crash loop. A healthy run relaunches at once.
         if [ \$((T1 - T0)) -lt 5 ]; then sleep 10; else sleep 1; fi
@@ -1433,6 +1462,99 @@ BASH;
 
         File::put($path, $script);
         chmod($path, 0755);
+    }
+
+    /**
+     * Apply playlist edits to a LIVE channel.
+     *
+     * The concat demuxer only reads its list at open, so an edit can never be
+     * picked up by a running Stage 1 on its own — without this, adding content
+     * after "Start Broadcast" left the channel looping the stale concat list
+     * (often a single file) forever. Re-prepare first so items that failed or
+     * were never baked get a second chance, rewrite concat.txt only when the
+     * resolved list actually differs, then signal Stage 1 via the reload flag.
+     * Stage 2 is untouched, so encoding, overlays and segment numbering keep
+     * running straight through the swap.
+     *
+     * @return array{changed: bool, files: int, excluded: array} refresh outcome for the caller to log
+     */
+    public function refreshPlaylist(AdminChannel $channel): array
+    {
+        $streamDir  = "{$this->streamDir($channel)}";
+        $concatPath = "{$streamDir}/concat.txt";
+
+        if (! $this->isRunning($channel) || ! is_file($concatPath)) {
+            // Not live: the next start() resolves the playlist from scratch.
+            return ['changed' => false, 'files' => 0, 'excluded' => []];
+        }
+
+        // New playlist items may never have been normalised; failures on the
+        // previous pass get retried here. prepareChannel is signature-based,
+        // so up-to-date items cost one ffprobe each.
+        try {
+            $this->prepareChannel($channel);
+        } catch (\Throwable $e) {
+            Log::warning('My channel prepare during refresh failed', [
+                'channel_id' => $channel->id,
+                'error'      => $e->getMessage(),
+            ]);
+        }
+
+        $files = $this->collectFiles($this->resolvePlaylist($channel), $channel);
+
+        if (empty($files)) {
+            // Every item is unprepared/missing — looping the old list beats
+            // killing Stage 1 against an empty concat.
+            return ['changed' => false, 'files' => 0, 'excluded' => []];
+        }
+
+        $desired = $this->concatContent($files);
+
+        if ((string) @file_get_contents($concatPath) === $desired) {
+            return ['changed' => false, 'files' => count($files), 'excluded' => []];
+        }
+
+        File::put($concatPath, $desired);
+        @touch("{$streamDir}/.reload-stage1");
+
+        Log::info('My channel live playlist refreshed', [
+            'channel_id' => $channel->id,
+            'files'      => count($files),
+        ]);
+
+        return ['changed' => true, 'files' => count($files), 'excluded' => []];
+    }
+
+    /**
+     * The exact bytes concat.txt must hold for this file list. One builder so
+     * the refresh comparison, the watchdog drift check and the script writer
+     * can never disagree about what "up to date" means.
+     */
+    private function concatContent(array $files): string
+    {
+        return implode("\n", array_map(fn ($f) => 'file ' . escapeshellarg($f), $files)) . "\n";
+    }
+
+    /**
+     * True when a LIVE channel's on-disk concat list no longer matches its
+     * current playlist (edit picked up late, prepare retried, etc). Cheap:
+     * no ffprobe, no prepare — the watchdog uses it to decide whether the
+     * heavier refresh job is worth queueing at all.
+     */
+    public function playlistDrifted(AdminChannel $channel): bool
+    {
+        if (! $channel->is_my_channel || ! $this->isRunning($channel)) {
+            return false;
+        }
+
+        $concatPath = $this->streamDir($channel) . '/concat.txt';
+        if (! is_file($concatPath)) {
+            return false;
+        }
+
+        $files = $this->collectFiles($this->resolvePlaylist($channel), $channel);
+
+        return $files !== [] && $this->concatContent($files) !== (string) @file_get_contents($concatPath);
     }
 
     /**

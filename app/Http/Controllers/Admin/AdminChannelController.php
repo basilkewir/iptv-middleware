@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Http\Controllers\Controller;
+use App\Jobs\RefreshMyChannelPlayout;
 use App\Models\AdminChannel\AdminChannel;
 use App\Models\AdminChannel\AdminChannelAnalytics;
 use App\Models\AdminChannel\AdminChannelBroadcastLog;
@@ -1335,6 +1336,8 @@ class AdminChannelController extends Controller
             'is_featured' => $data['is_featured'] ?? false,
         ]);
 
+        $this->refreshLivePlayout($channel);
+
         return response()->json(['playlist_item' => $playlistItem->load('content')]);
     }
 
@@ -1353,12 +1356,16 @@ class AdminChannelController extends Controller
 
         $playlistItem->update($data);
 
+        $this->refreshLivePlayout($channel);
+
         return response()->json(['playlist_item' => $playlistItem->fresh()->load('content')]);
     }
 
     public function removeMyChannelPlaylistItem(Request $request, AdminChannel $channel, MyChannelPlaylist $playlistItem): JsonResponse
     {
         $playlistItem->delete();
+
+        $this->refreshLivePlayout($channel);
 
         return response()->json(['message' => 'Item removed from playlist']);
     }
@@ -1376,6 +1383,8 @@ class AdminChannelController extends Controller
                 ->where('channel_id', $channel->id)
                 ->update(['order_index' => $item['order_index']]);
         }
+
+        $this->refreshLivePlayout($channel);
 
         return response()->json(['message' => 'Playlist reordered']);
     }
@@ -1543,5 +1552,20 @@ class AdminChannelController extends Controller
     private function isChannelLive(AdminChannel $channel): bool
     {
         return app(MyChannelHlsService::class)->isRunning($channel);
+    }
+
+    /**
+     * A playlist edit on a LIVE channel must reach the running playout:
+     * Stage 1 reads concat.txt only when ffmpeg opens it, so without this a
+     * channel started with one item would loop that one file forever no matter
+     * what was added later. Queued because applying the edit may re-prepare
+     * new items (a normalisation pass each). Offline channels need nothing —
+     * start() resolves the playlist from scratch.
+     */
+    private function refreshLivePlayout(AdminChannel $channel): void
+    {
+        if ($channel->is_my_channel && $this->isChannelLive($channel)) {
+            RefreshMyChannelPlayout::dispatch($channel->id);
+        }
     }
 }
