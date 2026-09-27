@@ -1530,21 +1530,20 @@ class AdminChannelController extends Controller
 
     public function stopMyChannelBroadcast(Request $request, AdminChannel $channel): JsonResponse
     {
-        $broadcast = MyChannelBroadcast::where('channel_id', $channel->id)
+        // End every in-flight broadcast row, not just the newest: a channel that
+        // thrashed (failed starts leave 'starting'/'running' rows) could otherwise
+        // keep a live row behind that the next status read still sees.
+        MyChannelBroadcast::where('channel_id', $channel->id)
             ->whereIn('status', ['starting', 'running', 'live'])
-            ->latest('start_time')
-            ->first();
+            ->update(['end_time' => now(), 'status' => 'ended']);
 
         app(MyChannelHlsService::class)->stop($channel);
 
-        if ($broadcast) {
-            $broadcast->update([
-                'end_time' => now(),
-                'status' => 'ended',
-            ]);
-
-            $channel->update(['broadcast_status' => 'offline']);
-        }
+        // MUST run regardless of whether a broadcast row was found above.
+        // The watchdog auto-restarts any my-channel whose broadcast_status is
+        // still 'live' and whose process is gone; leaving it 'live' here is what
+        // made "End Broadcast" appear to do nothing (stop, then respawn).
+        $channel->update(['broadcast_status' => 'offline']);
 
         return response()->json(['message' => 'Broadcast stopped']);
     }

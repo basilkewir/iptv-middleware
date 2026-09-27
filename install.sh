@@ -446,6 +446,13 @@ cat > /etc/supervisor/conf.d/iptv-middleware.conf <<SUPERVISOR
 [program:iptv-queue]
 command=php ${APP_DIR}/artisan queue:work redis --sleep=3 --tries=3 --max-time=3600
 directory=${APP_DIR}
+; Run as the SAME uid as php-fpm and the iptv-* systemd units. The playout
+; engine writes concat.txt/playout.sh and the /dev/shm/studio overlay; if the
+; queue (RefreshMyChannelPlayout, PrepareMyChannelContent) ran as root these
+; files become root-owned and the www-data web layer can no longer overwrite
+; them — surfacing as "end broadcast does nothing" + concat.txt Permission denied.
+user=www-data
+group=www-data
 autostart=true
 autorestart=true
 stopasgroup=true
@@ -459,6 +466,11 @@ stdout_logfile_backups=3
 [program:iptv-scheduler]
 command=bash -c 'while true; do php ${APP_DIR}/artisan schedule:run >> ${APP_DIR}/storage/logs/scheduler.log 2>&1; sleep 60; done'
 directory=${APP_DIR}
+; Same reason as iptv-queue: schedule:run drives channels:watchdog and
+; ingest:ensure-all, which call MyChannelHlsService::start() and therefore
+; write playout files. Must be www-data so ownership matches the web layer.
+user=www-data
+group=www-data
 autostart=true
 autorestart=true
 redirect_stderr=true
