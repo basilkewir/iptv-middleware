@@ -121,21 +121,31 @@ if [[ "$FRESH_INSTALL" == "true" ]]; then
     mysql -u root <<SQL
 DROP DATABASE IF EXISTS \`${DB_NAME}\`;
 CREATE DATABASE \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
-FLUSH PRIVILEGES;
 SQL
     success "Database recreated."
 else
     info "Update mode — preserving existing database."
     mysql -u root <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
-FLUSH PRIVILEGES;
 SQL
     success "Database ready (preserved)."
 fi
+
+# App account — CREATE USER IF NOT EXISTS never touches the password of a user
+# left behind by an earlier run, so a regenerated DB_PASS would strand .env with
+# credentials MySQL no longer accepts. Always ALTER afterwards, and cover both
+# host forms: with skip_name_resolve off MySQL reverse-resolves 127.0.0.1 to
+# `localhost`, so a 127.0.0.1-only account rejects the app's own connection.
+mysql -u root <<SQL
+CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+ALTER USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
+CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost';
+FLUSH PRIVILEGES;
+SQL
+success "Database user ready."
 
 # =============================================================================
 # 3. Redis
