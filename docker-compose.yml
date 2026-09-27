@@ -94,8 +94,6 @@ services:
       - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf
       - ./docker/nginx/tuning.conf:/etc/nginx/conf.d/tuning.conf
       - hls-streams:/var/www/storage/app/streams
-    tmpfs:
-      - /var/www/storage/app/streams/hls:size=2G
     networks:
       - iptv-network
     depends_on:

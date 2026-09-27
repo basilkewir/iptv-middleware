@@ -19,11 +19,13 @@ class ChannelReorderTest extends TestCase
     {
         parent::setUp();
 
-        License::create([
-            'license_key'    => 'test-license-' . uniqid(),
-            'status'         => License::STATUS_ACTIVE,
-            'license_type'   => 'standard',
-            'max_devices'    => 10,
+        License::forceCreate([
+            'license_key'  => 'test-license-' . uniqid(),
+            'hotel_name'   => 'Test Hotel',
+            'device_type'  => License::DEVICE_TYPE_ADMIN_PANEL,
+            'status'       => License::STATUS_ACTIVE,
+            'license_type' => License::LICENSE_TYPE_PREMIUM,
+            'max_devices'  => 10,
         ]);
 
         $this->admin = User::factory()->create([
@@ -60,6 +62,7 @@ class ChannelReorderTest extends TestCase
         $plain = Channel::factory()->create(['channel_number' => 1, 'is_active' => true]);
         $admin = AdminChannel::create([
             'channel_name'   => 'Admin Ch',
+            'channel_slug'   => 'admin-ch-' . uniqid(),
             'channel_number' => '2',
             'created_by'     => $this->admin->id,
         ]);

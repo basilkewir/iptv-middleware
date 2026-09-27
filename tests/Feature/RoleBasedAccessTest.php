@@ -20,10 +20,12 @@ class RoleBasedAccessTest extends TestCase
     {
         parent::setUp();
 
-        License::create([
+        License::forceCreate([
             'license_key'  => 'test-license-' . uniqid(),
+            'hotel_name'   => 'Test Hotel',
+            'device_type'  => License::DEVICE_TYPE_ADMIN_PANEL,
             'status'       => License::STATUS_ACTIVE,
-            'license_type' => 'standard',
+            'license_type' => License::LICENSE_TYPE_PREMIUM,
             'max_devices'  => 10,
         ]);
 
