@@ -136,6 +136,8 @@ class AuthController extends Controller
                 $request->session()->regenerateToken();
             }
 
+            cookie()->queue(cookie()->forget(\App\Http\Middleware\EnforceSessionPolicy::POLICY_COOKIE));
+
             if ($request->expectsJson()) {
                 return response()->json([
                     'success' => true,

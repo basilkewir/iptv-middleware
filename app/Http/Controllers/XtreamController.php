@@ -617,6 +617,11 @@ class XtreamController extends Controller
         }
 
         $streamDir = storage_path("app/streams/hls/{$channelId}");
+
+        if ($file === 'playlist.m3u8' && ! is_file("{$streamDir}/{$file}") && is_file("{$streamDir}/index.m3u8")) {
+            $file = 'index.m3u8';
+        }
+
         $absolute  = realpath("{$streamDir}/{$file}");
 
         // Path traversal check
@@ -1426,7 +1431,9 @@ class XtreamController extends Controller
             $lastSeg = -1;
 
             while (true) {
-                $playlist = $segDir . '/playlist.m3u8';
+                $playlist = is_file($segDir . '/playlist.m3u8')
+                    ? $segDir . '/playlist.m3u8'
+                    : $segDir . '/index.m3u8';
                 if (! is_file($playlist)) { usleep(500000); continue; }
 
                 $m3u8 = @file_get_contents($playlist);
@@ -1492,7 +1499,7 @@ class XtreamController extends Controller
             $adminId = $rawId - self::ADMIN_CHANNEL_OFFSET;
             $admin   = AdminChannel::where('id', $adminId)->where('is_active', true)->firstOrFail();
             $slug    = "admin-channel-" . ($admin->channel_slug ?? "{$adminId}");
-            return $this->serveHlsFile($slug, 'playlist.m3u8', $baseUrl);
+            return $this->serveHlsFile($slug, 'index.m3u8', $baseUrl);
         }
 
         // Regular channel streams

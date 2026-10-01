@@ -22,6 +22,7 @@ class SystemMonitorService
             'disk_used_gb' => $this->diskUsedGb(),
             'disk_total_gb' => $this->diskTotalGb(),
             'load' => $this->loadAverages(),
+            'cores' => $this->coreCount(),
             'uptime' => $this->uptimeHuman(),
             'php_version' => PHP_VERSION,
             'ingests' => $this->ingestStatuses(),
@@ -315,5 +316,122 @@ class SystemMonitorService
                 ];
             })
             ->toArray();
+    }
+
+    /**
+     * Per-mount disk usage for real filesystems only (skips /proc, /sys, /dev,
+     * /run and pseudo filesystems so the list stays useful).
+     *
+     * @return array<int, array{mount: string, device: string, fstype: string, used_gb: float, total_gb: float, free_gb: float, usage: float}>
+     */
+    public function disks(): array
+    {
+        $realFilesystems = ['ext2', 'ext3', 'ext4', 'xfs', 'btrfs', 'zfs', 'f2fs', 'fuseblk', 'ntfs', 'vfat', 'exfat', 'msdos'];
+        $skipPrefixes = ['/proc', '/sys', '/dev', '/run', '/snap'];
+        $out = [];
+        $seen = [];
+
+        foreach (@file('/proc/mounts', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+            [$device, $mount, $fstype] = array_pad(preg_split('/\s+/', $line), 3, '');
+
+            if (! in_array($fstype, $realFilesystems, true)) {
+                continue;
+            }
+
+            foreach ($skipPrefixes as $prefix) {
+                if ($mount === $prefix || str_starts_with($mount, $prefix . '/')) {
+                    continue 2;
+                }
+            }
+
+            if (isset($seen[$mount])) {
+                continue;
+            }
+
+            $total = @disk_total_space($mount);
+            $free = @disk_free_space($mount);
+
+            if (! $total) {
+                continue;
+            }
+
+            $seen[$mount] = true;
+            $used = $total - (float) $free;
+
+            $out[] = [
+                'mount' => $mount,
+                'device' => $device,
+                'fstype' => $fstype,
+                'used_gb' => round($used / (1024 ** 3), 1),
+                'total_gb' => round($total / (1024 ** 3), 1),
+                'free_gb' => round(((float) $free) / (1024 ** 3), 1),
+                'usage' => round($used / $total * 100, 1),
+            ];
+        }
+
+        usort($out, fn (array $a, array $b) => strcmp($a['mount'], $b['mount']));
+
+        return $out;
+    }
+
+    /**
+     * Rolling window of metric samples backing the realtime charts. Samples are
+     * appended by {@see recordSample()} and kept in the cache, so the history
+     * survives page reloads but resets when the cache is flushed.
+     *
+     * @return array<int, array{t: int, cpu: float, memory: float, disk: float, load1: float, nics: array<string, array{rx: float, tx: float}>}>
+     */
+    public function history(int $points = 90): array
+    {
+        $ring = cache()->get('monitor:history', []);
+
+        return array_slice($ring, -$points);
+    }
+
+    /**
+     * Append the current metrics to the rolling history window and return the
+     * sample. Called on every poll so the charts accumulate real data instead
+     * of placeholder values.
+     */
+    public function recordSample(): array
+    {
+        $nics = [];
+
+        foreach ($this->nicStats() as $nic) {
+            $nics[$nic['name']] = [
+                'rx' => $nic['rx_mbps'],
+                'tx' => $nic['tx_mbps'],
+            ];
+        }
+
+        $point = [
+            't' => now()->timestamp,
+            'cpu' => $this->cpuUsage(),
+            'memory' => $this->memoryUsage(),
+            'disk' => $this->diskUsage(),
+            'load1' => round((float) (sys_getloadavg()[0] ?? 0), 2),
+            'nics' => $nics,
+        ];
+
+        $ring = cache()->get('monitor:history', []);
+        $ring[] = $point;
+
+        cache()->put('monitor:history', array_slice($ring, -300), 6 * 3600);
+
+        return $point;
+    }
+
+    /**
+     * Full monitoring payload for the monitoring page: host metrics, per-mount
+     * disks, per-NIC throughput, ingest health and the rolling chart history.
+     */
+    public function monitoring(): array
+    {
+        $this->recordSample();
+
+        return array_merge($this->summary(), [
+            'disks' => $this->disks(),
+            'history' => $this->history(),
+        ]);
     }
 }

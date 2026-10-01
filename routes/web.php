@@ -108,8 +108,18 @@ Route::middleware(['web', 'guest', 'license.check'])->group(function () {
             ]);
         }
 
-        \Illuminate\Support\Facades\Auth::login($user, $request->boolean('remember'));
+        $remember = $request->boolean('remember');
+
+        \Illuminate\Support\Facades\Auth::login($user, $remember);
         $request->session()->regenerate();
+        $request->session()->put('session_started_at', time());
+        $request->session()->put('last_request_at', time());
+
+        \cookie()->queue(\cookie(
+            \App\Http\Middleware\EnforceSessionPolicy::POLICY_COOKIE,
+            time().'|'.($remember ? time() : 0),
+            max(1, (int) (\App\Models\SystemSetting::get('remember_me_duration') ?? 43200))
+        ));
 
         $defaultLanding = $user->canManageAllMyChannels() ? '/admin/dashboard' : '/admin/channels/admin';
 
@@ -131,14 +141,19 @@ Route::middleware(['auth:web', 'license.check'])->group(function () {
 });
 
 // ─── Dashboard redirect ──────────────────────────────────────────────────────
-Route::middleware('auth:web')->get('/dashboard', fn () => redirect()->route('admin.dashboard'));
+Route::middleware(['auth:web', \App\Http\Middleware\EnforceSessionPolicy::class])
+    ->get('/dashboard', fn () => redirect()->route('admin.dashboard'));
 
 // ─── Admin Panel ───────────────────────────────────────────────────────────────
-Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddleware::class, \App\Http\Middleware\AdminModuleAccess::class])
+Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\EnforceSessionPolicy::class, \App\Http\Middleware\AdminMiddleware::class, \App\Http\Middleware\AdminModuleAccess::class])
     ->prefix('admin')
     ->name('admin.')
     ->group(function () {
         Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
+
+        // ─── Monitoring ───────────────────────────────────────────────────
+        Route::get('/monitoring', [\App\Http\Controllers\Admin\MonitoringController::class, 'index'])->name('monitoring.index');
+        Route::get('/monitoring/metrics', [\App\Http\Controllers\Admin\MonitoringController::class, 'metrics'])->name('monitoring.metrics');
 
         // ─── Users ────────────────────────────────────────────────────────
         Route::get('/users', [UserController::class, 'index'])->name('users.index');
@@ -263,6 +278,7 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\AdminMiddle
         Route::put('/channels/admin/{channel}/my-channel/playlist/{playlistItem}', [AdminChannelController::class, 'updateMyChannelPlaylistItem'])->name('channels.my-channel.playlist.update');
         Route::delete('/channels/admin/{channel}/my-channel/playlist/{playlistItem}', [AdminChannelController::class, 'removeMyChannelPlaylistItem'])->name('channels.my-channel.playlist.destroy');
         Route::post('/channels/admin/{channel}/my-channel/playlist/reorder', [AdminChannelController::class, 'reorderMyChannelPlaylist'])->name('channels.my-channel.playlist.reorder');
+        Route::post('/channels/admin/{channel}/my-channel/playlist/refresh', [AdminChannelController::class, 'refreshMyChannelPlaylist'])->name('channels.my-channel.playlist.refresh');
 
         // ─── My Channel Settings API ────────────────────────────────────────
         Route::get('/channels/admin/{channel}/my-channel/settings', [AdminChannelController::class, 'getMyChannelSettings'])->name('channels.my-channel.settings');
@@ -633,7 +649,7 @@ Route::get('/player_api.php', function (Request $request) {
 });
 
 // ─── Client Channel/Playout System ──────────────────────────────────
-Route::middleware(['auth:web', 'license.check'])->prefix('client')->name('client.')->group(function () {
+Route::middleware(['auth:web', \App\Http\Middleware\EnforceSessionPolicy::class, 'license.check'])->prefix('client')->name('client.')->group(function () {
     Route::get('/channels', [\App\Http\Controllers\Client\ChannelController::class, 'index'])->name('channels.index');
     Route::get('/channels/create', fn () => \Inertia\Inertia::render('Client/Channel/Create'))->name('channels.create');
     Route::get('/channels/{channel}', [\App\Http\Controllers\Client\ChannelController::class, 'show'])->name('channels.show');
@@ -668,7 +684,7 @@ Route::middleware(['auth:web', 'license.check'])->prefix('client')->name('client
 });
 
 // ─── Client VOD System ───────────────────────────────────────────────
-Route::middleware(['auth:web', 'license.check'])->prefix('vod')->name('vod.')->group(function () {
+Route::middleware(['auth:web', \App\Http\Middleware\EnforceSessionPolicy::class, 'license.check'])->prefix('vod')->name('vod.')->group(function () {
     Route::get('/', [\App\Http\Controllers\Client\VODController::class, 'index'])->name('index');
     Route::get('/movie/{id}', [\App\Http\Controllers\Client\VODController::class, 'showMovie'])->name('movie');
     Route::get('/series/{id}', [\App\Http\Controllers\Client\VODController::class, 'showSeries'])->name('series');
@@ -742,7 +758,7 @@ Route::get('/edge/live/{username}/{token}/{streamId}', function ($username, $tok
 // ─── Multicast sweep (above the catch-all so it is reachable) ─────────────────
 // Was registered *after* the /{any} catch-all and was therefore unreachable.
 // Added auth + admin middleware for access control.
-Route::middleware(['auth:web', \App\Http\Middleware\AdminMiddleware::class])
+Route::middleware(['auth:web', \App\Http\Middleware\EnforceSessionPolicy::class, \App\Http\Middleware\AdminMiddleware::class])
     ->get('/channels/admin/{channel}/sweep', [AdminChannelController::class, 'scanMulticast'])
     ->name('admin.channels.scan-multicast');
 

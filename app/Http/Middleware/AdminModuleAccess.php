@@ -32,6 +32,7 @@ class AdminModuleAccess
                 'admin/channels/admin',
                 'admin/vod',
                 'admin/dashboard',
+                'admin/monitoring',
             ];
             foreach ($allowedPrefixes as $prefix) {
                 if (Str::startsWith($request->path(), $prefix)) {

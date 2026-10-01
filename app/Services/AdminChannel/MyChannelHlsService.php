@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\AdminChannel;
 
+use App\Jobs\PrepareMyChannelContent;
 use App\Models\AdminChannel\AdminChannel;
 use App\Models\AdminChannel\MyChannelBroadcast;
 use App\Models\AdminChannel\MyChannelContent;
@@ -49,6 +50,13 @@ class MyChannelHlsService
      * intermediate in the field so it is re-prepared on the next pass.
      */
     private const NORMALIZE_VERSION = 2;
+
+    /**
+     * Box-wide lock admitting a single prepare transcode at a time. Keeps the
+     * machine from being saturated by concurrent ffmpeg passes, which starved
+     * the live encoder and got the playout killed by the stall watchdog.
+     */
+    public const PREPARE_GATE = 'my-channel:prepare-gate';
 
     /**
      * Overlay fields that are compiled into the Stage 2 filtergraph string
@@ -117,22 +125,16 @@ class MyChannelHlsService
 
         $this->ensureDirectory($streamDir);
 
-        // Make sure every prepared intermediate used by the playout is fresh.
-        // Repeated starts are cheap: a signature file skips up-to-date files.
-        $prepStart = microtime(true);
-        try {
-            $prep = $this->prepareChannel($channel);
-        } catch (\Throwable $e) {
-            Log::error('My channel prepare failed', ['channel_id' => $channel->id, 'error' => $e->getMessage()]);
-            $prep = ['prepared' => 0, 'skipped' => 0, 'failed' => []];
-        }
-        if ($prep['prepared'] > 0 || $prep['failed']) {
-            Log::info('My channel prepare summary', [
+        // Preparation is queued, never run inline. Normalising one large video
+        // can take tens of minutes, which held "Go Live" hostage and left the
+        // caller staring at a spinner. Whatever is already baked goes on air
+        // immediately and each remaining item joins the loop the moment its
+        // prepare lands (PrepareMyChannelContent re-refreshes the playout).
+        $pending = $this->queueMissingPreparation($channel);
+        if ($pending > 0) {
+            Log::info('My channel playout starting with items still preparing', [
                 'channel_id' => $channel->id,
-                'prepared'   => $prep['prepared'],
-                'skipped'    => $prep['skipped'],
-                'failed'     => $prep['failed'],
-                'seconds'    => round(microtime(true) - $prepStart, 2),
+                'pending'    => $pending,
             ]);
         }
 
@@ -147,7 +149,9 @@ class MyChannelHlsService
         try {
             $files = $this->collectFiles($playlist, $channel);
             if (empty($files)) {
-                throw new \RuntimeException('No prepared media files available for playout');
+                throw new \RuntimeException($pending > 0
+                    ? "No prepared media yet — {$pending} item(s) still preparing. Press \"Update now\" once they finish."
+                    : 'No prepared media files available for playout');
             }
 
             // Overlay canvas + ticker live on the RAM disk, ready before Stage 2
@@ -554,6 +558,13 @@ class MyChannelHlsService
         }
 
         $tmp = $dest . '.tmp_' . getmypid() . '.mp4';
+
+        // A prepare killed mid-run (deploy, reboot, OOM) leaves its tmp behind
+        // and it is never reused, so sweep any that belong to this destination
+        // before starting.
+        foreach ((array) glob($dest . '.tmp_*.mp4') as $stale) {
+            @unlink($stale);
+        }
 
         $videoCodec = ($device === 'gpu' && $this->hasNvenc())
             ? "h264_nvenc -preset p4 -rc vbr -cq 26 -b:v 0 -maxrate {$bitrate}k -bufsize {$bitrate}k"
@@ -1137,7 +1148,7 @@ class MyChannelHlsService
      * architecture exists to remove. Anything that could not be prepared is
      * excluded and counted instead of being smuggled into the concat list.
      */
-    private function collectFiles(Collection $playlist, AdminChannel $channel): array
+    private function collectFiles(Collection $playlist, AdminChannel $channel, ?array &$excluded = null): array
     {
         $files    = [];
         $slug     = $channel->channel_slug;
@@ -1483,35 +1494,40 @@ BASH;
         $streamDir  = "{$this->streamDir($channel)}";
         $concatPath = "{$streamDir}/concat.txt";
 
-        if (! $this->isRunning($channel) || ! is_file($concatPath)) {
+        if (! $this->isRunning($channel)) {
             // Not live: the next start() resolves the playlist from scratch.
-            return ['changed' => false, 'files' => 0, 'excluded' => []];
+            Log::info('My channel playlist refresh skipped (not live)', ['channel_id' => $channel->id]);
+            return ['changed' => false, 'files' => 0, 'excluded' => [], 'pending' => 0];
         }
 
-        // New playlist items may never have been normalised; failures on the
-        // previous pass get retried here. prepareChannel is signature-based,
-        // so up-to-date items cost one ffprobe each.
-        try {
-            $this->prepareChannel($channel);
-        } catch (\Throwable $e) {
-            Log::warning('My channel prepare during refresh failed', [
-                'channel_id' => $channel->id,
-                'error'      => $e->getMessage(),
-            ]);
-        }
+        // Preparation is deliberately NOT run here. Normalising one large
+        // video can take tens of minutes, and doing it inline held the live
+        // edit hostage: concat.txt was only rewritten at the very end, so a
+        // playlist change looked like it did nothing. Whatever is ready goes
+        // on air now and the rest is folded in the moment it lands.
+        $excluded = [];
+        $files    = $this->collectFiles($this->resolvePlaylist($channel), $channel, $excluded);
 
-        $files = $this->collectFiles($this->resolvePlaylist($channel), $channel);
+        $pending = $this->queueMissingPreparation($channel);
 
         if (empty($files)) {
-            // Every item is unprepared/missing — looping the old list beats
+            // Everything is still unprepared — looping the old list beats
             // killing Stage 1 against an empty concat.
-            return ['changed' => false, 'files' => 0, 'excluded' => []];
+            Log::info('My channel playlist refresh skipped (nothing prepared)', [
+                'channel_id' => $channel->id,
+                'pending'    => $pending,
+            ]);
+            return ['changed' => false, 'files' => 0, 'excluded' => $excluded, 'pending' => $pending];
         }
 
         $desired = $this->concatContent($files);
 
         if ((string) @file_get_contents($concatPath) === $desired) {
-            return ['changed' => false, 'files' => count($files), 'excluded' => []];
+            Log::info('My channel playlist refresh skipped (already up to date)', [
+                'channel_id' => $channel->id,
+                'files'      => count($files),
+            ]);
+            return ['changed' => false, 'files' => count($files), 'excluded' => $excluded, 'pending' => $pending];
         }
 
         File::put($concatPath, $desired);
@@ -1520,9 +1536,264 @@ BASH;
         Log::info('My channel live playlist refreshed', [
             'channel_id' => $channel->id,
             'files'      => count($files),
+            'pending'    => $pending,
         ]);
 
-        return ['changed' => true, 'files' => count($files), 'excluded' => []];
+        return ['changed' => true, 'files' => count($files), 'excluded' => $excluded, 'pending' => $pending];
+    }
+
+    /**
+     * Queue preparation for playlist items whose prepared file does not exist
+     * yet, so they join the loop as soon as they are ready.
+     *
+     * Two locks, because there are two failure modes:
+     *  - per content: one edit used to queue one pass per item, so a single
+     *    video accumulated several concurrent ffmpeg runs;
+     *  - a box-wide gate: at most ONE prepare transcode runs at a time. On a
+     *    small host a couple of x264 passes saturate CPU and starve the live
+     *    encoder, which the stall watchdog then kills. The gate is released by
+     *    PrepareMyChannelContent, whose follow-up refresh queues the next
+     *    pending item — so the chain continues one at a time.
+     */
+    private function queueMissingPreparation(AdminChannel $channel): int
+    {
+        $slug  = $channel->channel_slug;
+        $count = 0;
+
+        foreach ($this->resolvePlaylist($channel) as $content) {
+            if (! $content || ! $content->file_path || (int) $content->id <= 0) {
+                continue;
+            }
+
+            if (is_file($this->preparedPathFor($slug, (int) $content->id))) {
+                continue;
+            }
+
+            if (! Cache::add($this->prepareLockKey((int) $content->id), 1, 3600)) {
+                continue;
+            }
+
+            // Box-wide serialisation.
+            if (! Cache::add(self::PREPARE_GATE, 1, 7200)) {
+                Cache::forget($this->prepareLockKey((int) $content->id));
+                continue;
+            }
+
+            PrepareMyChannelContent::dispatch((int) $content->id);
+            $count++;
+            break; // strictly one prepare in flight
+        }
+
+        return $count;
+    }
+
+    private function prepareLockKey(int $contentId): string
+    {
+        return "my-channel:preparing:{$contentId}";
+    }
+
+    /**
+     * Which playlist item the live playout is on RIGHT NOW.
+     *
+     * Deterministic because Stage 1 plays the concat list back-to-back and loops
+     * it with -stream_loop -1, so position is simply (elapsed since this
+     * generation began looping) mod (sum of item durations). The order is read
+     * from the actual concat.txt rather than re-resolving the DB playlist, so it
+     * matches the shuffled order the encoder is really playing, and the anchor is
+     * the later of the broadcast start and the concat.txt mtime — a playlist edit
+     * rewrites concat.txt and restarts Stage 1 at the top, which resets the loop
+     * clock there rather than at the original start.
+     *
+     * @return array{content_id:int,index:int,item_elapsed:int,item_duration:int}|null
+     */
+    public function nowPlaying(AdminChannel $channel): ?array
+    {
+        if (! $channel->is_my_channel || ! $this->isRunning($channel)) {
+            return null;
+        }
+
+        $concatPath = $this->streamDir($channel) . '/concat.txt';
+        if (! is_file($concatPath)) {
+            return null;
+        }
+
+        $broadcast = MyChannelBroadcast::where('channel_id', $channel->id)
+            ->whereIn('status', ['starting', 'running'])
+            ->latest('start_time')
+            ->first();
+        if (! $broadcast || ! $broadcast->start_time) {
+            return null;
+        }
+
+        // Actual playing order, straight from the concat list (prepared_{id}.mp4).
+        $order = [];
+        foreach (file($concatPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            if (preg_match("/^file\s+'(.+)'/", $line, $m)
+                && preg_match('/prepared_(\d+)\.mp4$/', $m[1], $p)) {
+                $order[] = (int) $p[1];
+            }
+        }
+        if (empty($order)) {
+            return null;
+        }
+
+        // Effective play length per content, mirroring prepareFile's trim logic.
+        $entries = MyChannelPlaylist::where('channel_id', $channel->id)
+            ->with('content')
+            ->get()
+            ->keyBy('content_id');
+
+        $schedule = [];
+        foreach ($order as $contentId) {
+            $entry = $entries->get($contentId);
+            if (! $entry || ! $entry->content) {
+                continue;
+            }
+            $duration = $this->effectiveDuration($entry);
+            if ($duration <= 0) {
+                continue;
+            }
+            $schedule[] = ['content_id' => $contentId, 'duration' => $duration];
+        }
+        if (empty($schedule)) {
+            return null;
+        }
+
+        $anchor = max($broadcast->start_time->getTimestamp(), (int) @filemtime($concatPath));
+        $elapsed = max(0, time() - $anchor);
+
+        return $this->resolveNowPlaying($schedule, $elapsed, (bool) $channel->loop_playlist);
+    }
+
+    /**
+     * Given an ordered playout schedule (concat order) and the number of
+     * seconds elapsed since the current generation began looping, return the
+     * segment that is on air. Pure and side-effect free so the arithmetic can
+     * be unit tested without systemd, files or the DB.
+     *
+     * @param  array<int, array{content_id:int, duration:int}>  $schedule
+     * @return array{content_id:int,index:int,item_elapsed:int,item_duration:int}|null
+     */
+    private function resolveNowPlaying(array $schedule, int $elapsed, bool $loop): ?array
+    {
+        if (empty($schedule)) {
+            return null;
+        }
+
+        $total = array_sum(array_column($schedule, 'duration'));
+        if ($total <= 0) {
+            return null;
+        }
+
+        $inLoop = $loop
+            ? $elapsed % $total
+            : min(max(0, $elapsed), $total - 1);
+
+        $acc = 0;
+        foreach ($schedule as $i => $seg) {
+            if ($inLoop < $acc + $seg['duration']) {
+                return [
+                    'content_id'    => $seg['content_id'],
+                    'index'         => $i,
+                    'item_elapsed'  => $inLoop - $acc,
+                    'item_duration' => $seg['duration'],
+                ];
+            }
+            $acc += $seg['duration'];
+        }
+
+        $last = $schedule[count($schedule) - 1];
+
+        return [
+            'content_id'    => $last['content_id'],
+            'index'         => count($schedule) - 1,
+            'item_elapsed'  => $last['duration'] - 1,
+            'item_duration' => $last['duration'],
+        ];
+    }
+
+    /**
+     * Play length of a single playlist entry, matching the trim logic baked into
+     * the prepared intermediate by prepareFile (custom_duration wins, then the
+     * end/start offset window, otherwise the full media duration less any
+     * start offset).
+     */
+    private function effectiveDuration(MyChannelPlaylist $entry): int
+    {
+        if ((int) $entry->custom_duration > 0) {
+            return (int) $entry->custom_duration;
+        }
+        if ((int) $entry->end_offset > 0) {
+            return max(0, (int) $entry->end_offset - (int) $entry->start_offset);
+        }
+        $base = $this->contentDuration($entry->content);
+        if ((int) $entry->start_offset > 0) {
+            return max(0, $base - (int) $entry->start_offset);
+        }
+
+        return $base;
+    }
+
+    /**
+     * Play length of a content record in seconds, probing and persisting it
+     * when the row has none.
+     *
+     * The upload-time probe can fail and leave `duration` null (ffmpeg missing
+     * at the time, an odd container, an interrupted request). nowPlaying()
+     * drops entries with a zero length, so one null used to empty the whole
+     * schedule and freeze the "now" indicator on the first file forever.
+     * Probing here heals the row: one probe per content, then never again.
+     */
+    private function contentDuration(?MyChannelContent $content): int
+    {
+        if (! $content) {
+            return 0;
+        }
+
+        if ((int) $content->duration > 0) {
+            return (int) $content->duration;
+        }
+
+        $absolute = Storage::disk('public')->path((string) $content->file_path);
+
+        if (! is_file($absolute)) {
+            return 0;
+        }
+
+        $seconds = $this->probeDuration($absolute);
+
+        if ($seconds > 0) {
+            $content->duration = $seconds;
+            $content->save();
+            Log::info('My channel content duration backfilled', [
+                'content_id' => $content->id,
+                'duration'   => $seconds,
+            ]);
+        }
+
+        return $seconds;
+    }
+
+    /**
+     * Container duration in whole seconds via ffprobe. Returns 0 when the
+     * probe fails rather than guessing, so callers can tell "unknown" from
+     * "very short".
+     */
+    private function probeDuration(string $path): int
+    {
+        $cmd = sprintf(
+            '%s -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 %s 2>/dev/null',
+            escapeshellarg($this->ffprobe),
+            escapeshellarg($path)
+        );
+
+        exec($cmd, $out, $rc);
+
+        if ($rc !== 0 || $out === []) {
+            return 0;
+        }
+
+        return (int) round((float) trim((string) $out[0]));
     }
 
     /**
@@ -1548,9 +1819,6 @@ BASH;
         }
 
         $concatPath = $this->streamDir($channel) . '/concat.txt';
-        if (! is_file($concatPath)) {
-            return false;
-        }
 
         $files = $this->collectFiles($this->resolvePlaylist($channel), $channel);
 

@@ -437,7 +437,7 @@ class MyChannelHlsServiceTest extends TestCase
         // Nothing alive, no stream dir: the edit is picked up by the next
         // start(), and no process may be signalled here.
         $this->assertSame(
-            ['changed' => false, 'files' => 0, 'excluded' => []],
+            ['changed' => false, 'files' => 0, 'excluded' => [], 'pending' => 0],
             $this->service()->refreshPlaylist($channel)
         );
     }
@@ -603,5 +603,83 @@ class MyChannelHlsServiceTest extends TestCase
         $this->tempFiles[] = $path;
 
         return $path;
+    }
+
+    // ── Now-playing schedule resolution ──────────────────────────────────────
+
+    /** @return array<int, array{content_id:int, duration:int}> */
+    private function fiveEvenSchedule(): array
+    {
+        return [
+            ['content_id' => 1, 'duration' => 8],
+            ['content_id' => 2, 'duration' => 8],
+            ['content_id' => 3, 'duration' => 8],
+            ['content_id' => 4, 'duration' => 8],
+            ['content_id' => 5, 'duration' => 8],
+        ]; // total = 40s
+    }
+
+    public function test_now_playing_starts_on_first_item(): void
+    {
+        $np = $this->invoke('resolveNowPlaying', $this->fiveEvenSchedule(), 0, true);
+        $this->assertSame(1, $np['content_id']);
+        $this->assertSame(0, $np['index']);
+        $this->assertSame(0, $np['item_elapsed']);
+    }
+
+    public function test_now_playing_advances_at_item_boundary(): void
+    {
+        $np = $this->invoke('resolveNowPlaying', $this->fiveEvenSchedule(), 8, true);
+        $this->assertSame(2, $np['content_id']);
+        $this->assertSame(1, $np['index']);
+        $this->assertSame(0, $np['item_elapsed']);
+
+        $np = $this->invoke('resolveNowPlaying', $this->fiveEvenSchedule(), 19, true);
+        $this->assertSame(3, $np['content_id']);
+        $this->assertSame(3, $np['item_elapsed']); // 19 - 16
+    }
+
+    public function test_now_playing_wraps_around_when_looping(): void
+    {
+        $np = $this->invoke('resolveNowPlaying', $this->fiveEvenSchedule(), 42, true);
+        $this->assertSame(1, $np['content_id']); // 42 % 40 == 2 -> still item 1
+        $this->assertSame(2, $np['item_elapsed']);
+
+        $np = $this->invoke('resolveNowPlaying', $this->fiveEvenSchedule(), 39, true);
+        $this->assertSame(5, $np['content_id']);
+        $this->assertSame(4, $np['index']);
+        $this->assertSame(7, $np['item_elapsed']);
+    }
+
+    public function test_now_playing_clamps_at_end_without_loop(): void
+    {
+        $np = $this->invoke('resolveNowPlaying', $this->fiveEvenSchedule(), 45, false);
+        $this->assertSame(5, $np['content_id']); // clamped to final segment
+        $this->assertSame(4, $np['index']);
+
+        $np = $this->invoke('resolveNowPlaying', $this->fiveEvenSchedule(), 100000, false);
+        $this->assertSame(5, $np['content_id']);
+    }
+
+    public function test_now_playing_handles_mixed_durations(): void
+    {
+        $schedule = [
+            ['content_id' => 10, 'duration' => 5],
+            ['content_id' => 20, 'duration' => 30],
+            ['content_id' => 30, 'duration' => 15],
+        ]; // total 50
+        $np = $this->invoke('resolveNowPlaying', $schedule, 6, true);
+        $this->assertSame(20, $np['content_id']); // 5..35 window
+        $this->assertSame(1, $np['item_elapsed']);
+
+        $np = $this->invoke('resolveNowPlaying', $schedule, 40, true);
+        $this->assertSame(30, $np['content_id']); // 35..50 window
+        $this->assertSame(5, $np['item_elapsed']);
+    }
+
+    public function test_now_playing_returns_null_for_empty_or_zero_schedule(): void
+    {
+        $this->assertNull($this->invoke('resolveNowPlaying', [], 10, true));
+        $this->assertNull($this->invoke('resolveNowPlaying', [['content_id' => 1, 'duration' => 0]], 10, true));
     }
 }

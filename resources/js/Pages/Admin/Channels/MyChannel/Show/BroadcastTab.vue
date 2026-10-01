@@ -40,8 +40,7 @@
 
           <!-- Video player -->
           <video ref="videoRef"
-            class="w-full h-full object-contain" controls autoplay muted
-            @timeupdate="onTimeUpdate" @ended="onVideoEnded">
+            class="w-full h-full object-contain" controls autoplay muted>
           </video>
 
           <!-- Offline slate -->
@@ -100,7 +99,7 @@
               </span>
             </div>
             <span class="text-gray-400 text-xs font-mono shrink-0 ml-2">
-              {{ formatTime(currentTime) }} / {{ formatTime(currentItem.content?.duration) }}
+              {{ formatTime(currentTime) }} / {{ formatTime(itemDuration || currentItem.content?.duration) }}
             </span>
           </div>
           <div class="w-full bg-gray-700 rounded-full h-1.5">
@@ -141,7 +140,28 @@
       <div class="space-y-3">
         <div class="flex items-center justify-between">
           <h4 class="text-sm font-medium text-gray-300">Up Next</h4>
-          <span class="text-xs text-gray-500">{{ playlist.length }} items</span>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-gray-500">{{ playlist.length }} items</span>
+            <button
+              type="button"
+              @click="applyPlaylistNow"
+              :disabled="refreshingPlaylist"
+              class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition
+                     bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Apply the current playlist to the live playout right now"
+            >
+              <Loader2 v-if="refreshingPlaylist" class="w-3.5 h-3.5 animate-spin" />
+              <RefreshCw v-else class="w-3.5 h-3.5" />
+              {{ refreshingPlaylist ? 'Applying…' : 'Update now' }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="playlistRefreshMessage" class="text-xs rounded-lg px-2.5 py-2 border"
+          :class="playlistRefreshOk
+            ? 'text-green-300 bg-green-600/10 border-green-600/30'
+            : 'text-amber-300 bg-amber-600/10 border-amber-600/30'">
+          {{ playlistRefreshMessage }}
         </div>
 
         <div v-if="playlist.length" class="space-y-1.5 max-h-[520px] overflow-y-auto pr-1">
@@ -203,7 +223,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { router } from '@inertiajs/vue3'
 import { route } from '@/Composables/useRoute'
 import { useApiFetch } from '@/Composables/useApiFetch'
-import { Radio, StopCircle, Loader2, Play, Tv, ListVideo } from 'lucide-vue-next'
+import { Radio, StopCircle, Loader2, Play, Tv, ListVideo, RefreshCw } from 'lucide-vue-next'
 import Hls from 'hls.js'
 
 const props = defineProps({
@@ -215,12 +235,21 @@ const { apiFetch } = useApiFetch()
 const broadcastError = ref('')
 const settings = ref(null)
 const playlist = ref([])
+const refreshingPlaylist = ref(false)
+const playlistRefreshMessage = ref('')
+const playlistRefreshOk = ref(true)
 const starting = ref(false)
 const stopping = ref(false)
 const broadcast = ref(props.broadcast || null)
 const videoRef = ref(null)
 const currentTime = ref(0)
 const currentIndex = ref(0)
+const itemDuration = ref(0)
+// Server-authoritative now-playing snapshot: the {content_id,index,item_elapsed,
+// item_duration} the backend reported plus the local clock when we received it,
+// so the progress bar can advance smoothly between polls.
+let lastNowPlaying = null
+let npSyncAt = 0
 const copied = ref(false)
 const clockDisplay = ref('')
 const liveTimer = ref('')
@@ -229,6 +258,7 @@ const liveStartTime = ref(null)
 // Timers
 let clockInterval = null
 let timerInterval = null
+let broadcastPoll = null
 
 const isLive = computed(() => {
   const s = broadcast.value?.status || props.channel?.broadcast_status
@@ -238,7 +268,7 @@ const isLive = computed(() => {
 const currentItem = computed(() => playlist.value[currentIndex.value] || null)
 
 const itemProgress = computed(() => {
-  const dur = currentItem.value?.content?.duration
+  const dur = itemDuration.value || currentItem.value?.content?.duration
   if (!dur || !currentTime.value) return 0
   return Math.min((currentTime.value / dur) * 100, 100)
 })
@@ -307,14 +337,16 @@ const destroyHlsPlayer = () => {
   if (videoRef.value) { videoRef.value.src = '' }
 }
 
-const onTimeUpdate = () => {
-  if (videoRef.value) currentTime.value = videoRef.value.currentTime
-}
-
-const onVideoEnded = () => {
-  if (props.channel.loop_playlist) {
-    currentIndex.value = (currentIndex.value + 1) % Math.max(playlist.value.length, 1)
-  }
+// Map the server's now_playing.content_id onto the frontend playlist order
+// (which is order_index) so the correct "NOW" row lights up. Kept separate
+// from fetch so it can run again whenever the playlist finishes loading.
+const syncNowIndex = () => {
+  if (!lastNowPlaying) return
+  const idx = playlist.value.findIndex(
+    (it) => Number(it.content?.id ?? it.content_id) === Number(lastNowPlaying.content_id)
+  )
+  if (idx >= 0) currentIndex.value = idx
+  itemDuration.value = Number(lastNowPlaying.item_duration) || itemDuration.value
 }
 
 const qualityColor = (q) => ({
@@ -363,6 +395,20 @@ const updateTimer = () => {
   const s = elapsed % 60
   const pad = (n) => String(n).padStart(2, '0')
   liveTimer.value = h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`
+
+  // Advance the current-item progress bar locally from the last server
+  // snapshot so it moves smoothly between polls; the next fetchBroadcast
+  // re-anchors it (and advances to the next item) with the authoritative
+  // value. We deliberately do NOT guess the next index locally — under
+  // shuffle the frontend order is not the playout order, so we simply fill
+  // the bar and hold until the poll confirms the real transition.
+  if (lastNowPlaying) {
+    const since = Math.floor((Date.now() - npSyncAt) / 1000)
+    const dur = Number(lastNowPlaying.item_duration) || itemDuration.value || 0
+    let t = Number(lastNowPlaying.item_elapsed || 0) + since
+    if (dur > 0) t = Math.min(t, dur)
+    currentTime.value = t
+  }
 }
 
 const fetchSettings = async () => {
@@ -375,6 +421,9 @@ const fetchPlaylist = async () => {
   const res = await apiFetch(route('admin.channels.my-channel.playlist', props.channel.channel_slug))
   const json = await res.json()
   playlist.value = json.playlist || []
+  // The playlist may arrive after the broadcast snapshot on first load; rematch
+  // the highlighted "NOW" row once we actually have the items to look in.
+  syncNowIndex()
 }
 
 const fetchBroadcast = async () => {
@@ -383,6 +432,47 @@ const fetchBroadcast = async () => {
   broadcast.value = json.broadcast || null
   if (broadcast.value?.start_time) {
     liveStartTime.value = new Date(broadcast.value.start_time).getTime()
+  }
+  if (json.now_playing) {
+    lastNowPlaying = json.now_playing
+    npSyncAt = Date.now()
+    currentTime.value = Number(json.now_playing.item_elapsed) || 0
+    itemDuration.value = Number(json.now_playing.item_duration) || itemDuration.value
+    syncNowIndex()
+  } else {
+    // Not live / not resolvable: stop advancing and clear the stale snapshot.
+    lastNowPlaying = null
+  }
+}
+
+/**
+ * Push the current playlist at the running playout immediately. Prepared
+ * items go on air at once; anything still normalising is queued and joins
+ * automatically when it is ready, so nothing needs pressing again.
+ */
+const applyPlaylistNow = async () => {
+  if (refreshingPlaylist.value) return
+  refreshingPlaylist.value = true
+  playlistRefreshMessage.value = ''
+  try {
+    const res = await apiFetch(
+      route('admin.channels.my-channel.playlist.refresh', props.channel.channel_slug),
+      { method: 'POST' },
+    )
+    const json = await res.json().catch(() => ({}))
+    playlistRefreshOk.value = res.ok
+    playlistRefreshMessage.value = json.message
+      || (res.ok ? 'Playlist applied' : 'Could not apply the playlist')
+    if (res.ok) {
+      await fetchBroadcast()
+      await fetchPlaylist()
+    }
+  } catch (e) {
+    playlistRefreshOk.value = false
+    playlistRefreshMessage.value = 'Could not reach the server'
+  } finally {
+    refreshingPlaylist.value = false
+    setTimeout(() => { playlistRefreshMessage.value = '' }, 8000)
   }
 }
 
@@ -428,11 +518,17 @@ const stopBroadcast = async () => {
 watch(isLive, (live) => {
   if (live) {
     if (!timerInterval) timerInterval = setInterval(updateTimer, 1000)
+    // Re-poll the authoritative now-playing snapshot so the highlighted item
+    // follows the real playout clock (and re-syncs after reloads / drift).
+    if (!broadcastPoll) broadcastPoll = setInterval(fetchBroadcast, 4000)
     if (streamUrl.value) initHlsPlayer(streamUrl.value)
   } else {
     clearInterval(timerInterval)
     timerInterval = null
+    clearInterval(broadcastPoll)
+    broadcastPoll = null
     liveTimer.value = ''
+    lastNowPlaying = null
     destroyHlsPlayer()
   }
 })
@@ -443,6 +539,7 @@ onMounted(async () => {
   updateClock()
   if (isLive.value) {
     timerInterval = setInterval(updateTimer, 1000)
+    broadcastPoll = setInterval(fetchBroadcast, 4000)
     if (streamUrl.value) initHlsPlayer(streamUrl.value)
   }
 })
@@ -450,6 +547,7 @@ onMounted(async () => {
 onUnmounted(() => {
   clearInterval(clockInterval)
   clearInterval(timerInterval)
+  clearInterval(broadcastPoll)
   destroyHlsPlayer()
 })
 </script>

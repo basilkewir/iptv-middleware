@@ -1389,6 +1389,36 @@ class AdminChannelController extends Controller
         return response()->json(['message' => 'Playlist reordered']);
     }
 
+    /**
+     * Apply the current playlist to the running playout right now.
+     *
+     * Everything that is already prepared goes on air immediately; anything
+     * still to be normalised is queued and joins the loop when it lands. Runs
+     * inline rather than queued because the refresh is now cheap — it no
+     * longer normalises media — so the caller gets a real answer at once.
+     */
+    public function refreshMyChannelPlaylist(Request $request, AdminChannel $channel): JsonResponse
+    {
+        if (! $channel->is_my_channel) {
+            abort(404);
+        }
+
+        $result = app(MyChannelHlsService::class)->refreshPlaylist($channel);
+
+        return response()->json([
+            'message' => $result['changed']
+                ? 'Playlist applied to the live playout'
+                : ($result['pending'] > 0
+                    ? 'Nothing on air changed — ' . $result['pending'] . ' item(s) still preparing'
+                    : 'Playlist already up to date'),
+            'changed' => $result['changed'],
+            'files'   => $result['files'],
+            'pending' => $result['pending'],
+            'excluded' => $result['excluded'],
+            'live'    => $this->isChannelLive($channel),
+        ]);
+    }
+
     public function getMyChannelSettings(AdminChannel $channel): JsonResponse
     {
         $settings = MyChannelSetting::firstOrNew(['channel_id' => $channel->id]);
@@ -1492,9 +1522,17 @@ class AdminChannelController extends Controller
 
         $settings = MyChannelSetting::where('channel_id', $channel->id)->first();
 
+        // Which playlist item the encoder is really on right now, derived
+        // server-side from the live concat list + elapsed playout time. The
+        // browser preview player cannot report this for a continuous live HLS
+        // stream (its per-file `ended` event never fires), so the UI must be
+        // driven from here rather than from the video element.
+        $nowPlaying = app(MyChannelHlsService::class)->nowPlaying($channel);
+
         return response()->json([
             'broadcast' => $broadcast,
             'settings' => $settings,
+            'now_playing' => $nowPlaying,
             'stream_url' => $channel->stream_url,
             'channel_name' => $channel->channel_name,
         ]);
