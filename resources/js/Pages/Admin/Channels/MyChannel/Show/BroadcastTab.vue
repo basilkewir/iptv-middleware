@@ -191,6 +191,15 @@
                   {{ item.content?.quality_level?.toUpperCase() }}
                 </span>
                 <span class="text-gray-500 text-xs">{{ formatDuration(item.content?.duration) }}</span>
+                <span
+                  v-if="item.prepared === false"
+                  class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide
+                         px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                  title="This file is still being transcoded to the channel's playout format. It joins the broadcast automatically when ready."
+                >
+                  <Loader2 class="w-2.5 h-2.5 animate-spin" />
+                  Normalizing
+                </span>
               </div>
             </div>
             <!-- Index -->

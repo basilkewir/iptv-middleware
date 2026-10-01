@@ -1008,7 +1008,15 @@ class AdminChannelController extends Controller
                 }
             })
             ->orderBy('created_at', 'desc')
-            ->paginate($request->input('per_page', 20));
+            ->paginate($request->input('per_page', 20))
+            ->through(function ($item) use ($channel) {
+                $item->setAttribute(
+                    'prepared',
+                    app(MyChannelHlsService::class)->isPrepared($channel, (int) $item->id)
+                );
+
+                return $item;
+            });
 
         return response()->json(['content' => $content]);
     }
@@ -1299,10 +1307,23 @@ class AdminChannelController extends Controller
 
     public function getMyChannelPlaylist(Request $request, AdminChannel $channel): JsonResponse
     {
+        $hls = app(MyChannelHlsService::class);
+
         $playlist = MyChannelPlaylist::where('channel_id', $channel->id)
             ->with('content')
             ->orderBy('order_index', 'asc')
-            ->get();
+            ->get()
+            ->map(function ($item) use ($channel, $hls) {
+                // Prepared = a normalised intermediate exists and the item can
+                // actually go on air. Anything else is still being transcoded,
+                // which is what makes a fresh upload look like it is "skipped".
+                $item->setAttribute(
+                    'prepared',
+                    $item->content && $hls->isPrepared($channel, (int) $item->content->id)
+                );
+
+                return $item;
+            });
 
         return response()->json(['playlist' => $playlist]);
     }

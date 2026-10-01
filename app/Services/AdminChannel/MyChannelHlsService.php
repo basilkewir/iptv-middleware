@@ -1593,6 +1593,16 @@ BASH;
     }
 
     /**
+     * Whether a content item has a finished normalised intermediate ready for
+     * playout. Used by the UI to show "preparing…" instead of making an
+     * in-progress item look like it is being skipped.
+     */
+    public function isPrepared(AdminChannel $channel, int $contentId): bool
+    {
+        return is_file($this->preparedPathFor($channel->channel_slug, $contentId));
+    }
+
+    /**
      * Which playlist item the live playout is on RIGHT NOW.
      *
      * Deterministic because Stage 1 plays the concat list back-to-back and loops

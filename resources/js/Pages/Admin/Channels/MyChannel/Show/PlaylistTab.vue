@@ -33,6 +33,15 @@
             <span :class="qualityColor(item.content?.quality_level)">{{ item.content?.quality_level?.toUpperCase() }}</span>
             <span>{{ formatDuration(item.content?.duration) }}</span>
             <span v-if="item.transition_type !== 'cut'" class="text-gray-500">{{ item.transition_type }}</span>
+            <span
+              v-if="item.prepared === false"
+              class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide
+                     px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+              title="Still being transcoded to the channel's playout format — it joins the broadcast automatically when ready."
+            >
+              <Loader2 class="w-2.5 h-2.5 animate-spin" />
+              Normalizing
+            </span>
           </div>
         </div>
         <button @click="removeFromPlaylist(item)" class="p-1 text-gray-400 hover:text-red-400 rounded transition shrink-0">
@@ -74,7 +83,18 @@
             </div>
             <div class="flex-1 min-w-0">
               <div class="text-white text-sm truncate">{{ item.title || item.file_name }}</div>
-              <div class="text-xs text-gray-400">{{ item.quality_level?.toUpperCase() }} • {{ formatDuration(item.duration) }}</div>
+              <div class="text-xs text-gray-400 flex items-center gap-2">
+                <span>{{ item.quality_level?.toUpperCase() }} • {{ formatDuration(item.duration) }}</span>
+                <span
+                  v-if="item.prepared === false"
+                  class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide
+                         px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                  title="Still being transcoded to the channel's playout format — it joins the broadcast automatically when ready."
+                >
+                  <Loader2 class="w-2.5 h-2.5 animate-spin" />
+                  Normalizing
+                </span>
+              </div>
             </div>
             <Plus class="w-4 h-4 text-indigo-400 shrink-0" />
           </div>
