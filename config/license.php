@@ -11,7 +11,12 @@ return [
     */
 
     // JWT Token Configuration
-    'jwt_secret' => env('LICENSE_JWT_SECRET'),
+    //
+    // Signs the *local* session JWT issued after a successful validation. It is
+    // only ever verified by this same installation, so it falls back to APP_KEY
+    // (already present on every install) and works with no extra configuration.
+    // Override in .env only if you need to rotate it.
+    'jwt_secret' => env('LICENSE_JWT_SECRET') ?: env('APP_KEY'),
     'token_expiration' => env('LICENSE_TOKEN_EXPIRATION', 3600), // 1 hour in seconds
     'token_refresh_threshold' => env('LICENSE_TOKEN_REFRESH_THRESHOLD', 300), // 5 minutes before expiration
 
@@ -161,7 +166,12 @@ return [
         'timeout' => env('LICENSE_API_TIMEOUT', 30),
         'retry_attempts' => env('LICENSE_API_RETRY_ATTEMPTS', 3),
         'retry_delay' => env('LICENSE_API_RETRY_DELAY', 1000), // milliseconds
-        'secret' => env('KEWIRDEV_API_SECRET', env('LICENSE_JWT_SECRET')),
+        // Shared HMAC key for calls to kewirdev.com. OPTIONAL — leave it empty
+        // and the request goes out unsigned, which the license server accepts
+        // (its signature check is opt-in). Only set this when the license
+        // server has the SAME key configured: a signature that does not match
+        // is rejected outright, which is worse than sending none.
+        'secret' => env('KEWIRDEV_API_SECRET') ?: env('LICENSE_JWT_SECRET'),
     ],
 
     // Notification Configuration

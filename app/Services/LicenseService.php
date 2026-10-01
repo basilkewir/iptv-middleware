@@ -20,13 +20,11 @@ class LicenseService
 
     public function __construct()
     {
-        $this->jwtSecret = config('license.jwt_secret') ?: null;
-        if (empty($this->jwtSecret)) {
-            // Never fatal here: report a clear error instead of a bare 500.
-            Log::error('LICENSE_JWT_SECRET is not set — license validation will fail until it is configured', [
-                'env_keys' => 'LICENSE_JWT_SECRET / KEWIRDEV_API_SECRET',
-            ]);
-        }
+        // This secret only signs the *local* session JWT, which is verified by
+        // this same installation — so APP_KEY is a valid key and every install
+        // has one. Fresh installs therefore work with no LICENSE_JWT_SECRET in
+        // .env; set it only if you want to rotate the key.
+        $this->jwtSecret = config('license.jwt_secret') ?: config('app.key');
         $this->tokenExpiration = (int) (config('license.token_expiration') ?: 3600);
         $this->kewirDev = new KewirDevLicenseService();
     }

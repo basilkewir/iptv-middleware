@@ -22,7 +22,13 @@ class KewirDevLicenseService
     public function __construct()
     {
         $this->baseUrl = rtrim((string) (config('license.api.base_url') ?: 'https://kewirdev.com/api/license'), '/');
-        $this->secret = config('license.api.secret') ?: config('license.jwt_secret') ?: null;
+
+        // Only the dedicated shared key (KEWIRDEV_API_SECRET / LICENSE_JWT_SECRET
+        // as set in .env) signs requests to kewirdev.com. Deliberately NOT
+        // falling back to config('license.jwt_secret'): that is the *local*
+        // session key (APP_KEY by default) and a signature made with it is
+        // rejected by the server — worse than sending the request unsigned.
+        $this->secret = config('license.api.secret') ?: null;
         $this->timeout = max(1, (int) (config('license.api.timeout') ?: 30));
     }
 
@@ -37,19 +43,6 @@ class KewirDevLicenseService
      */
     public function validateLicense(string $licenseKey, array $deviceInfo): array
     {
-        if ($this->secret === null || $this->secret === '') {
-            Log::error('License signing secret is not configured', [
-                'env_keys' => 'KEWIRDEV_API_SECRET or LICENSE_JWT_SECRET',
-            ]);
-
-            return [
-                'success' => false,
-                'status'  => self::STATUS_CONFIG,
-                'message' => 'License signing secret is not configured on this server. '
-                    .'Set KEWIRDEV_API_SECRET (or LICENSE_JWT_SECRET) in .env, then run: php artisan config:clear',
-            ];
-        }
-
         $payload = json_encode([
             'license_key'      => $licenseKey,
             'device_id'        => $deviceInfo['device_id'] ?? '',
@@ -61,15 +54,22 @@ class KewirDevLicenseService
             'app_version'      => $deviceInfo['app_version'] ?? '',
         ]);
 
-        $signature = hash_hmac('sha256', $payload, $this->secret);
+        $headers = [
+            'Content-Type' => 'application/json',
+            'Accept'       => 'application/json',
+            'User-Agent'   => config('license.api.user_agent', 'HMS-IPTV/1.0'),
+        ];
+
+        // Signing is optional on the server side: it accepts unsigned requests
+        // unless signature validation is explicitly turned on there. A signature
+        // that does not match the server's key is rejected outright, so never
+        // invent one — only sign when a shared key is actually configured.
+        if ($this->secret !== null && $this->secret !== '') {
+            $headers['X-License-Signature'] = hash_hmac('sha256', $payload, $this->secret);
+        }
 
         try {
-            $response = Http::withHeaders([
-                'Content-Type'        => 'application/json',
-                'Accept'              => 'application/json',
-                'User-Agent'          => config('license.api.user_agent', 'HMS-IPTV/1.0'),
-                'X-License-Signature' => $signature,
-            ])
+            $response = Http::withHeaders($headers)
             ->timeout($this->timeout)
             ->withBody($payload, 'application/json')
             ->post($this->baseUrl . '/validate');
