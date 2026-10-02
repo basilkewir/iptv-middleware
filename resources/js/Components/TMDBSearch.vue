@@ -85,6 +85,7 @@ import { ref } from 'vue'
 import { useUiStore } from '@/Stores/ui'
 import { route } from '@/Composables/useRoute'
 import { Search, Loader2, Film, Star, Download } from 'lucide-vue-next'
+import { getXsrfToken } from '@/Composables/useCsrf'
 
 const props = defineProps({
   modelValue: { type: Object, default: null },
@@ -120,8 +121,7 @@ async function doSearch() {
   searched.value = true
   error.value = null
   try {
-    const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-    const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+    const token = getXsrfToken()
     const res = await fetch(route('admin.vod.search-tmdb'), {
       method: 'POST',
       headers: {

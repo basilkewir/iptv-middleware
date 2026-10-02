@@ -1943,8 +1943,8 @@ BASH;
             $slug       = $channel->channel_slug ?? basename($streamDir);
             $tickerFile = "{$this->ramRoot}/{$slug}/ticker.txt";
             $color      = ltrim($channel->ticker_color ?: '#ffffff', '#');
-            $bgColor    = $this->hexToFfmpegColor($channel->ticker_background ?: '#000000cc');
             $fontsize   = $this->overlayFontPixels($height * 0.035, $channel->ticker_font_size);
+            $clearBg    = $this->isTransparentColor($channel->ticker_background);
             $barH       = $fontsize + 12;
             $yPos       = $height - $barH;
             $speed      = (int) round(80 + (((float) $channel->ticker_speed - 10) / 90) * 320);
@@ -1953,9 +1953,21 @@ BASH;
                 : "w-mod(t*{$speed}\\,w+tw)";
             $escaped = str_replace(['\\', "'"], ['\\\\', "\\'"], $tickerFile);
 
-            $filters[] = "{$lastVideo}drawbox=x=0:y={$yPos}:w=iw:h={$barH}:color={$bgColor}:t=fill," .
+            // "No background" must mean no bar at all — the text floats on the
+            // picture. Anything else keeps the full-width bar behind it.
+            $bar = $clearBg
+                ? ''
+                : sprintf(
+                    'drawbox=x=0:y=%d:w=iw:h=%d:color=%s:t=fill,',
+                    $yPos,
+                    $barH,
+                    $this->hexToFfmpegColor($channel->ticker_background ?: '#000000cc')
+                );
+            $textY = $clearBg ? $height - $fontsize - 6 : $yPos + 6;
+
+            $filters[] = "{$lastVideo}{$bar}" .
                          "drawtext=textfile='{$escaped}':reload=1:fontcolor=0x{$color}:fontsize={$fontsize}" .
-                         ":x='{$xExpr}':y={$yPos}+6[vticker]";
+                         ":x='{$xExpr}':y={$textY}[vticker]";
             $lastVideo  = '[vticker]';
         }
 
@@ -1973,8 +1985,13 @@ BASH;
                 $width, $height, $fontsize * 9, $fontsize + ($pad * 2)
             );
 
+            // box=0 is what makes the clock float with no plate behind it.
+            $box = $this->isTransparentColor($channel->overlay_clock_background)
+                ? 'box=0'
+                : "box=1:boxcolor={$boxColor}:boxborderw={$pad}";
+
             $filters[] = "{$lastVideo}drawtext=expansion=strftime:text='{$timeExpr}':fontcolor={$fontColor}" .
-                         ":fontsize={$fontsize}:box=1:boxcolor={$boxColor}:boxborderw={$pad}:x={$cX}:y={$cY}[vclock]";
+                         ":fontsize={$fontsize}:{$box}:x={$cX}:y={$cY}[vclock]";
             $lastVideo = '[vclock]';
         }
 
@@ -2033,6 +2050,18 @@ BASH;
             return '0x' . strtoupper(substr($hex, 0, 6)) . '@' . $alpha;
         }
         return '0x' . strtoupper(substr($hex, 0, 6));
+    }
+
+    /**
+     * Whether an overlay background was set to "none" — empty, or one of the
+     * explicit transparent sentinels. Alpha-only values (#00000000) are left
+     * to the renderer so a deliberate 0-alpha still counts as a value.
+     */
+    private function isTransparentColor(?string $value): bool
+    {
+        $value = strtolower(trim((string) $value));
+
+        return $value === '' || in_array($value, ['transparent', 'none', 'null', 'clear'], true);
     }
 
     /**

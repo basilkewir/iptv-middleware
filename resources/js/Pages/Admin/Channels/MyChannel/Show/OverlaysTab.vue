@@ -14,8 +14,10 @@
 
 
     <!-- Two columns: controls scroll, the preview stays pinned so it is
-         never off-screen while editing. -->
-    <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_420px] gap-6 items-start">
+         never off-screen while editing. Note the grid must stretch (no
+         items-start) — sticky only works when the column is taller than the
+         preview itself, otherwise there is nowhere to stick within. -->
+    <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,480px)_minmax(0,1fr)] gap-6">
 
       <div class="space-y-6 order-2 xl:order-1">
     <!-- Ticker -->
@@ -62,13 +64,18 @@
             </div>
           </div>
           <div>
-            <label class="block text-xs text-gray-400 mb-1">Background Color</label>
-            <div class="flex items-center gap-2">
-              <input type="color" :value="f.ticker_background?.slice(0,7)" @input="e => f.ticker_background = e.target.value + (f.ticker_background?.slice(7) || '')"
+            <label class="block text-xs text-gray-400 mb-1">Background</label>
+            <label class="flex items-center gap-2 mb-2 cursor-pointer select-none">
+              <input type="checkbox" :checked="isClearBg(f.ticker_background)"
+                @change="e => f.ticker_background = e.target.checked ? 'transparent' : '#000000cc'" class="rounded" />
+              <span class="text-xs text-gray-300">Transparent — no background bar</span>
+            </label>
+            <div class="flex items-center gap-2" :class="{ 'opacity-40 pointer-events-none': isClearBg(f.ticker_background) }">
+              <input type="color" :value="toHex(f.ticker_background || '#000000')" @input="e => f.ticker_background = withAlpha(e.target.value, 0.8)"
                 class="w-10 h-9 rounded cursor-pointer bg-gray-700 border border-gray-600 p-0.5" />
-              <input v-model="f.ticker_background" type="text" maxlength="9"
+              <input v-model="f.ticker_background" type="text" maxlength="32"
                 class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm font-mono"
-                placeholder="#000000" />
+                placeholder="transparent or #000000cc" />
             </div>
           </div>
         </div>
@@ -230,13 +237,19 @@
           </div>
           <div>
             <label class="block text-xs text-gray-400 mb-1">Background</label>
-            <div class="flex items-center gap-2">
+            <label class="flex items-center gap-2 mb-2 cursor-pointer select-none">
+              <input type="checkbox" :checked="isClearBg(f.overlay_clock_background)"
+                @change="e => f.overlay_clock_background = e.target.checked ? 'transparent' : '#000000cc'" class="rounded" />
+              <span class="text-xs text-gray-300">Transparent — no plate behind the clock</span>
+            </label>
+            <div class="flex items-center gap-2" :class="{ 'opacity-40 pointer-events-none': isClearBg(f.overlay_clock_background) }">
               <input type="color" :value="toHex(f.overlay_clock_background || '#000000')" @input="f.overlay_clock_background = withAlpha($event.target.value, 0.5)"
                 class="w-10 h-9 rounded cursor-pointer bg-gray-700 border border-gray-600 p-0.5" />
               <input v-model="f.overlay_clock_background" type="text" maxlength="64"
-                class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm font-mono" />
+                class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm font-mono"
+                placeholder="transparent or #000000cc" />
             </div>
-            <p class="text-[10px] text-gray-500 mt-1">Hex, or hex + alpha like #000000cc</p>
+            <p class="text-[10px] text-gray-500 mt-1">Transparent, or hex + alpha like #000000cc</p>
           </div>
         </div>
         <div>
@@ -261,10 +274,12 @@
       </div>
 
       <div class="order-1 xl:order-2">
-        <div class="xl:sticky xl:top-4 space-y-3">
+        <!-- Pinned at every breakpoint: the preview must stay on screen while
+             the controls below are scrolled through. -->
+        <div class="sticky top-2 z-30 space-y-3">
           <div class="flex items-center justify-between px-1">
             <span class="text-white font-medium text-sm">Live Preview</span>
-            <span class="text-[10px] uppercase tracking-wide text-gray-500">stays visible</span>
+            <span class="text-[10px] uppercase tracking-wide text-gray-500">stays visible while editing</span>
           </div>
     <!-- Live Stream Preview -->
     <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
@@ -288,7 +303,7 @@
         <!-- Ticker overlay preview -->
         <div v-if="f.enable_ticker && f.ticker_text"
           class="absolute bottom-0 left-0 right-0 h-8 overflow-hidden flex items-center"
-          :style="{ background: f.ticker_background || '#000000cc' }">
+          :style="{ background: previewBg(f.ticker_background, '#000000cc') }">
           <span class="ticker-preview whitespace-nowrap font-medium px-2"
             :style="{ color: f.ticker_color || '#ffffff', animationDuration: tickerDuration, fontSize: previewFontPx(f.ticker_font_size, 16) + 'px' }">
             {{ f.ticker_text }}
@@ -301,7 +316,7 @@
           class="absolute font-mono px-2 py-1 rounded"
           :style="{ ...clockPositionStyle,
                     color: f.overlay_clock_color || '#ffffff',
-                    background: f.overlay_clock_background || '#000000cc',
+                    background: previewBg(f.overlay_clock_background, '#000000cc'),
                     fontSize: previewFontPx(f.overlay_clock_font_size, 16) + 'px' }">
           {{ currentTime }}
         </div>
@@ -560,6 +575,15 @@ const toHex = (v) => {
 /** Re-attach an alpha channel after the picker returns a bare hex. */
 const withAlpha = (hex, alpha) =>
   toHex(hex) + Math.round(alpha * 255).toString(16).padStart(2, '0')
+
+/** "No background" is spelled out so the picker and the renderer agree. */
+const isClearBg = (v) => {
+  const s = String(v || '').trim().toLowerCase()
+  return s === '' || ['transparent', 'none', 'null', 'clear'].includes(s)
+}
+
+/** Preview background: empty means the picture shows through. */
+const previewBg = (v, fallback) => (isClearBg(v) ? 'transparent' : (v || fallback))
 
 /** Preview font size in px, mirroring the on-air percentage (100 = default). */
 const previewFontPx = (pct, base) => Math.max(8, Math.round(base * (fontPct(pct) / 100)))

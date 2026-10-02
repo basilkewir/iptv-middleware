@@ -353,6 +353,7 @@ import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
 import TMDBSearch from '@/Components/TMDBSearch.vue'
 import { ArrowLeft, Upload, Film, RefreshCw, Tv, Plus, ChevronDown } from 'lucide-vue-next'
+import { getXsrfToken } from '@/Composables/useCsrf'
 
 const props = defineProps({ vod: { type: Object, required: true }, categories: { type: Array, default: () => [] }, bouquets: { type: Array, default: () => [] } })
 
@@ -450,8 +451,7 @@ const saveNewEpisode = async () => {
   episodeError.value = ''
   const vodId = Number(props.vod?.id)
   try {
-    const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-    const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+    const token = getXsrfToken()
     let streamUrl = newEpisode.value.stream_url || null
 
     if (newEpisode.value.sourceMode === 'upload' && newEpisode.value.file) {
@@ -511,8 +511,7 @@ const deleteEpisode = async (ep) => {
   if (!confirm(`Delete S${ep.season_number}E${ep.episode_number}?`)) return
   const vodId = Number(props.vod?.id)
   try {
-    const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-    const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+    const token = getXsrfToken()
     const url = ep.media_id
       ? `/admin/vod/${vodId}/episodes/${ep.media_id}`
       : null
@@ -543,8 +542,7 @@ const loadTMDBForSeason = async (seasonNum) => {
   loadingSeasons.value = s
   const vodId = Number(props.vod?.id)
   try {
-    const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-    const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+    const token = getXsrfToken()
     const res = await fetch(`/admin/vod/${vodId}/tmdb-episodes`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json', 'X-XSRF-TOKEN': token },
@@ -594,8 +592,7 @@ const saveEpisodes = async () => {
   episodeError.value = ''
   const vodId = Number(props.vod?.id)
   if (!vodId) { savingEpisodes.value = false; return }
-  const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-  const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+  const token = getXsrfToken()
 
   // Upload any pending files first
   for (const eps of Object.values(episodesBySeason)) {
@@ -668,8 +665,7 @@ const applyTMDBData = async () => {
 
   if (tmdbId) {
     try {
-      const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-      const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+      const token = getXsrfToken()
       const res = await fetch(route('admin.vod.tmdb-details'), {
         method: 'POST',
         headers: {
@@ -724,8 +720,7 @@ const applyTMDBData = async () => {
 const refetchTMDB = async () => {
   refetching.value = true
   try {
-    const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-    const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+    const token = getXsrfToken()
     const res = await fetch(route('admin.vod.auto-tmdb', props.vod.id), {
       method: 'POST',
       headers: {
@@ -812,8 +807,7 @@ const handleDrop = (e) => {
   const vodId = Number(props.vod?.id)
   if (!vodId) return
 
-  const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-  const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+  const token = getXsrfToken()
 
   if (sourceMode.value === 'upload' && uploadFile.value) {
     const fd = new FormData()

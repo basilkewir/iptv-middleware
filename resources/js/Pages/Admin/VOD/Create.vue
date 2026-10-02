@@ -196,6 +196,7 @@ import { route } from '@/Composables/useRoute'
 import AdminLayout from '@/Layouts/AdminLayout.vue'
 import TMDBSearch from '@/Components/TMDBSearch.vue'
 import { ArrowLeft, Upload, Film } from 'lucide-vue-next'
+import { getXsrfToken } from '@/Composables/useCsrf'
 
 const props = defineProps({
   categories: { type: Array, default: () => [] },
@@ -231,8 +232,7 @@ const applyTMDBData = async () => {
 
   if (tmdbId) {
     try {
-      const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-      const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+      const token = getXsrfToken()
       const res = await fetch(route('admin.vod.tmdb-details'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json', 'X-XSRF-TOKEN': token },
@@ -309,8 +309,7 @@ const submit = async () => {
       uploadProgress.value = 1
       form.processing = true
 
-      const xsrf = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-      const token = xsrf ? decodeURIComponent(xsrf.split('=')[1]) : ''
+      const token = getXsrfToken()
 
       const res = await fetch(route('admin.vod.upload'), {
         method: 'POST',

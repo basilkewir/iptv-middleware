@@ -65,6 +65,7 @@ import StepOverlays from './Wizard/StepOverlays.vue'
 import StepBouquetPackage from './Wizard/StepBouquetPackage.vue'
 import StepStreamConfig from './Wizard/StepStreamConfig.vue'
 import StepReview from './Wizard/StepReview.vue'
+import { getXsrfToken } from '@/Composables/useCsrf'
 
 const props = defineProps({
   channel: Object,
@@ -179,8 +180,7 @@ const uploadBrandingImage = async (file, field) => {
   formData.append('image', file)
   formData.append('field', field)
 
-  const raw = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-  const xsrfToken = raw ? decodeURIComponent(raw.substring('XSRF-TOKEN='.length)) : ''
+  const xsrfToken = getXsrfToken()
 
   const res = await fetch(route('admin.channels.my-channel.upload-image'), {
     method: 'POST',
@@ -211,8 +211,7 @@ const handleFileUpload = async (e) => {
   formData.append('description', '')
 
   try {
-    const raw = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-    const xsrfToken = raw ? decodeURIComponent(raw.substring('XSRF-TOKEN='.length)) : ''
+    const xsrfToken = getXsrfToken()
     const channelId = props.channel?.channel_slug || props.channel?.id || ''
 
     const res = await fetch(route('admin.channels.my-channel.content.upload', channelId), {

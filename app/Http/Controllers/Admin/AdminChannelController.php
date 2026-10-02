@@ -1146,16 +1146,38 @@ class AdminChannelController extends Controller
     protected function generateThumbnail(string $videoPath, int $channelId): ?string
     {
         try {
+            $ffmpeg = (string) config('streaming.transcoding.ffmpeg_path', '/usr/bin/ffmpeg');
             $thumbnailName = 'thumb_' . time() . '_' . StrHelper::random(8) . '.jpg';
             $thumbnailPath = 'my_channel/' . $channelId . '/' . $thumbnailName;
             $fullThumbnailPath = Storage::disk('public')->path($thumbnailPath);
 
-            $cmd = "/usr/bin/ffmpeg -i " . escapeshellarg($videoPath) .
-                   " -ss 00:00:10 -vframes 1 -vf scale=320:-1 " .
-                   escapeshellarg($fullThumbnailPath) . " 2>/dev/null";
+            // Never seek past the end of the clip: `-ss 10` on an 8-second
+            // video produces nothing, which silently skipped the thumbnail.
+            $duration = (float) ($this->probeMedia($videoPath)['format']['duration'] ?? 0);
+            $at = $duration > 0 ? min(10, $duration * 0.25) : 10;
+
+            $cmd = sprintf(
+                '%s -y -i %s -ss %s -vframes 1 -vf scale=320:-1 %s 2>/dev/null',
+                escapeshellarg($ffmpeg),
+                escapeshellarg($videoPath),
+                number_format($at, 2, '.', ''),
+                escapeshellarg($fullThumbnailPath)
+            );
             exec($cmd);
 
-            return $thumbnailPath;
+            // Fall back to the very first frame if the probe/seek produced
+            // nothing, so an odd file still gets artwork.
+            if (! is_file($fullThumbnailPath) || filesize($fullThumbnailPath) < 64) {
+                @unlink($fullThumbnailPath);
+                exec(sprintf(
+                    '%s -y -i %s -vframes 1 -vf scale=320:-1 %s 2>/dev/null',
+                    escapeshellarg($ffmpeg),
+                    escapeshellarg($videoPath),
+                    escapeshellarg($fullThumbnailPath)
+                ));
+            }
+
+            return (is_file($fullThumbnailPath) && filesize($fullThumbnailPath) >= 64) ? $thumbnailPath : null;
         } catch (\Exception $e) {
             return null;
         }
@@ -1483,8 +1505,8 @@ class AdminChannelController extends Controller
             'ticker_speed'           => 'sometimes|integer|min:1|max:100',
             'ticker_direction'       => 'sometimes|in:left,right,up,down',
             'ticker_font_size'       => 'sometimes|nullable|integer|min:40|max:300',
-            'ticker_color'           => 'sometimes|nullable|string|max:7',
-            'ticker_background'      => 'sometimes|nullable|string|max:9',
+            'ticker_color'           => 'sometimes|nullable|string|max:32',
+            'ticker_background'      => 'sometimes|nullable|string|max:32',
             'enable_overlay_logo'    => 'sometimes|boolean',
             'logo_url'               => 'sometimes|nullable|string|max:500',
             'overlay_logo_position'  => 'sometimes|nullable|string|max:20',

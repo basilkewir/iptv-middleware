@@ -1,9 +1,6 @@
-export function useApiFetch() {
-    const getXsrf = () => {
-        const raw = document.cookie.split('; ').find(c => c.startsWith('XSRF-TOKEN='))
-        return raw ? decodeURIComponent(raw.substring('XSRF-TOKEN='.length)) : ''
-    }
+import { getXsrfToken } from '@/Composables/useCsrf'
 
+export function useApiFetch() {
     const apiFetch = (url, options = {}) => {
         return fetch(url, {
             ...options,
@@ -11,7 +8,7 @@ export function useApiFetch() {
             headers: {
                 'X-Requested-With': 'XMLHttpRequest',
                 'Accept': 'application/json',
-                'X-XSRF-TOKEN': getXsrf(),
+                'X-XSRF-TOKEN': getXsrfToken(),
                 ...(options.headers || {}),
             },
         })
