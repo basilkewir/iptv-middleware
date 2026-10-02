@@ -26,10 +26,12 @@ use Illuminate\Support\Facades\Storage;
  *    at zero, 48 kHz stereo AAC, and an ffprobe verification pass. Mixed
  *    codecs / frame rates / aspect ratios can no longer reach playout.
  * 2. STAGE 1 (PLAYOUT) — a long-lived ffmpeg reads those prepared files
- *    through the concat demuxer and `-c copy`s them into ONE continuous
- *    mpegts stream written to a FIFO. Because nothing is re-encoded this stage
- *    costs ~0% CPU, and because it emits a single stream it is the only place
- *    concat boundary timestamps are ever reconciled.
+ *    through the concat demuxer and writes them into ONE continuous stream on
+ *    a FIFO: video is `-c copy`, audio is decoded to PCM, and the container is
+ *    NUT. Video costs ~0% CPU, and because it emits a single stream it is the
+ *    only place concat boundary timestamps are ever reconciled. NUT/PCM is
+ *    deliberate — see the note in stage1_loop() about mpegts eating the AAC
+ *    priming edit list and slowly desynchronising audio from video.
  * 3. STAGE 2 (ENCODE) — a second ffmpeg reads the FIFO, applies the overlay
  *    filtergraph and writes HLS. It never sees a file boundary, so its
  *    filtergraph and encoder never re-negotiate mid-stream.
@@ -1216,10 +1218,11 @@ class MyChannelHlsService
     /**
      * Build the playout wrapper: one supervisor plus two supervised stages.
      *
-     * Stage 1 (PLAYOUT) — `-c copy` through the concat demuxer into a FIFO.
-     *   No encoding, so it costs ~0% of a core, and because it emits a single
-     *   mpegts stream it is the ONLY place concat boundary timestamps are ever
-     *   reconciled.
+     * Stage 1 (PLAYOUT) — concat demuxer into a FIFO. Video is `-c copy` so
+     *   there is no encoding and it costs ~0% of a core; audio is decoded to
+     *   PCM and the pipe is NUT so the A/V timeline survives intact. Because
+     *   it emits a single stream it is the ONLY place concat boundary
+     *   timestamps are ever reconciled.
      * Stage 2 (ENCODE) — reads the FIFO, applies the overlay filtergraph and
      *   writes HLS. It never sees a file boundary, so its filtergraph and
      *   encoder never re-negotiate mid-stream.
@@ -1315,7 +1318,14 @@ term() {
 }
 trap 'term' TERM INT HUP
 
-# ── Stage 1: playout, -c copy, never touches the encoder ────────────────────
+# ── Stage 1: playout. Video is still -c copy and never touches the encoder.
+#    Audio is decoded to PCM over a NUT pipe, NOT copied as AAC over mpegts:
+#    mpegts cannot carry the MP4 edit list that marks the AAC priming samples,
+#    so every file's audio arrived 21.3ms (1024 samples) "long". Stage 2
+#    renumbers audio by sample count, so those extra samples accumulated and
+#    audio slid further behind video with every file in the loop. PCM carries
+#    no priming at all, and NUT preserves the A/V timeline exactly (measured
+#    0.0ms offset vs 21.3ms through mpegts).
 stage1_loop() {
     while :; do
         rm -f "\$RELOAD_FLAG"
@@ -1325,7 +1335,7 @@ stage1_loop() {
             -fflags +genpts \\
             -re -stream_loop -1 -f concat -safe 0 -i "\$CONCAT" \\
             -map 0:v:0 -map 0:a:0 \\
-            -c copy -f mpegts -muxdelay 0 -muxpreload 0 \\
+            -c:v copy -c:a pcm_s16le -f nut \\
             "\$FIFO" >> "\$LOG" 2>&1 &
         S1FFMPEG=\$!
         echo "\$S1FFMPEG" > "\$STREAM_DIR/stage1.ffmpeg.pid"
@@ -1461,7 +1471,7 @@ if [ "\$N" -gt 0 ] 2>/dev/null; then START_N="-start_number \$N"; fi
 
 exec {$this->ffmpeg} -y -hide_banner -loglevel warning \\
     -fflags +discardcorrupt \\
-    -f mpegts -i "\$FIFO" \\
+    -f nut -i "\$FIFO" \\
     -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \\
 {$inputLines}    -c:v {$videoCodec} \\
     -maxrate {$bitrate}k -bufsize {$bitrate}k -g {$gop} -pix_fmt yuv420p \\
@@ -2016,10 +2026,10 @@ BASH;
      *
      * Input map (deliberately unchanged from the single-process era so the
      * existing input/audio index conventions keep holding):
-     *   0 = mpegts playout FIFO, 1 = anullsrc silence bed, 2 = overlay canvas
+     *   0 = NUT playout FIFO, 1 = anullsrc silence bed, 2 = overlay canvas
      *
      * Normalisation happens at the HEAD of the graph, before anything else.
-     * Stage 1 emits one continuous mpegts stream, but a stall, a resync or a
+     * Stage 1 emits one continuous stream, but a stall, a resync or a
      * restart can still hand Stage 2 a PTS jump — rebuilding the timeline as a
      * strict frame counter first means no discontinuity can ever reach the
      * ticker, the clock or the encoder.
