@@ -202,6 +202,16 @@
                 </span>
               </div>
             </div>
+            <!-- Play from here -->
+            <button
+              @click="playFromItem(item)"
+              :disabled="playingFromId === item.id"
+              class="p-1.5 rounded transition shrink-0 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/40
+                     disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Start playing from this item — it goes on air first and the playlist continues from here">
+              <Loader2 v-if="playingFromId === item.id" class="w-3.5 h-3.5 animate-spin" />
+              <Play v-else class="w-3.5 h-3.5" />
+            </button>
             <!-- Index -->
             <span class="text-gray-600 text-xs shrink-0">{{ idx + 1 }}</span>
           </div>
@@ -245,6 +255,7 @@ const broadcastError = ref('')
 const settings = ref(null)
 const playlist = ref([])
 const refreshingPlaylist = ref(false)
+const playingFromId = ref(null)
 const playlistRefreshMessage = ref('')
 const playlistRefreshOk = ref(true)
 const starting = ref(false)
@@ -481,6 +492,39 @@ const applyPlaylistNow = async () => {
     playlistRefreshMessage.value = 'Could not reach the server'
   } finally {
     refreshingPlaylist.value = false
+    setTimeout(() => { playlistRefreshMessage.value = '' }, 8000)
+  }
+}
+
+/**
+ * "Play from here" — start or jump the playout to this item.
+ *
+ * Offline: the broadcast starts rotated so this media plays first. Live: the
+ * running loop is rotated and Stage 1 reloads onto it, so the channel jumps
+ * straight here without a full restart.
+ */
+const playFromItem = async (item) => {
+  if (playingFromId.value) return
+  playingFromId.value = item.id
+  playlistRefreshMessage.value = ''
+  try {
+    const res = await apiFetch(
+      route('admin.channels.my-channel.playlist.play', [props.channel.channel_slug, item.id]),
+      { method: 'POST' },
+    )
+    const json = await res.json().catch(() => ({}))
+    playlistRefreshOk.value = res.ok
+    playlistRefreshMessage.value = json.message
+      || (res.ok ? 'Playing from the selected media' : 'Could not start playback from this item')
+    if (res.ok) {
+      await fetchBroadcast()
+      await fetchPlaylist()
+    }
+  } catch (e) {
+    playlistRefreshOk.value = false
+    playlistRefreshMessage.value = 'Could not reach the server'
+  } finally {
+    playingFromId.value = null
     setTimeout(() => { playlistRefreshMessage.value = '' }, 8000)
   }
 }

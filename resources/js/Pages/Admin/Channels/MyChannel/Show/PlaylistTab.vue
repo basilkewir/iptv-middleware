@@ -44,6 +44,15 @@
             </span>
           </div>
         </div>
+        <button
+          @click="playFromItem(item)"
+          :disabled="playingFromId === item.id"
+          class="p-1.5 rounded transition shrink-0 bg-indigo-600/20 text-indigo-300 hover:bg-indigo-600/40
+                 disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Start playing from this item — it goes on air first and the playlist continues from here">
+          <Loader2 v-if="playingFromId === item.id" class="w-4 h-4 animate-spin" />
+          <Play v-else class="w-4 h-4" />
+        </button>
         <button @click="removeFromPlaylist(item)" class="p-1 text-gray-400 hover:text-red-400 rounded transition shrink-0">
           <Trash2 class="w-4 h-4" />
         </button>
@@ -119,6 +128,7 @@ const playlist = ref([])
 const contentLibrary = ref([])
 const loading = ref(false)
 const loadingLibrary = ref(false)
+const playingFromId = ref(null)
 const showAddModal = ref(false)
 const error = ref('')
 const dragIndex = ref(null)
@@ -160,6 +170,34 @@ const addToPlaylist = async (item) => {
   } else {
     const json = await res.json()
     error.value = json?.message || 'Failed to add to playlist'
+  }
+}
+
+/**
+ * "Play from here" — start the playout on this item.
+ *
+ * Offline: the broadcast is started rotated so this media plays first. Live:
+ * the running loop is rotated and Stage 1 reloads onto it, so the channel
+ * jumps straight here without a full restart.
+ */
+const playFromItem = async (item) => {
+  playingFromId.value = item.id
+  try {
+    const res = await apiFetch(
+      route('admin.channels.my-channel.playlist.play', [props.channel.channel_slug, item.id]),
+      { method: 'POST' }
+    )
+    const json = await res.json().catch(() => ({}))
+    if (res.ok) {
+      if (json.message) alert(json.message)
+    } else {
+      alert(json.message || 'Could not start playback from this item')
+    }
+  } catch (e) {
+    alert('Could not start playback from this item')
+  } finally {
+    playingFromId.value = null
+    await fetchPlaylist()
   }
 }
 

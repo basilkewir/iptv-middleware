@@ -279,6 +279,7 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\EnforceSess
         Route::delete('/channels/admin/{channel}/my-channel/playlist/{playlistItem}', [AdminChannelController::class, 'removeMyChannelPlaylistItem'])->name('channels.my-channel.playlist.destroy');
         Route::post('/channels/admin/{channel}/my-channel/playlist/reorder', [AdminChannelController::class, 'reorderMyChannelPlaylist'])->name('channels.my-channel.playlist.reorder');
         Route::post('/channels/admin/{channel}/my-channel/playlist/refresh', [AdminChannelController::class, 'refreshMyChannelPlaylist'])->name('channels.my-channel.playlist.refresh');
+        Route::post('/channels/admin/{channel}/my-channel/playlist/{playlistItem}/play', [AdminChannelController::class, 'playFromPlaylistItem'])->name('channels.my-channel.playlist.play');
         Route::get('/channels/admin/{channel}/my-channel/overlay-preview', [AdminChannelController::class, 'overlayPreviewVideo'])->name('channels.my-channel.overlay-preview');
 
         // ─── My Channel Settings API ────────────────────────────────────────

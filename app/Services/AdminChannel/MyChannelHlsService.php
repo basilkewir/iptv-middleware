@@ -106,7 +106,7 @@ class MyChannelHlsService
         $this->playlistSize    = max(1, (int) config('playout.playlist_size', 18));
     }
 
-    public function start(MyChannelBroadcast $broadcast): bool
+    public function start(MyChannelBroadcast $broadcast, ?int $startContentId = null): bool
     {
         $channel = $broadcast->channel;
 
@@ -140,6 +140,13 @@ class MyChannelHlsService
         }
 
         $playlist = $this->resolvePlaylist($channel);
+
+        // "Play from here": rotate the loop so the chosen item is first. The
+        // concat is a seamless loop, so everything after it plays in order and
+        // wraps back — the playlist itself is never reordered in the database.
+        if ($startContentId) {
+            $playlist = $this->rotateToContent($playlist, $startContentId);
+        }
 
         if ($playlist->isEmpty()) {
             $broadcast->update(['status' => 'error', 'error_message' => 'No playable content in playlist']);
@@ -1490,6 +1497,67 @@ BASH;
      *
      * @return array{changed: bool, files: int, excluded: array} refresh outcome for the caller to log
      */
+    /**
+     * Rotate the playlist so the given content plays first. The playout is a
+     * seamless loop, so this is "start here and keep going" without ever
+     * reordering what the operator saved in the database.
+     */
+    private function rotateToContent(Collection $playlist, int $contentId): Collection
+    {
+        $items = $playlist->values();
+
+        foreach ($items as $i => $item) {
+            if ((int) $item->id === $contentId) {
+                return $items->slice($i)->concat($items->slice(0, $i))->values();
+            }
+        }
+
+        return $playlist;
+    }
+
+    /**
+     * Jump to a specific playlist item on a channel that is already live.
+     *
+     * Stage 1 restarts at the top of the concat list whenever it respawns, so
+     * rewriting concat rotated to the chosen item and signalling the reload
+     * makes it start playing there immediately — no full broadcast restart and
+     * no loss of the running segment numbering.
+     */
+    public function playFrom(AdminChannel $channel, int $contentId): array
+    {
+        $streamDir  = $this->streamDir($channel);
+        $concatPath = "{$streamDir}/concat.txt";
+
+        if (! $this->isRunning($channel)) {
+            return ['changed' => false, 'reason' => 'not-running', 'files' => 0, 'excluded' => []];
+        }
+
+        $playlist = $this->rotateToContent($this->resolvePlaylist($channel), $contentId);
+        $excluded = [];
+        $files    = $this->collectFiles($playlist, $channel, $excluded);
+
+        if (empty($files)) {
+            return ['changed' => false, 'reason' => 'not-prepared', 'files' => 0, 'excluded' => $excluded];
+        }
+
+        $desired = $this->concatContent($files);
+
+        if ((string) @file_get_contents($concatPath) === $desired) {
+            return ['changed' => false, 'reason' => 'already-playing', 'files' => count($files), 'excluded' => $excluded];
+        }
+
+        File::put($concatPath, $desired);
+        @touch("{$streamDir}/.reload-stage1");
+
+        Log::info('My channel jumped to playlist item', [
+            'channel_id' => $channel->id,
+            'content_id' => $contentId,
+            'files'      => count($files),
+        ]);
+
+        return ['changed' => true, 'files' => count($files), 'excluded' => $excluded];
+    }
+
     public function refreshPlaylist(AdminChannel $channel): array
     {
         $streamDir  = "{$this->streamDir($channel)}";

@@ -1610,6 +1610,13 @@ class AdminChannelController extends Controller
     {
         $settings = MyChannelSetting::firstOrNew(['channel_id' => $channel->id]);
 
+        // Optional "start playing from this item": the loop is rotated so the
+        // chosen media plays first, then continues in playlist order.
+        $request->validate([
+            'start_content_id' => 'nullable|integer|min:1',
+        ]);
+        $startContentId = $request->input('start_content_id') ? (int) $request->input('start_content_id') : null;
+
         $sessionId = StrHelper::uuid();
 
         $broadcast = MyChannelBroadcast::create([
@@ -1622,7 +1629,7 @@ class AdminChannelController extends Controller
         ]);
 
         $hlsService = app(MyChannelHlsService::class);
-        $started = $hlsService->start($broadcast);
+        $started = $hlsService->start($broadcast, $startContentId);
 
         if (! $started) {
             return response()->json([
@@ -1632,6 +1639,41 @@ class AdminChannelController extends Controller
         }
 
         return response()->json(['broadcast' => $broadcast->fresh(), 'message' => 'Broadcast started']);
+    }
+
+    /**
+     * "Play from here" for one playlist item.
+     *
+     * Offline → the broadcast is started rotated to that media. Already live →
+     * the running loop is rotated and Stage 1 reloads on it, so it jumps
+     * straight to the chosen item without tearing the broadcast down.
+     */
+    public function playFromPlaylistItem(Request $request, AdminChannel $channel, MyChannelPlaylist $playlistItem): JsonResponse
+    {
+        abort_unless((int) $playlistItem->channel_id === (int) $channel->id, 404);
+
+        $contentId = (int) $playlistItem->content_id;
+        $hls       = app(MyChannelHlsService::class);
+
+        if (! $this->isChannelLive($channel)) {
+            $request->merge(['start_content_id' => $contentId]);
+
+            return $this->startMyChannelBroadcast($request, $channel);
+        }
+
+        $result = $hls->playFrom($channel, $contentId);
+
+        return response()->json([
+            'message' => $result['changed']
+                ? 'Playing from the selected media'
+                : ($result['reason'] === 'already-playing'
+                    ? 'That media is already on air'
+                    : 'Selected media is still preparing'),
+            'changed'  => $result['changed'],
+            'files'    => $result['files'],
+            'excluded' => $result['excluded'] ?? [],
+            'live'     => true,
+        ]);
     }
 
     public function stopMyChannelBroadcast(Request $request, AdminChannel $channel): JsonResponse
