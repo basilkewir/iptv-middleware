@@ -1604,6 +1604,58 @@ BASH;
     }
 
     /**
+     * Best video to preview overlays against.
+     *
+     * A prepared intermediate, never the live HLS: the segments already carry
+     * the burned-in overlays, so previewing them meant the UI drew a second
+     * set on top and nothing lined up. Prepared files are also padded to the
+     * channel's exact output size, so overlay coordinates map 1:1 onto what
+     * actually airs — unlike the raw sources, whose aspect ratios vary.
+     */
+    public function previewVideoPath(AdminChannel $channel): ?string
+    {
+        $slug = $channel->channel_slug;
+        $candidates = [];
+
+        foreach ((array) glob("{$this->normalizedRoot}/{$slug}/prepared_*.mp4") as $path) {
+            $candidates[$path] = (int) @filesize($path);
+        }
+
+        if (! $candidates) {
+            return null;
+        }
+
+        // Prefer what is on air, but only when it is a reasonable size —
+        // previewing a two-hour movie would pull gigabytes through the
+        // browser just to loop a background. Anything bigger falls through
+        // to the smallest prepared clip, which is equally good for lining up
+        // overlays because every prepared file is padded to the same output
+        // geometry.
+        try {
+            $now = $this->nowPlaying($channel);
+        } catch (\Throwable $e) {
+            $now = null;
+        }
+
+        if ($now) {
+            $path = $this->preparedPathFor($slug, (int) $now['content_id']);
+            if (isset($candidates[$path]) && $candidates[$path] > 0 && $candidates[$path] < 64 * 1024 * 1024) {
+                return $path;
+            }
+        }
+
+        asort($candidates);
+
+        foreach ($candidates as $path => $size) {
+            if ($size > 0) {
+                return $path;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Which playlist item the live playout is on RIGHT NOW.
      *
      * Deterministic because Stage 1 plays the concat list back-to-back and loops

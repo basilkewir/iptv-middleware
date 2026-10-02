@@ -28,6 +28,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str as StrHelper;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use App\Services\AdminChannel\AdminChannelService;
 use App\Services\AdminChannel\MyChannelHlsService;
 use Illuminate\Validation\ValidationException;
@@ -1549,6 +1550,26 @@ class AdminChannelController extends Controller
         }
 
         return response()->json(['channel' => $channel->fresh()]);
+    }
+
+    /**
+     * Overlay editor preview source: a prepared intermediate, served WITHOUT
+     * the burned-in overlays so the editor's own overlays are the only ones on
+     * screen. Prepared media is already padded to the channel's output size,
+     * so the preview geometry matches what airs.
+     */
+    public function overlayPreviewVideo(Request $request, AdminChannel $channel): BinaryFileResponse
+    {
+        $path = app(MyChannelHlsService::class)->previewVideoPath($channel);
+
+        if (! $path || ! is_file($path)) {
+            abort(404, 'No prepared media to preview yet');
+        }
+
+        return response()->file($path, [
+            'Content-Type'  => 'video/mp4',
+            'Cache-Control' => 'private, max-age=60',
+        ]);
     }
 
     public function getContentUploadProgress(Request $request, AdminChannel $channel): JsonResponse

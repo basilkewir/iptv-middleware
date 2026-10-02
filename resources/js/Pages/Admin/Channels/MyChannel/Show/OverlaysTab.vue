@@ -285,10 +285,15 @@
     <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
       <div class="px-5 py-3 border-b border-gray-700 flex items-center justify-between">
         <span class="text-white font-medium text-sm">Live Preview</span>
-        <span class="text-xs text-gray-500 font-mono truncate max-w-xs">{{ streamUrl }}</span>
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="text-[10px] uppercase tracking-wide text-gray-500 shrink-0">output {{ previewResolution }}</span>
+          <span class="text-[10px] uppercase tracking-wide text-indigo-300/80 shrink-0">clean feed · overlays drawn here</span>
+        </div>
       </div>
-      <div class="relative bg-black" style="aspect-ratio:16/9;" ref="previewContainer">
-        <video ref="videoEl" class="w-full h-full object-fill" muted autoplay playsinline></video>
+      <!-- The canvas is the channel's output ratio, not a generic 16:9, so
+           every percentage below lines up with what actually airs. -->
+      <div class="relative bg-black" :style="{ aspectRatio: previewAspect }" ref="previewContainer">
+        <video ref="videoEl" class="w-full h-full object-fill" muted autoplay loop playsinline></video>
 
         <!-- Logo overlay preview -->
         <div v-if="f.enable_overlay_logo && (logoPreview || f.logo_url)"
@@ -388,13 +393,29 @@ const currentTime = ref('')
 const previewSize = ref({ width: 800, height: 450 })
 const logoNaturalAspect = ref(1)
 let clockInterval = null
-let hlsInstance = null
 let resizeObserver = null
 
-// Stream URL for this channel
-const streamUrl = computed(() => {
+// Clean preview source: a prepared intermediate WITHOUT the burned-in
+// overlays, so the editor's own overlays are the only ones on screen. The
+// live HLS already carries the rendered overlays, which is why editing used
+// to look like a double exposure.
+const previewVideoUrl = computed(() => {
   const slug = props.channel?.channel_slug
-  return `${window.location.origin}/hls/admin-channel-${slug}/index.m3u8`
+  return slug ? `/admin/channels/admin/${slug}/my-channel/overlay-preview` : ''
+})
+
+// The preview canvas must match the channel's OUTPUT resolution: every
+// overlay position and size is a percentage of it, so a hard-coded 16:9 box
+// only lined up by accident. Prepared media is padded to this exact size,
+// which is why the preview and the air output now agree.
+const previewAspect = computed(() => {
+  const m = String(props.channel?.output_resolution || '').match(/(\d+)\s*[x*×]\s*(\d+)/i)
+  return m ? `${m[1]} / ${m[2]}` : '16 / 9'
+})
+
+const previewResolution = computed(() => {
+  const res = String(props.channel?.output_resolution || '1280x720')
+  return res.replace(/[x*×]/i, '×')
 })
 
 // Logo overlay CSS position based on X/Y percentages (matches FFmpeg top-left anchor)
@@ -462,52 +483,20 @@ const updateClock = () => {
   }
 }
 
-const initHls = async () => {
-  if (!videoEl.value) return
-  const url = streamUrl.value
-
-  // Try native HLS first (Safari)
-  if (videoEl.value.canPlayType('application/vnd.apple.mpegurl')) {
-    videoEl.value.src = url
-    videoEl.value.play().catch(() => {})
-    return
-  }
-
-  // Use hls.js if available
-  if (window.Hls && window.Hls.isSupported()) {
-    hlsInstance = new window.Hls({ enableWorker: false })
-    hlsInstance.loadSource(url)
-    hlsInstance.attachMedia(videoEl.value)
-    hlsInstance.on(window.Hls.Events.MANIFEST_PARSED, () => {
-      videoEl.value.play().catch(() => {})
-    })
-    return
-  }
-
-  // Dynamically load hls.js
-  try {
-    await new Promise((resolve, reject) => {
-      const s = document.createElement('script')
-      s.src = 'https://cdn.jsdelivr.net/npm/hls.js@latest/dist/hls.min.js'
-      s.onload = resolve
-      s.onerror = reject
-      document.head.appendChild(s)
-    })
-    if (window.Hls?.isSupported()) {
-      hlsInstance = new window.Hls({ enableWorker: false })
-      hlsInstance.loadSource(url)
-      hlsInstance.attachMedia(videoEl.value)
-      hlsInstance.on(window.Hls.Events.MANIFEST_PARSED, () => {
-        videoEl.value.play().catch(() => {})
-      })
-    }
-  } catch (e) {
-    // hls.js failed to load — preview will be blank but controls still work
-  }
+/**
+ * Start the clean preview. A plain <video> pointing at the prepared
+ * intermediate — no HLS, no hls.js, and above all no burned-in overlays, so
+ * the only overlays visible are the ones this tab is editing.
+ */
+const initPreview = () => {
+  if (!videoEl.value || !previewVideoUrl.value) return
+  videoEl.value.src = previewVideoUrl.value
+  videoEl.value.loop = true
+  videoEl.value.play().catch(() => {})
 }
 
 onMounted(() => {
-  initHls()
+  initPreview()
   updateClock()
   clockInterval = setInterval(updateClock, 1000)
 
@@ -526,9 +515,10 @@ onUnmounted(() => {
   clearInterval(clockInterval)
   resizeObserver?.disconnect()
   resizeObserver = null
-  if (hlsInstance) {
-    hlsInstance.destroy()
-    hlsInstance = null
+  if (videoEl.value) {
+    videoEl.value.pause()
+    videoEl.value.removeAttribute('src')
+    videoEl.value.load()
   }
 })
 
