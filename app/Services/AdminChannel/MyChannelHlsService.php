@@ -1855,14 +1855,27 @@ BASH;
         $this->writeStage2Script($streamDir, $channel, $this->resolveCanvasMode($channel));
 
         $pid = (int) trim((string) @file_get_contents("{$streamDir}/stage2.pid"));
+        $dir = escapeshellarg($streamDir);
 
-        if ($pid <= 0) {
-            return false;
+        // TERM the wrapper AND the encoder it spawned. Killing only the
+        // wrapper orphaned its ffmpeg, so every restart added one more
+        // encoder writing the same playlist and segments — the media
+        // sequence jumped around and ExoPlayer reported PlaylistStuck.
+        // The pattern is scoped to this channel's segment path, so Stage 1
+        // (whose output is the FIFO, not seg_*.ts) is never touched.
+        if ($pid > 0) {
+            @exec("kill -TERM {$pid} 2>/dev/null");
         }
+        @exec("pkill -TERM -f \"{$streamDir}/seg_\" 2>/dev/null");
 
-        @exec("kill -TERM {$pid} 2>/dev/null");
+        usleep(500000);
 
-        return true;
+        if ($pid > 0) {
+            @exec("kill -KILL {$pid} 2>/dev/null");
+        }
+        @exec("pkill -KILL -f \"{$streamDir}/seg_\" 2>/dev/null");
+
+        return $pid > 0;
     }
 
     /** Capped so one channel can never monopolise a box shared with Flussonic. */
@@ -2044,7 +2057,15 @@ BASH;
 
     private function hexToFfmpegColor(string $hex): string
     {
-        $hex = ltrim($hex, '#');
+        $hex = ltrim(trim((string) $hex), '#');
+
+        // Never hand ffmpeg a colour it cannot parse: a stray word here made
+        // drawbox fail with "Invalid argument" and took the whole encoder
+        // down. Anything that is not plain hex falls back to black.
+        if (! preg_match('/^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/', $hex)) {
+            $hex = '000000';
+        }
+
         if (strlen($hex) === 8) {
             $alpha = round(hexdec(substr($hex, 6, 2)) / 255, 2);
             return '0x' . strtoupper(substr($hex, 0, 6)) . '@' . $alpha;
