@@ -64,9 +64,10 @@ class MyChannelHlsService
      */
     private const GRAPH_FIXED_OVERLAY_FIELDS = [
         'enable_ticker', 'ticker_color', 'ticker_background',
-        'ticker_speed', 'ticker_direction',
+        'ticker_speed', 'ticker_direction', 'ticker_font_size',
         'enable_overlay_clock', 'overlay_clock_position',
         'overlay_clock_x', 'overlay_clock_y', 'overlay_clock_format',
+        'overlay_clock_font_size', 'overlay_clock_color', 'overlay_clock_background',
     ];
 
     /**
@@ -1943,7 +1944,7 @@ BASH;
             $tickerFile = "{$this->ramRoot}/{$slug}/ticker.txt";
             $color      = ltrim($channel->ticker_color ?: '#ffffff', '#');
             $bgColor    = $this->hexToFfmpegColor($channel->ticker_background ?: '#000000cc');
-            $fontsize   = max(16, (int) round($height * 0.035));
+            $fontsize   = $this->overlayFontPixels($height * 0.035, $channel->ticker_font_size);
             $barH       = $fontsize + 12;
             $yPos       = $height - $barH;
             $speed      = (int) round(80 + (((float) $channel->ticker_speed - 10) / 90) * 320);
@@ -1961,7 +1962,9 @@ BASH;
         // ── Clock — strftime, always live ────────────────────────────────────
         if ($channel->enable_overlay_clock) {
             $timeExpr = $this->clockFormatToFfmpeg($channel->overlay_clock_format ?: 'HH:MM:SS');
-            $fontsize  = max(14, (int) round($height * 0.03));
+            $fontsize = $this->overlayFontPixels($height * 0.03, $channel->overlay_clock_font_size);
+            $fontColor = $this->toFfmpegColor($channel->overlay_clock_color, 'white');
+            $boxColor  = $this->hexToFfmpegColor($channel->overlay_clock_background ?: '#00000080');
             $pad       = 8;
             [$cX, $cY] = $this->resolveOverlayXY(
                 $channel->overlay_clock_position,
@@ -1970,9 +1973,9 @@ BASH;
                 $width, $height, $fontsize * 9, $fontsize + ($pad * 2)
             );
 
-            $filters[] = "{$lastVideo}drawtext=expansion=strftime:text='{$timeExpr}':fontcolor=white" .
-                         ":fontsize={$fontsize}:box=1:boxcolor=black@0.5:boxborderw={$pad}:x={$cX}:y={$cY}[vclock]";
-            $lastVideo  = '[vclock]';
+            $filters[] = "{$lastVideo}drawtext=expansion=strftime:text='{$timeExpr}':fontcolor={$fontColor}" .
+                         ":fontsize={$fontsize}:box=1:boxcolor={$boxColor}:boxborderw={$pad}:x={$cX}:y={$cY}[vclock]";
+            $lastVideo = '[vclock]';
         }
 
         $filters[] = "{$lastVideo}format=yuv420p[vout]";
@@ -2030,6 +2033,42 @@ BASH;
             return '0x' . strtoupper(substr($hex, 0, 6)) . '@' . $alpha;
         }
         return '0x' . strtoupper(substr($hex, 0, 6));
+    }
+
+    /**
+     * Turn an operator-supplied colour into something drawtext accepts: a
+     * named colour passes through, anything hex-shaped becomes 0xRRGGBB.
+     */
+    private function toFfmpegColor(?string $value, string $fallback): string
+    {
+        $value = trim((string) $value);
+
+        if ($value === '') {
+            $value = $fallback;
+        }
+
+        if (preg_match('/^#?[0-9a-fA-F]{6}$/', $value)) {
+            return '0x' . strtoupper(ltrim($value, '#'));
+        }
+
+        return $value;
+    }
+
+    /**
+     * Scale the historic default font size by the operator's percentage, so
+     * 100 (or NULL) keeps the on-air look exactly as it was and 200 doubles
+     * the text. Meaningful at any output resolution because the default is
+     * itself derived from the frame height.
+     */
+    private function overlayFontPixels(float $defaultPx, mixed $percent): int
+    {
+        $pct = (int) ($percent ?? 100);
+
+        if ($pct <= 0) {
+            $pct = 100;
+        }
+
+        return max(10, (int) round($defaultPx * $pct / 100.0));
     }
 
     private function clockFormatToFfmpeg(string $fmt): string

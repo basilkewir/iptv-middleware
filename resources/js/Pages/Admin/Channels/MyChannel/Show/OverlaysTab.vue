@@ -12,51 +12,12 @@
 
     <div v-if="error" class="px-4 py-3 bg-red-500/20 border border-red-500/40 rounded-lg text-red-400 text-sm">{{ error }}</div>
 
-    <!-- Live Stream Preview -->
-    <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
-      <div class="px-5 py-3 border-b border-gray-700 flex items-center justify-between">
-        <span class="text-white font-medium text-sm">Live Preview</span>
-        <span class="text-xs text-gray-500 font-mono truncate max-w-xs">{{ streamUrl }}</span>
-      </div>
-      <div class="relative bg-black" style="aspect-ratio:16/9;" ref="previewContainer">
-        <video ref="videoEl" class="w-full h-full object-fill" muted autoplay playsinline></video>
 
-        <!-- Logo overlay preview -->
-        <div v-if="f.enable_overlay_logo && (logoPreview || f.logo_url)"
-          class="absolute pointer-events-none"
-          :style="logoOverlayStyle">
-          <img :src="logoPreview || f.logo_url"
-            @load="onLogoLoad"
-            :style="{ opacity: f.overlay_logo_opacity, width: logoSizePx + 'px' }"
-            class="object-contain block" />
-        </div>
+    <!-- Two columns: controls scroll, the preview stays pinned so it is
+         never off-screen while editing. -->
+    <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_420px] gap-6 items-start">
 
-        <!-- Ticker overlay preview -->
-        <div v-if="f.enable_ticker && f.ticker_text"
-          class="absolute bottom-0 left-0 right-0 h-8 overflow-hidden flex items-center"
-          :style="{ background: f.ticker_background || '#000000cc' }">
-          <span class="ticker-preview whitespace-nowrap text-sm font-medium px-2"
-            :style="{ color: f.ticker_color || '#ffffff', animationDuration: tickerDuration }">
-            {{ f.ticker_text }}
-          </span>
-        </div>
-
-        <!-- Clock overlay preview -->
-        <div v-if="f.enable_overlay_clock"
-          ref="clockEl"
-          class="absolute text-white font-mono bg-black/50 px-2 py-1 rounded"
-          :style="clockPositionStyle">
-          {{ currentTime }}
-        </div>
-
-        <!-- Drag hint -->
-        <div v-if="f.enable_overlay_logo && (logoPreview || f.logo_url)"
-          class="absolute bottom-2 right-2 text-xs text-gray-400 bg-black/60 px-2 py-1 rounded">
-          Use X/Y sliders to position
-        </div>
-      </div>
-    </div>
-
+      <div class="space-y-6 order-2 xl:order-1">
     <!-- Ticker -->
     <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
       <div class="flex items-center justify-between px-5 py-4 border-b border-gray-700">
@@ -74,6 +35,13 @@
             placeholder="Breaking News • Now showing: {item}"></textarea>
         </div>
         <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">Font Size ({{ fontPct(f.ticker_font_size) }}%)</label>
+            <input v-model.number="f.ticker_font_size" type="range" min="40" max="300" class="w-full accent-indigo-500" />
+            <div class="flex justify-between text-[10px] text-gray-500 mt-0.5">
+              <span>smaller</span><span>default</span><span>larger</span>
+            </div>
+          </div>
           <div>
             <label class="block text-xs text-gray-400 mb-1">Speed ({{ f.ticker_speed }})</label>
             <input v-model.number="f.ticker_speed" type="range" min="10" max="100" class="w-full accent-indigo-500" />
@@ -244,6 +212,32 @@
               <option value="YYYY-MM-DD">YYYY-MM-DD</option>
             </select>
           </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">Font Size ({{ fontPct(f.overlay_clock_font_size) }}%)</label>
+            <input v-model.number="f.overlay_clock_font_size" type="range" min="40" max="300" class="w-full accent-indigo-500" />
+            <div class="flex justify-between text-[10px] text-gray-500 mt-0.5">
+              <span>smaller</span><span>default</span><span>larger</span>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">Text Color</label>
+            <div class="flex items-center gap-2">
+              <input type="color" :value="toHex(f.overlay_clock_color || '#ffffff')" @input="f.overlay_clock_color = $event.target.value"
+                class="w-10 h-9 rounded cursor-pointer bg-gray-700 border border-gray-600 p-0.5" />
+              <input v-model="f.overlay_clock_color" type="text" maxlength="32"
+                class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm font-mono" />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-gray-400 mb-1">Background</label>
+            <div class="flex items-center gap-2">
+              <input type="color" :value="toHex(f.overlay_clock_background || '#000000')" @input="f.overlay_clock_background = withAlpha($event.target.value, 0.5)"
+                class="w-10 h-9 rounded cursor-pointer bg-gray-700 border border-gray-600 p-0.5" />
+              <input v-model="f.overlay_clock_background" type="text" maxlength="64"
+                class="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm font-mono" />
+            </div>
+            <p class="text-[10px] text-gray-500 mt-1">Hex, or hex + alpha like #000000cc</p>
+          </div>
         </div>
         <div>
           <p class="text-xs text-gray-400 mb-1">Custom X/Y (% from top-left corner)</p>
@@ -261,6 +255,64 @@
                 class="mt-1 w-full px-3 py-1.5 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm" />
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+      </div>
+
+      <div class="order-1 xl:order-2">
+        <div class="xl:sticky xl:top-4 space-y-3">
+          <div class="flex items-center justify-between px-1">
+            <span class="text-white font-medium text-sm">Live Preview</span>
+            <span class="text-[10px] uppercase tracking-wide text-gray-500">stays visible</span>
+          </div>
+    <!-- Live Stream Preview -->
+    <div class="bg-gray-800 rounded-xl border border-gray-700 overflow-hidden">
+      <div class="px-5 py-3 border-b border-gray-700 flex items-center justify-between">
+        <span class="text-white font-medium text-sm">Live Preview</span>
+        <span class="text-xs text-gray-500 font-mono truncate max-w-xs">{{ streamUrl }}</span>
+      </div>
+      <div class="relative bg-black" style="aspect-ratio:16/9;" ref="previewContainer">
+        <video ref="videoEl" class="w-full h-full object-fill" muted autoplay playsinline></video>
+
+        <!-- Logo overlay preview -->
+        <div v-if="f.enable_overlay_logo && (logoPreview || f.logo_url)"
+          class="absolute pointer-events-none"
+          :style="logoOverlayStyle">
+          <img :src="logoPreview || f.logo_url"
+            @load="onLogoLoad"
+            :style="{ opacity: f.overlay_logo_opacity, width: logoSizePx + 'px' }"
+            class="object-contain block" />
+        </div>
+
+        <!-- Ticker overlay preview -->
+        <div v-if="f.enable_ticker && f.ticker_text"
+          class="absolute bottom-0 left-0 right-0 h-8 overflow-hidden flex items-center"
+          :style="{ background: f.ticker_background || '#000000cc' }">
+          <span class="ticker-preview whitespace-nowrap font-medium px-2"
+            :style="{ color: f.ticker_color || '#ffffff', animationDuration: tickerDuration, fontSize: previewFontPx(f.ticker_font_size, 16) + 'px' }">
+            {{ f.ticker_text }}
+          </span>
+        </div>
+
+        <!-- Clock overlay preview -->
+        <div v-if="f.enable_overlay_clock"
+          ref="clockEl"
+          class="absolute font-mono px-2 py-1 rounded"
+          :style="{ ...clockPositionStyle,
+                    color: f.overlay_clock_color || '#ffffff',
+                    background: f.overlay_clock_background || '#000000cc',
+                    fontSize: previewFontPx(f.overlay_clock_font_size, 16) + 'px' }">
+          {{ currentTime }}
+        </div>
+
+        <!-- Drag hint -->
+        <div v-if="f.enable_overlay_logo && (logoPreview || f.logo_url)"
+          class="absolute bottom-2 right-2 text-xs text-gray-400 bg-black/60 px-2 py-1 rounded">
+          Use X/Y sliders to position
+        </div>
+      </div>
+    </div>
         </div>
       </div>
     </div>
@@ -288,6 +340,7 @@ const f = ref({
   ticker_direction:       props.channel?.ticker_direction       ?? 'left',
   ticker_color:           props.channel?.ticker_color           ?? '#ffffff',
   ticker_background:      props.channel?.ticker_background      ?? '#000000',
+  ticker_font_size:       props.channel?.ticker_font_size       ?? 100,
   enable_overlay_logo:    props.channel?.enable_overlay_logo    ?? false,
   logo_url:               props.channel?.logo_url               ?? '',
   overlay_logo_position:  props.channel?.overlay_logo_position  ?? 'top-left',
@@ -303,6 +356,9 @@ const f = ref({
   overlay_clock_x:        props.channel?.overlay_clock_x        ?? 2,
   overlay_clock_y:        props.channel?.overlay_clock_y        ?? 2,
   overlay_clock_format:   props.channel?.overlay_clock_format   ?? 'HH:MM:SS',
+  overlay_clock_font_size: props.channel?.overlay_clock_font_size ?? 100,
+  overlay_clock_color:    props.channel?.overlay_clock_color    ?? '#ffffff',
+  overlay_clock_background: props.channel?.overlay_clock_background ?? '#000000cc',
 })
 
 const saving = ref(false)
@@ -489,6 +545,24 @@ const onLogoFileChange = async (e) => {
     uploadingLogo.value = false
   }
 }
+
+// ── small colour / typography helpers shared by the form ──────────────────
+
+/** NULL/0 means "use the historic default", so the label reads 100%. */
+const fontPct = (v) => (v == null || v === '' ? 100 : Number(v))
+
+/** Colour input needs #rrggbb; stored values may be a name or carry alpha. */
+const toHex = (v) => {
+  const m = String(v || '').trim().match(/^#?([0-9a-fA-F]{6})/)
+  return m ? '#' + m[1].toLowerCase() : '#ffffff'
+}
+
+/** Re-attach an alpha channel after the picker returns a bare hex. */
+const withAlpha = (hex, alpha) =>
+  toHex(hex) + Math.round(alpha * 255).toString(16).padStart(2, '0')
+
+/** Preview font size in px, mirroring the on-air percentage (100 = default). */
+const previewFontPx = (pct, base) => Math.max(8, Math.round(base * (fontPct(pct) / 100)))
 
 const saveOverlays = async () => {
   saving.value = true
