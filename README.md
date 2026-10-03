@@ -176,8 +176,58 @@ sudo iptv-playout-ctl {start|stop|restart|status|show} <channel-slug>
 The smoke test requires Linux, FFmpeg, FFprobe, PHP and Python 3. It renders
 five visually distinct clips, including a one-second item, and verifies each
 reaches HLS output while the clock and ticker overlays are enabled. It also
-checks that a canvas update restarts only Stage 2 and respects HLS timestamp
+checks coordinated producer/encoder reloads and respects HLS timestamp
 discontinuities during segment validation.
+
+### Automatic deployment to installed servers
+
+Pushing to `main` runs the playout regression tests and builds a production
+release, including Composer dependencies and frontend assets. It deploys only
+to explicitly registered Linux self-hosted runners whose configured app directory
+contains an installed Laravel stack, `.env`, prepared HLS storage, an active
+PHP-FPM service, and an active queue worker. Servers that do not meet these
+conditions are reported as skipped. Live FFmpeg playout processes are not
+restarted.
+
+For each installed server:
+
+1. Install a dedicated GitHub Actions self-hosted runner for this repository.
+   Give it the unique label used for that server below. Run the runner as the
+   app deployment user (not root), and restrict repository Actions permissions
+   and runner access to trusted maintainers.
+2. Ensure that runner user can write to the app directory, `app/`,
+   `bootstrap/cache/`, and `storage/`, and can run the following service
+   commands without a password: reload the active `php*-fpm` unit, and restart
+   either `middleware-queue.service` or Supervisor's `iptv-queue`. For example,
+   a systemd-queue server can grant only the required actions in a validated
+   sudoers file (replace `iptv-deploy` and the PHP version to match that host):
+
+   ```sudoers
+   iptv-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl reload php8.3-fpm.service
+   iptv-deploy ALL=(root) NOPASSWD: /usr/bin/systemctl restart middleware-queue.service
+   ```
+
+   A Supervisor-managed queue instead needs narrowly scoped permissions for
+   `supervisorctl status iptv-queue` and `supervisorctl restart iptv-queue`.
+   Validate the sudoers file with `visudo -cf` before installing it.
+3. In repository **Settings → Secrets and variables → Actions → Variables**,
+   add `DEPLOY_TARGETS` as a JSON array. Each entry maps a unique runner label
+   to its existing app directory:
+
+   ```json
+   [
+     {"runner": "iptv-guestvue", "app_dir": "/opt/middleware"},
+     {"runner": "iptv-server-2", "app_dir": "/opt/iptv-middleware"}
+   ]
+   ```
+
+The runner label must be configured on that server's self-hosted runner. The
+deployment preserves `.env`, user uploads, HLS files, and other `storage/`
+contents; it applies pending migrations, clears Laravel's optimized caches,
+restarts the queue worker, and reloads PHP-FPM. The package already contains
+production PHP and frontend dependencies, so Composer and Node.js are not
+required on the installed server. If `DEPLOY_TARGETS` is empty, CI and release
+builds still run but no server deployment is attempted.
 
 ## UDP / Multicast
 
