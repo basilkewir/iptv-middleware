@@ -156,6 +156,10 @@ rsync -a \
     --exclude='/bootstrap/cache' \
     "$release/" "$APP_DIR/"
 
+# A cached package manifest can reference development-only providers left by a
+# previous install. Remove manifests before Artisan boots with --no-dev vendor.
+rm -f "$APP_DIR/bootstrap/cache/packages.php" "$APP_DIR/bootstrap/cache/services.php"
+
 cd "$APP_DIR"
 php artisan migrate --force --no-interaction
 php artisan optimize:clear
