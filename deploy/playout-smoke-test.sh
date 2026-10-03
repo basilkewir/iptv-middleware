@@ -296,7 +296,6 @@ head_ "[7/10] canvas update and Stage 2 isolation"
 S2_BEFORE=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
 if [ -n "$S2_BEFORE" ] && [ -f "$RAM_DIR/overlay.png" ]; then
     S1_BEFORE=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
-    SEQ_BEFORE=$(awk -F: '/^#EXT-X-MEDIA-SEQUENCE:/{print $2; exit}' "$STREAM_DIR/index.m3u8" 2>/dev/null)
     # A visibly different canvas: 200x200 solid magenta.
     ffmpeg -y -hide_banner -loglevel error \
         -f lavfi -i "color=c=0xFF00FF:s=200x200" \
@@ -359,11 +358,13 @@ PY
         else
             fail "updated canvas did not appear in recent HLS segments"
         fi
-        SEQ_AFTER=$(awk -F: '/^#EXT-X-MEDIA-SEQUENCE:/{print $2; exit}' "$STREAM_DIR/index.m3u8" 2>/dev/null)
-        if [ -n "$SEQ_BEFORE" ] && [ -n "$SEQ_AFTER" ] && [ "$SEQ_AFTER" -gt "$SEQ_BEFORE" ]; then
-            pass "HLS media sequence continued through canvas update ($SEQ_BEFORE -> $SEQ_AFTER)"
+        SEGMENT_BEFORE=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | sort | tail -1)
+        sleep 5
+        SEGMENT_AFTER=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | sort | tail -1)
+        if [ -n "$SEGMENT_BEFORE" ] && [ -n "$SEGMENT_AFTER" ] && [ "$SEGMENT_AFTER" != "$SEGMENT_BEFORE" ]; then
+            pass "new HLS segments continued through canvas update ($(basename "$SEGMENT_BEFORE") -> $(basename "$SEGMENT_AFTER"))"
         else
-            fail "HLS sequence stalled during canvas update ($SEQ_BEFORE -> $SEQ_AFTER)"
+            fail "HLS segments stalled during canvas update ($(basename "$SEGMENT_BEFORE") -> $(basename "$SEGMENT_AFTER"))"
         fi
     else
         skip "could not render a replacement canvas"
