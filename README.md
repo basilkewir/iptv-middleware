@@ -154,12 +154,15 @@ Every "My Channel" runs as two supervised FFmpeg processes connected by a FIFO:
 
 Because Stage 2 reads from a pipe, ticker text is re-read from disk every
 frame. Logo and watermark canvas changes restart Stage 2 so FFmpeg decodes the
-new image; Stage 1 keeps the playlist timeline running and HLS segments append
-to the existing manifest. Filtergraph changes also restart Stage 2 only.
+new image. Graph or canvas changes coordinate a fresh Stage 1 NUT header with
+Stage 2, keeping the channel supervisor alive and appending HLS segments to
+the existing manifest. The current playlist item is placed first for the
+reload.
 
 Playlist items can be categorized as **Program** or **Jingle**. Saving category
 changes updates the live overlay gate; all channel overlays are hidden while a
-jingle is on air, without restarting the Stage 1 playlist input.
+jingle is on air. Applying the category uses the coordinated reload above; it
+does not stop the broadcast service or reset the HLS manifest.
 
 ```bash
 # Start / stop / restart a channel's playout (privileged helper, no shell)

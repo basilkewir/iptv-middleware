@@ -37,9 +37,9 @@ use Illuminate\Support\Facades\Storage;
  *    filtergraph and encoder never re-negotiate mid-stream.
  * 4. WRAPPER  — one supervisor holds the FIFO open RDWR (so neither stage can
  *    send the other EOF) and runs both stages in supervised loops. Stage 1 is
- *    restarted for playlist edits while Stage 2 keeps encoding; Stage 2 is
- *    restarted for encoder trouble while Stage 1 keeps playing. The HLS
- *    segment number always continues from what is on disk.
+ *    and Stage 2 are coordinated at a fresh NUT header for playlist or graph
+ *    changes. The supervisor stays up and the HLS segment number continues
+ *    from what is on disk.
  * 5. WATCHDOG — process death *and* freeze detection (stream stopped advancing)
  *    both trigger a restart; a broadcast only ends when the admin stops it.
  *    It also re-applies playlist edits that a live channel somehow missed, so
@@ -363,18 +363,17 @@ class MyChannelHlsService
     /**
      * Apply overlay changes to a live channel.
      *
-     * Never restarts Stage 1 (the playout / concat side), so the playlist
-     * timeline is untouched:
+     * Never stops the channel supervisor. Ticker-only edits are live; graph
+     * edits coordinate a producer/encoder reload at the current playlist item:
      *
      *   • ticker text      — ticker.txt, re-read every frame (reload=1)
      *   • logo & watermark — image, position, size, opacity and on/off are all
      *                        baked into the full-frame RGBA canvas. FFmpeg's
      *                        image2 loop retains its decoded packet, so apply
-     *                        the rewrite by restarting Stage 2 only.
+     *                        the rewrite by coordinating a fresh NUT header.
      *   • ticker styling / clock config — these are literals inside the
-     *                        filtergraph, so they need a Stage-2-only restart.
-     *                        Stage 1 keeps playing and the FIFO keeps the
-     *                        encoder fed, so the HLS playlist is never rebuilt.
+     *                        filtergraph, so they need a coordinated reload.
+     *                        The HLS playlist is appended, never rebuilt.
      */
     public function applyOverlayUpdate(AdminChannel $channel, array $changed): void
     {
@@ -417,8 +416,8 @@ class MyChannelHlsService
      * Does an overlay change require restarting Stage 2?
      *
      * Public and side-effect free so the contract can be asserted directly:
-     * ticker text changes are free, while filtergraph and canvas changes
-     * restart the encoder only — Stage 1 and the concat list are never touched.
+     * ticker text changes are free, while filtergraph and canvas changes need
+     * a coordinated restart at a fresh NUT header.
      */
     public function encoderRestartRequired(AdminChannel $channel, array $changed): bool
     {
@@ -962,7 +961,7 @@ class MyChannelHlsService
      *            an encoder restart so the new image is decoded (default).
      *   static — classic `-i overlay.png` with no loop: the canvas is decoded
      *            once and held for the life of Stage 2, so an overlay edit
-     *            needs an encoder restart (still never a Stage-1 restart).
+     *            needs a coordinated reload.
      *
      * Misconfiguration degrades to "overlay updates need a restart", never to
      * a broken stream.
@@ -1211,9 +1210,8 @@ class MyChannelHlsService
      * HEAD of its graph — before any overlay — so any PTS discontinuity that
      * survives Stage 1 can never reach the ticker, the clock or the encoder.
      *
-     * Playlist edits replace the NUT producer and coordinate a Stage 2 restart
-     * at the new NUT header; the HLS segment list is appended, never reset.
-     * Graph changes restart Stage 2 only while Stage 1 keeps feeding the FIFO.
+     * Playlist edits and graph changes replace the NUT producer and coordinate
+     * a Stage 2 restart at the new NUT header; the HLS segment list is appended.
      */
     private function writePlayoutScript(
         string $streamDir,
@@ -1538,6 +1536,28 @@ BASH;
     }
 
     /**
+     * Rotate the prepared concat entries to keep the live item at the head
+     * when a coordinated Stage 1/Stage 2 reload reopens the list.
+     *
+     * @param list<string> $files
+     * @return list<string>
+     */
+    private function rotateFilesToContent(array $files, int $contentId): array
+    {
+        foreach ($files as $index => $file) {
+            if (preg_match('/prepared_(\d+)\.mp4$/', $file, $match)
+                && (int) $match[1] === $contentId) {
+                return array_values(array_merge(
+                    array_slice($files, $index),
+                    array_slice($files, 0, $index)
+                ));
+            }
+        }
+
+        return $files;
+    }
+
+    /**
      * Jump to a specific playlist item on a channel that is already live.
      *
      * Stage 1 restarts at the top of the concat list whenever it respawns, so
@@ -1642,9 +1662,9 @@ BASH;
             $this->writeStage2Script($streamDir, $channel, $this->resolveCanvasMode($channel));
             @touch("{$streamDir}/.reload-stage1");
         } else {
-            // Category-only changes affect Stage 2's overlay gate, not the
-            // concat input. Rebuild/restart only the encoder so Stage 1 and
-            // the current media keep running without a playlist jump.
+            // Category-only changes alter the Stage 2 graph. Use the same
+            // coordinated NUT-header reload as other graph updates; restart
+            // at the current item without losing the HLS segment history.
             $this->restartEncoder($channel);
         }
 
@@ -2146,45 +2166,37 @@ BASH;
     }
 
     /**
-     * Restart Stage 2 only.
+     * Restart the encoder at a fresh NUT header without resetting the channel.
      *
-     * Stage 1 keeps feeding the FIFO throughout, so the playlist timeline and
-     * concat list are untouched and the HLS playlist is never rebuilt from
-     * zero — Stage 2 simply recomputes the next segment number from disk and
-     * appends with discont_start, exactly like a crash recovery.
+     * A Stage 2 process cannot safely reopen a live NUT FIFO in the middle of
+     * its stream; it needs Stage 1 to emit a new header. The supervisor
+     * coordinates both child restarts and appends HLS segments. Rotate the
+     * concat order first so the item currently on air remains first.
      */
     public function restartEncoder(AdminChannel $channel): bool
     {
         $streamDir = $this->streamDir($channel);
 
-        if (! File::isDirectory($streamDir)) {
+        if (! File::isDirectory($streamDir) || ! $this->isRunning($channel)) {
             return false;
         }
 
+        $concatPath = "{$streamDir}/concat.txt";
+        $files = $this->readConcatFiles($concatPath);
+        if ($files === []) {
+            return false;
+        }
+
+        $nowPlaying = $this->nowPlaying($channel);
+        if ($nowPlaying) {
+            $files = $this->rotateFilesToContent($files, (int) $nowPlaying['content_id']);
+        }
+
+        File::put($concatPath, $this->concatContent($files));
         $this->writeStage2Script($streamDir, $channel, $this->resolveCanvasMode($channel));
+        @touch("{$streamDir}/.reload-stage1");
 
-        $pid = (int) trim((string) @file_get_contents("{$streamDir}/stage2.pid"));
-        $dir = escapeshellarg($streamDir);
-
-        // TERM the wrapper AND the encoder it spawned. Killing only the
-        // wrapper orphaned its ffmpeg, so every restart added one more
-        // encoder writing the same playlist and segments — the media
-        // sequence jumped around and ExoPlayer reported PlaylistStuck.
-        // The pattern is scoped to this channel's segment path, so Stage 1
-        // (whose output is the FIFO, not seg_*.ts) is never touched.
-        if ($pid > 0) {
-            @exec("kill -TERM {$pid} 2>/dev/null");
-        }
-        @exec("pkill -TERM -f \"{$streamDir}/seg_\" 2>/dev/null");
-
-        usleep(500000);
-
-        if ($pid > 0) {
-            @exec("kill -KILL {$pid} 2>/dev/null");
-        }
-        @exec("pkill -KILL -f \"{$streamDir}/seg_\" 2>/dev/null");
-
-        return $pid > 0;
+        return true;
     }
 
     /** Capped so one channel can never monopolise a box shared with Flussonic. */

@@ -572,6 +572,68 @@ class MyChannelHlsServiceTest extends TestCase
         @rmdir($dir);
     }
 
+    public function test_encoder_restart_coordinates_a_fresh_header_at_the_current_item(): void
+    {
+        Storage::fake('public');
+
+        $channel = $this->persistChannel('encoder-coordinated-reload');
+        $first = $this->persistContent($channel, 1, 'first');
+        $current = $this->persistContent($channel, 2, 'currently on air');
+        $last = $this->persistContent($channel, 3, 'last');
+        foreach ([$first, $current, $last] as $content) {
+            $content->duration = 8;
+            $content->save();
+        }
+        MyChannelPlaylist::where('channel_id', $channel->id)
+            ->where('content_id', $current->id)
+            ->update(['category' => 'jingle']);
+
+        $files = [
+            $this->preparedFile($channel->channel_slug, $first->id),
+            $this->preparedFile($channel->channel_slug, $current->id),
+            $this->preparedFile($channel->channel_slug, $last->id),
+        ];
+        $streamDir = storage_path("app/streams/hls/admin-channel-{$channel->channel_slug}");
+        mkdir($streamDir, 0775, true);
+        $concatPath = "{$streamDir}/concat.txt";
+        file_put_contents($concatPath, $this->invoke('concatContent', $files));
+        $this->tempFiles[] = $concatPath;
+        $this->tempFiles[] = "{$streamDir}/.reload-stage1";
+        $this->tempFiles[] = "{$streamDir}/stage2.sh";
+        $this->tempFiles[] = "{$streamDir}/.overlay-schedule.sig";
+
+        $hls = new class extends MyChannelHlsService {
+            public int $currentContentId = 0;
+
+            public function isRunning(AdminChannel $channel): bool
+            {
+                return true;
+            }
+
+            public function nowPlaying(AdminChannel $channel): ?array
+            {
+                return [
+                    'content_id' => $this->currentContentId,
+                    'index' => 1,
+                    'item_elapsed' => 3,
+                    'item_duration' => 8,
+                ];
+            }
+        };
+        $hls->currentContentId = $current->id;
+
+        $this->assertTrue($hls->restartEncoder($channel));
+        $this->assertSame(
+            [$files[1], $files[2], $files[0]],
+            array_map(
+                fn ($line) => trim(substr($line, strlen('file ')), "'"),
+                file($concatPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES)
+            )
+        );
+        $this->assertFileExists("{$streamDir}/.reload-stage1");
+        $this->assertStringContainsString('enable=', (string) file_get_contents("{$streamDir}/stage2.sh"));
+    }
+
     public function test_refreshPlaylist_is_a_noop_when_the_channel_is_not_running(): void
     {
         $channel = new AdminChannel([

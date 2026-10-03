@@ -291,38 +291,44 @@ else
     tail -30 "$STREAM_DIR/ffmpeg.log" 2>/dev/null | sed 's/^/        /'
 fi
 
-# ── 7. Canvas update: restart only Stage 2 to decode the replacement PNG ────
-head_ "[7/10] canvas update and Stage 2 isolation"
+# ── 7. Canvas update: coordinated restart keeps the live item on top ────────
+head_ "[7/10] canvas update and coordinated reload"
 S2_BEFORE=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
 if [ -n "$S2_BEFORE" ] && [ -f "$RAM_DIR/overlay.png" ]; then
-    S1_BEFORE=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
+    S1_LOOP_BEFORE=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
+    S1_FFMPEG_BEFORE=$(cat "$STREAM_DIR/stage1.ffmpeg.pid" 2>/dev/null || echo "")
     # A visibly different canvas: 200x200 solid magenta.
     ffmpeg -y -hide_banner -loglevel error \
         -f lavfi -i "color=c=0xFF00FF:s=200x200" \
         -frames:v 1 -c:v png "$RAM_DIR/overlay.tmp.png" 2>/dev/null
     if [ -f "$RAM_DIR/overlay.tmp.png" ]; then
         mv -f "$RAM_DIR/overlay.tmp.png" "$RAM_DIR/overlay.png"
-        # image2 -loop 1 holds its decoded packet, so simulate the production
-        # update path: Stage 2 restarts, Stage 1 and its playlist stay intact.
-        kill -TERM "$S2_BEFORE" 2>/dev/null
+        # image2 -loop 1 holds its decoded packet. The production update path
+        # coordinates Stage 1 and Stage 2 at a fresh NUT header.
+        touch "$STREAM_DIR/.reload-stage1"
         deadline=$(( $(date +%s) + 45 ))
         S2_AFTER=""
+        S1_FFMPEG_AFTER=""
         while [ "$(date +%s)" -lt "$deadline" ]; do
             S2_AFTER=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
+            S1_FFMPEG_AFTER=$(cat "$STREAM_DIR/stage1.ffmpeg.pid" 2>/dev/null || echo "")
             [ -n "$S2_AFTER" ] && [ "$S2_AFTER" != "$S2_BEFORE" ] \
+                && [ -n "$S1_FFMPEG_AFTER" ] && [ "$S1_FFMPEG_AFTER" != "$S1_FFMPEG_BEFORE" ] \
                 && kill -0 "$S2_AFTER" 2>/dev/null && break
             sleep 1
         done
-        S1_AFTER=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
+        S1_LOOP_AFTER=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
         if [ -n "$S2_AFTER" ] && [ "$S2_AFTER" != "$S2_BEFORE" ] && kill -0 "$S2_AFTER" 2>/dev/null; then
-            pass "encoder relaunched to read updated canvas ($S2_BEFORE -> $S2_AFTER)"
+            pass "encoder relaunched at a fresh NUT header ($S2_BEFORE -> $S2_AFTER)"
         else
             fail "encoder did not relaunch for updated canvas"
         fi
-        if [ -n "$S1_BEFORE" ] && [ "$S1_AFTER" = "$S1_BEFORE" ] && kill -0 "$S1_AFTER" 2>/dev/null; then
-            pass "Stage 1 and playlist input stayed alive during canvas update ($S1_AFTER)"
+        if [ -n "$S1_LOOP_BEFORE" ] && [ "$S1_LOOP_AFTER" = "$S1_LOOP_BEFORE" ] \
+           && [ -n "$S1_FFMPEG_AFTER" ] && [ "$S1_FFMPEG_AFTER" != "$S1_FFMPEG_BEFORE" ] \
+           && kill -0 "$S1_LOOP_AFTER" 2>/dev/null; then
+            pass "supervisor preserved playlist loop and relaunched its producer ($S1_FFMPEG_BEFORE -> $S1_FFMPEG_AFTER)"
         else
-            fail "Stage 1 changed during canvas update ($S1_BEFORE -> $S1_AFTER)"
+            fail "coordinated Stage 1 producer reload failed ($S1_FFMPEG_BEFORE -> $S1_FFMPEG_AFTER)"
         fi
         sleep 5
         mapfile -t RECENT_SEGS < <(ls -1t "$STREAM_DIR"/seg_*.ts 2>/dev/null | head -5)
@@ -373,32 +379,47 @@ else
     skip "no overlay.png to rewrite"
 fi
 
-# ── 8. Stage-2-only restart: Stage 1 must survive ───────────────────────────
-head_ "[8/10] stage2-only restart isolation"
-S1_BEFORE=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
+# ── 8. Coordinated stage restart: loop supervisor and HLS must survive ──────
+head_ "[8/10] coordinated encoder recovery"
+S1_LOOP_BEFORE=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
+S1_FFMPEG_BEFORE=$(cat "$STREAM_DIR/stage1.ffmpeg.pid" 2>/dev/null || echo "")
 S2_BEFORE=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
-if [ -n "$S2_BEFORE" ]; then
-    kill -TERM "$S2_BEFORE" 2>/dev/null
+SEGMENT_BEFORE=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | sort | tail -1)
+if [ -n "$S2_BEFORE" ] && [ -n "$S1_FFMPEG_BEFORE" ]; then
+    touch "$STREAM_DIR/.reload-stage1"
     deadline=$(( $(date +%s) + 45 ))
     S2_AFTER=""
+    S1_FFMPEG_AFTER=""
     while [ "$(date +%s)" -lt "$deadline" ]; do
         S2_AFTER=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
-        [ -n "$S2_AFTER" ] && [ "$S2_AFTER" != "$S2_BEFORE" ] && kill -0 "$S2_AFTER" 2>/dev/null && break
+        S1_FFMPEG_AFTER=$(cat "$STREAM_DIR/stage1.ffmpeg.pid" 2>/dev/null || echo "")
+        [ -n "$S2_AFTER" ] && [ "$S2_AFTER" != "$S2_BEFORE" ] \
+            && [ -n "$S1_FFMPEG_AFTER" ] && [ "$S1_FFMPEG_AFTER" != "$S1_FFMPEG_BEFORE" ] \
+            && kill -0 "$S2_AFTER" 2>/dev/null && break
         sleep 1
     done
     if [ -n "$S2_AFTER" ] && [ "$S2_AFTER" != "$S2_BEFORE" ]; then
-        pass "stage2 relaunched ($S2_BEFORE -> $S2_AFTER)"
+        pass "stage2 relaunched at the new stream header ($S2_BEFORE -> $S2_AFTER)"
     else
-        fail "stage2 did not relaunch"
+        fail "stage2 did not relaunch after coordinated signal"
     fi
-    S1_AFTER=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
-    if [ -n "$S1_AFTER" ] && [ "$S1_AFTER" = "$S1_BEFORE" ] && kill -0 "$S1_AFTER" 2>/dev/null; then
-        pass "stage1 untouched by the encoder restart (pid $S1_AFTER)"
+    S1_LOOP_AFTER=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
+    if [ -n "$S1_LOOP_AFTER" ] && [ "$S1_LOOP_AFTER" = "$S1_LOOP_BEFORE" ] \
+       && [ -n "$S1_FFMPEG_AFTER" ] && [ "$S1_FFMPEG_AFTER" != "$S1_FFMPEG_BEFORE" ] \
+       && kill -0 "$S1_LOOP_AFTER" 2>/dev/null; then
+        pass "stage1 supervisor stayed alive and producer relaunched ($S1_FFMPEG_BEFORE -> $S1_FFMPEG_AFTER)"
     else
-        fail "stage1 was disturbed ($S1_BEFORE -> $S1_AFTER)"
+        fail "stage1 coordinated reload failed ($S1_FFMPEG_BEFORE -> $S1_FFMPEG_AFTER)"
+    fi
+    sleep 5
+    SEGMENT_AFTER=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | sort | tail -1)
+    if [ -n "$SEGMENT_BEFORE" ] && [ -n "$SEGMENT_AFTER" ] && [ "$SEGMENT_AFTER" != "$SEGMENT_BEFORE" ]; then
+        pass "HLS segments continued through coordinated reload ($(basename "$SEGMENT_BEFORE") -> $(basename "$SEGMENT_AFTER"))"
+    else
+        fail "HLS output stalled after coordinated reload"
     fi
 else
-    skip "no stage2 pid"
+    skip "no stage pids for coordinated reload"
 fi
 
 # ── 9. Delivery contract: monotonic PTS, sane clock timebase ────────────────
