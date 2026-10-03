@@ -179,12 +179,32 @@ reaches HLS output while the clock and ticker overlays are enabled. It also
 checks coordinated producer/encoder reloads and respects HLS timestamp
 discontinuities during segment validation.
 
+### Manual server update
+
+To update an existing Ubuntu installation directly from GitHub, download and
+run the updater on that server as root (replace the app path if it differs):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/basilkewir/iptv-middleware/main/update.sh \
+  -o /tmp/iptv-update.sh
+sudo bash /tmp/iptv-update.sh --app-dir /opt/middleware
+```
+
+The updater stages the latest `main` checkout, builds production Composer and
+frontend dependencies, then applies the release to the installed app. If Git, Composer, or rsync are missing, it installs them through APT. It
+installs Node.js 20 from NodeSource when no supported Node.js is present, and
+requires PHP 8.1+. It preserves `.env` and `storage/`,
+runs pending migrations, refreshes Laravel caches, restarts the queue worker,
+and reloads PHP-FPM. It does not restart any channel playout process. It will
+stop before deploying if the app path or running PHP-FPM/queue services do not
+match an existing installation.
+
 ### Automatic deployment to installed servers
 
 Pushing to `main` runs the playout regression tests and builds a production
 release, including Composer dependencies and frontend assets. It deploys only
-to explicitly registered Linux self-hosted runners whose configured app directory
-contains an installed Laravel stack, `.env`, prepared HLS storage, an active
+to explicitly registered Linux self-hosted runners whose configured app
+directory contains an installed Laravel stack, `.env`, prepared HLS storage, an active
 PHP-FPM service, and an active queue worker. Servers that do not meet these
 conditions are reported as skipped. Live FFmpeg playout processes are not
 restarted.
