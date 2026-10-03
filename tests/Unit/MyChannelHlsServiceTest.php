@@ -6,8 +6,11 @@ use App\Models\AdminChannel\AdminChannel;
 use App\Models\AdminChannel\MyChannelContent;
 use App\Models\AdminChannel\MyChannelPlaylist;
 use App\Models\User;
+use App\Jobs\PrepareMyChannelContent;
+use App\Jobs\RefreshMyChannelPlayout;
 use App\Services\AdminChannel\MyChannelHlsService;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use ReflectionMethod;
@@ -60,9 +63,18 @@ class MyChannelHlsServiceTest extends TestCase
     /**
      * @return array{0: string, 1: string} [extra -i lines, filter_complex]
      */
-    private function graph(AdminChannel $channel, string $canvasMode = 'png'): array
+    private function graph(AdminChannel $channel, string $canvasMode = 'png', ?string $overlayEnable = null): array
     {
-        return $this->invoke('buildFiltergraph', '/tmp/stream-dir', $channel, 1280, 720, 25, $canvasMode);
+        return $this->invoke(
+            'buildFiltergraph',
+            '/tmp/stream-dir',
+            $channel,
+            1280,
+            720,
+            25,
+            $canvasMode,
+            $overlayEnable
+        );
     }
 
     /**
@@ -261,6 +273,43 @@ class MyChannelHlsServiceTest extends TestCase
         $this->assertStringEndsWith(',format=rgba', $this->invoke('canvasBaseSource', 1280, 720));
     }
 
+    public function test_jingle_schedule_hides_every_overlay_for_its_playlist_interval(): void
+    {
+        Storage::fake('public');
+
+        $channel = $this->persistChannel('jingle-overlay-gate');
+        $program = $this->persistContent($channel, 1, 'Program');
+        $jingle = $this->persistContent($channel, 2, 'Jingle');
+        $program->update(['duration' => 8]);
+        $jingle->update(['duration' => 5]);
+        MyChannelPlaylist::where('channel_id', $channel->id)
+            ->where('content_id', $jingle->id)
+            ->update(['category' => 'jingle']);
+
+        $expression = $this->invoke(
+            'overlayEnableExpression',
+            $channel,
+            [
+                $this->preparedFile($channel->channel_slug, $program->id),
+                $this->preparedFile($channel->channel_slug, $jingle->id),
+            ],
+            1234
+        );
+
+        $this->assertSame(
+            'not(between(mod(time(0)-1234\\,13)\\,8\\,13))',
+            $expression
+        );
+
+        $channel->enable_ticker = true;
+        $channel->enable_overlay_clock = true;
+        $channel->ticker_background = '#000000';
+        [, $filtergraph] = $this->graph($channel, 'png', $expression);
+
+        $this->assertSame(4, substr_count($filtergraph, ":enable='"));
+        $this->assertStringContainsString("overlay=x=0:y=0:enable='{$expression}'", $filtergraph);
+    }
+
     // ── Overlay update contract ──────────────────────────────────────────────
 
     public function test_ticker_text_change_needs_no_restart(): void
@@ -349,6 +398,88 @@ class MyChannelHlsServiceTest extends TestCase
         $this->assertSame([], $files);
     }
 
+    public function test_prepared_content_is_kept_when_the_original_upload_is_missing(): void
+    {
+        Storage::fake('public');
+
+        $slug = 'prepared-source-missing';
+        $channel = new AdminChannel(['channel_slug' => $slug]);
+        $content = $this->content(14, $slug, 'already prepared');
+        @unlink(Storage::disk('public')->path($content->file_path));
+        $prepared = $this->preparedFile($slug, $content->id);
+
+        $this->assertSame(
+            [$prepared],
+            $this->invoke('collectFiles', new Collection([$content]), $channel)
+        );
+    }
+
+    public function test_probe_duration_keeps_positive_subsecond_media_in_the_playlist(): void
+    {
+        $fakeProbe = sys_get_temp_dir() . '/mchls_ffprobe_' . uniqid();
+        file_put_contents($fakeProbe, "#!/bin/sh\nprintf '0.4\\n'\n");
+        chmod($fakeProbe, 0755);
+        $this->tempFiles[] = $fakeProbe;
+
+        $previousProbe = config('streaming.transcoding.ffprobe_path');
+        config(['streaming.transcoding.ffprobe_path' => $fakeProbe]);
+
+        try {
+            $this->assertSame(1, $this->invoke('probeDuration', '/unused'));
+        } finally {
+            config(['streaming.transcoding.ffprobe_path' => $previousProbe]);
+        }
+    }
+
+    public function test_one_second_video_can_be_prepared_without_an_audio_track(): void
+    {
+        exec('command -v ffmpeg 2>/dev/null', $ffmpegPath, $ffmpegStatus);
+        exec('command -v ffprobe 2>/dev/null', $ffprobePath, $ffprobeStatus);
+        if ($ffmpegStatus !== 0 || $ffprobeStatus !== 0) {
+            $this->markTestSkipped('requires ffmpeg and ffprobe');
+        }
+
+        $source = sys_get_temp_dir() . '/mchls_short_' . uniqid() . '.mp4';
+        $this->tempFiles[] = $source;
+        exec(sprintf(
+            '%s -y -hide_banner -loglevel error -f lavfi -i color=c=black:s=64x64:r=1:d=1 -t 1 -c:v libx264 -pix_fmt yuv420p %s 2>&1',
+            escapeshellarg(trim($ffmpegPath[0])),
+            escapeshellarg($source)
+        ), $out, $rc);
+        $this->assertSame(0, $rc, implode("\n", $out));
+
+        $previousFfmpeg = config('streaming.transcoding.ffmpeg_path');
+        $previousFfprobe = config('streaming.transcoding.ffprobe_path');
+        config([
+            'streaming.transcoding.ffmpeg_path' => trim($ffmpegPath[0]),
+            'streaming.transcoding.ffprobe_path' => trim($ffprobePath[0]),
+        ]);
+
+        $channel = new AdminChannel([
+            'channel_slug' => 'one-second-prepare-test',
+            'output_resolution' => '1280x720',
+            'output_frame_rate' => 25,
+            'output_bitrate' => 2200,
+            'transcoding_device' => 'cpu',
+        ]);
+        $prepared = storage_path('app/streams/normalized/one-second-prepare-test/prepared_short.mp4');
+        $this->tempFiles[] = $prepared;
+        $this->tempFiles[] = $prepared . '.sig.json';
+
+        try {
+            $this->assertSame(
+                $prepared,
+                $this->service()->prepareFile($channel, 'short', $source)
+            );
+            $this->assertFileExists($prepared);
+        } finally {
+            config([
+                'streaming.transcoding.ffmpeg_path' => $previousFfmpeg,
+                'streaming.transcoding.ffprobe_path' => $previousFfprobe,
+            ]);
+        }
+    }
+
     // ── Generated shell ──────────────────────────────────────────────────────
 
     public function test_generated_playout_scripts_are_valid_bash(): void
@@ -400,6 +531,18 @@ class MyChannelHlsServiceTest extends TestCase
         @rmdir($dir);
     }
 
+    public function test_playlist_rotation_keeps_every_item_after_the_selected_item(): void
+    {
+        $playlist = new Collection(array_map(
+            fn ($id) => tap(new MyChannelContent(), fn ($content) => $content->id = $id),
+            [1, 2, 3, 4, 5]
+        ));
+
+        $rotated = $this->invoke('rotateToContent', $playlist, 3);
+
+        $this->assertSame([3, 4, 5, 1, 2], $rotated->map(fn ($content) => $content->id)->all());
+    }
+
     // ── Live playlist refresh ────────────────────────────────────────────────
 
     public function test_playout_script_wires_the_stage1_reload_signal(): void
@@ -419,6 +562,9 @@ class MyChannelHlsServiceTest extends TestCase
         $this->assertStringContainsString('.reload-stage1', $bash);
         $this->assertStringContainsString('STAGE1 reload signal', $bash);
         $this->assertStringContainsString('stage1.ffmpeg.pid', $bash);
+        $this->assertStringContainsString('.reload-stage2', $bash);
+        $this->assertStringContainsString('.stage2-ready', $bash);
+        $this->assertStringContainsString('STAGE2 reload signal', $bash);
 
         @unlink($script);
         @unlink("{$dir}/stage2.sh");
@@ -440,6 +586,82 @@ class MyChannelHlsServiceTest extends TestCase
             ['changed' => false, 'files' => 0, 'excluded' => [], 'pending' => 0],
             $this->service()->refreshPlaylist($channel)
         );
+    }
+
+    public function test_refreshPlaylist_keeps_the_current_item_at_the_head_of_the_live_order(): void
+    {
+        Storage::fake('public');
+
+        $channel = $this->persistChannel('refresh-current-item');
+        $first = $this->persistContent($channel, 1, 'first');
+        $current = $this->persistContent($channel, 2, 'current');
+        $last = $this->persistContent($channel, 3, 'last');
+        $firstPath = $this->preparedFile($channel->channel_slug, $first->id);
+        $currentPath = $this->preparedFile($channel->channel_slug, $current->id);
+        $lastPath = $this->preparedFile($channel->channel_slug, $last->id);
+
+        $streamDir = storage_path("app/streams/hls/admin-channel-{$channel->channel_slug}");
+        mkdir($streamDir, 0775, true);
+        $concatPath = "{$streamDir}/concat.txt";
+        file_put_contents($concatPath, implode("\n", array_map(
+            fn ($path) => 'file ' . escapeshellarg($path),
+            [$firstPath, $currentPath, $lastPath]
+        )) . "\n");
+        $this->tempFiles[] = $concatPath;
+        $this->tempFiles[] = "{$streamDir}/.reload-stage1";
+        $this->tempFiles[] = "{$streamDir}/stage2.sh";
+        $this->tempFiles[] = "{$streamDir}/.overlay-schedule.sig";
+
+        $hls = new class extends MyChannelHlsService {
+            public int $currentContentId = 0;
+
+            public function isRunning(AdminChannel $channel): bool
+            {
+                return true;
+            }
+
+            public function nowPlaying(AdminChannel $channel): ?array
+            {
+                return [
+                    'content_id' => $this->currentContentId,
+                    'index' => 1,
+                    'item_elapsed' => 0,
+                    'item_duration' => 60,
+                ];
+            }
+        };
+        $hls->currentContentId = $current->id;
+
+        $result = $hls->refreshPlaylist($channel);
+
+        $this->assertTrue($result['changed']);
+        $this->assertSame(
+            [$currentPath, $lastPath, $firstPath],
+            array_map(
+                fn ($line) => trim(substr($line, strlen('file ')), "'"),
+                file($concatPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES)
+            )
+        );
+    }
+
+    public function test_failed_preparation_is_visible_and_does_not_block_later_items(): void
+    {
+        Storage::fake('public');
+        Queue::fake();
+
+        $channel = $this->persistChannel('prepare-failure-continues');
+        $failed = $this->persistContent($channel, 1, 'unreadable');
+        $next = $this->persistContent($channel, 2, 'playable next');
+
+        (new PrepareMyChannelContent($failed->id))->failed(new \RuntimeException('decode error'));
+
+        $hls = $this->service();
+        $this->assertSame('decode error', $hls->preparationFailure($channel, $failed->id));
+        Queue::assertPushed(RefreshMyChannelPlayout::class, fn ($job) => $job->channelId === $channel->id);
+
+        $this->invoke('queueMissingPreparation', $channel);
+
+        Queue::assertPushed(PrepareMyChannelContent::class, fn ($job) => $job->contentId === $next->id);
     }
 
     public function test_playlistDrifted_is_false_when_nothing_is_running(): void
@@ -675,6 +897,18 @@ class MyChannelHlsServiceTest extends TestCase
         $np = $this->invoke('resolveNowPlaying', $schedule, 40, true);
         $this->assertSame(30, $np['content_id']); // 35..50 window
         $this->assertSame(5, $np['item_elapsed']);
+    }
+
+    public function test_now_playing_includes_a_one_second_playlist_item(): void
+    {
+        $schedule = [
+            ['content_id' => 1, 'duration' => 1],
+            ['content_id' => 2, 'duration' => 8],
+        ];
+
+        $this->assertSame(1, $this->invoke('resolveNowPlaying', $schedule, 0, true)['content_id']);
+        $this->assertSame(2, $this->invoke('resolveNowPlaying', $schedule, 1, true)['content_id']);
+        $this->assertSame(1, $this->invoke('resolveNowPlaying', $schedule, 9, true)['content_id']);
     }
 
     public function test_now_playing_returns_null_for_empty_or_zero_schedule(): void

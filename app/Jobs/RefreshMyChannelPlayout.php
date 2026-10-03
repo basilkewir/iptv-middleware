@@ -13,11 +13,10 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
 /**
- * Re-apply a my-channel's playlist to its LIVE playout after an edit.
+ * Re-apply prepared playlist items to a my-channel's LIVE playout after an edit.
  *
- * Runs on the queue because refreshing may synchronously re-prepare new
- * items (an ffmpeg normalisation pass each) — far too long for the admin
- * HTTP request that triggered the edit.
+ * Refreshing only queues the next missing preparation; expensive FFmpeg
+ * normalisation runs in PrepareMyChannelContent, outside the admin request.
  */
 class RefreshMyChannelPlayout implements ShouldQueue
 {

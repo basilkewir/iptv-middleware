@@ -157,13 +157,22 @@ text) is re-read from disk every frame — those changes need **no restart**.
 Only a change to the encoder graph itself (resolution, fps, filter chain)
 bumps the systemd unit.
 
+Playlist items can be categorized as **Program** or **Jingle**. Saving category
+changes updates the live overlay gate; all channel overlays are hidden while a
+jingle is on air, without restarting the Stage 1 playlist input.
+
 ```bash
 # Start / stop / restart a channel's playout (privileged helper, no shell)
 sudo iptv-playout-ctl {start|stop|restart|status|show} <channel-slug>
 
-# Verify the generated playout/stage-2 scripts are valid bash
+# Run the Linux end-to-end playout test: five playlist clips (one is 1 second), HLS output,
+# live playlist switching, overlays, encoder recovery and segment timeline
 ./deploy/playout-smoke-test.sh
 ```
+
+The smoke test requires Linux, FFmpeg, FFprobe, PHP and Python 3. It renders
+five visually distinct clips, including a one-second item, and verifies each
+reaches HLS output while the clock and ticker overlays are enabled.
 
 ## UDP / Multicast
 

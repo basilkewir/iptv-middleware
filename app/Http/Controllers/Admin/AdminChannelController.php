@@ -27,6 +27,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str as StrHelper;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use App\Services\AdminChannel\AdminChannelService;
@@ -1344,6 +1345,10 @@ class AdminChannelController extends Controller
                     'prepared',
                     $item->content && $hls->isPrepared($channel, (int) $item->content->id)
                 );
+                $item->setAttribute(
+                    'preparation_error',
+                    $item->content ? $hls->preparationFailure($channel, (int) $item->content->id) : null
+                );
 
                 return $item;
             });
@@ -1403,6 +1408,32 @@ class AdminChannelController extends Controller
         $this->refreshLivePlayout($channel);
 
         return response()->json(['playlist_item' => $playlistItem->fresh()->load('content')]);
+    }
+
+    public function updateMyChannelPlaylistCategories(Request $request, AdminChannel $channel): JsonResponse
+    {
+        $data = $request->validate([
+            'items' => 'required|array|min:1',
+            'items.*.id' => 'required|integer|distinct|exists:my_channel_playlist,id',
+            'items.*.category' => 'required|in:program,jingle',
+        ]);
+
+        DB::transaction(function () use ($channel, $data): void {
+            foreach ($data['items'] as $item) {
+                $playlistItem = MyChannelPlaylist::where('channel_id', $channel->id)
+                    ->findOrFail($item['id']);
+                $playlistItem->update(['category' => $item['category']]);
+            }
+        });
+
+        $result = app(MyChannelHlsService::class)->refreshPlaylist($channel);
+
+        return response()->json([
+            'message' => 'Playlist categories saved and playout updated',
+            'changed' => $result['changed'],
+            'files' => $result['files'],
+            'pending' => $result['pending'] ?? 0,
+        ]);
     }
 
     public function removeMyChannelPlaylistItem(Request $request, AdminChannel $channel, MyChannelPlaylist $playlistItem): JsonResponse

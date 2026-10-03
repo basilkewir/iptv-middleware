@@ -9,7 +9,7 @@
 #     ./deploy/playout-smoke-test.sh [channel-slug]
 #
 # Exits 0 when every check passes, 1 on a failed check, 2 when the host
-# cannot run the test (non-Linux, ffmpeg or the app missing). Never touches
+# cannot run the test (non-Linux, required tools or the app missing). Never touches
 # an existing channel: it creates its own throwaway slug and deletes it.
 #
 set -uo pipefail
@@ -32,6 +32,7 @@ skip() { say "SKIP  $*"; }
 command -v ffmpeg  >/dev/null 2>&1 || { skip "ffmpeg not on PATH"; exit 2; }
 command -v ffprobe >/dev/null 2>&1 || { skip "ffprobe not on PATH"; exit 2; }
 command -v php     >/dev/null 2>&1 || { skip "php not on PATH"; exit 2; }
+command -v python3 >/dev/null 2>&1 || { skip "python3 not on PATH"; exit 2; }
 [ -f artisan ] || { skip "run from the application root (no artisan found)"; exit 2; }
 
 APP="$(pwd)"
@@ -66,20 +67,25 @@ trap cleanup EXIT INT TERM
 
 head_ "== playout smoke test: $SLUG =="
 
-# ── 2. Two synthetic clips (same geometry — Stage 1 only ever `-c copy`s) ───
-head_ "[1/8] generating source clips"
-for n in 1 2; do
+# ── 2. Five clips, including a one-second item ──────────────────────────────
+head_ "[1/10] generating source clips"
+COLORS=(red green blue yellow magenta)
+FREQUENCIES=(440 550 660 770 880)
+for i in "${!COLORS[@]}"; do
+    n=$((i + 1))
+    duration=3
+    [ "$n" -eq 5 ] && duration=1
     ffmpeg -y -hide_banner -loglevel error \
-        -f lavfi -i "testsrc2=size=640x360:rate=25:duration=3" \
-        -f lavfi -i "sine=frequency=440:sample_rate=48000:duration=3" \
+        -f lavfi -i "color=c=${COLORS[$i]}:size=640x360:rate=25:duration=$duration" \
+        -f lavfi -i "sine=frequency=${FREQUENCIES[$i]}:sample_rate=48000:duration=$duration" \
         -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 50 \
         -c:a aac -b:a 96k \
         "$WORK/clip$n.mp4" || { fail "could not generate clip$n"; exit 1; }
 done
-say "ok: $(ls -1 "$WORK"/clip*.mp4 | wc -l) clips"
+say "ok: $(ls -1 "$WORK"/clip*.mp4 | wc -l) distinct colour clips, including a one-second clip"
 
 # ── 3. Render the real playout scripts through the real service ─────────────
-head_ "[2/8] rendering playout.sh + stage2.sh via MyChannelHlsService"
+head_ "[2/10] rendering playout.sh + stage2.sh via MyChannelHlsService"
 php >"$WORK/render.out" 2>"$WORK/render.err" <<PHP
 <?php
 require '$APP/vendor/autoload.php';
@@ -114,7 +120,9 @@ function call(\$svc, \$name, ...\$args) {
 @mkdir('$RAM_DIR', 0755, true);
 
 call(\$svc, 'writeOverlayAssets', \$dir, \$ch);
-echo call(\$svc, 'writePlayoutScript', \$dir, ['$WORK/clip1.mp4', '$WORK/clip2.mp4'], \$ch, 'png'), "\n";
+echo call(\$svc, 'writePlayoutScript', \$dir, [
+    '$WORK/clip1.mp4', '$WORK/clip2.mp4', '$WORK/clip3.mp4', '$WORK/clip4.mp4', '$WORK/clip5.mp4',
+], \$ch, 'png'), "\n";
 PHP
 RENDER_RC=$?
 if [ $RENDER_RC -ne 0 ]; then
@@ -134,7 +142,7 @@ for f in "$SCRIPT" "$STREAM_DIR/stage2.sh"; do
 done
 
 # ── 4. Start the supervisor ─────────────────────────────────────────────────
-head_ "[3/8] starting supervisor"
+head_ "[3/10] starting supervisor"
 bash "$SCRIPT" >"$WORK/supervisor.out" 2>&1 &
 SUPERVISOR_PID=$!
 say "supervisor pid=$SUPERVISOR_PID"
@@ -167,7 +175,7 @@ else
 fi
 
 # ── 5. Segments actually appear ─────────────────────────────────────────────
-head_ "[4/8] waiting for HLS output (up to ${SETTLE_SECONDS}s)"
+head_ "[4/10] waiting for HLS output (up to ${SETTLE_SECONDS}s)"
 deadline=$(( $(date +%s) + SETTLE_SECONDS ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     count=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | wc -l)
@@ -182,8 +190,109 @@ else
     tail -20 "$STREAM_DIR/ffmpeg.log" 2>/dev/null | sed 's/^/        /'
 fi
 
-# ── 6. Overlay hot-reload: rewrite the canvas, encoder must not restart ─────
-head_ "[5/8] overlay hot-reload"
+# ── Verify every playlist entry reaches the encoded output ─────────────────
+head_ "[5/10] checking all five clips, including the one-second clip"
+python3 - "$STREAM_DIR" <<'PY'
+import glob
+import pathlib
+import subprocess
+import sys
+
+stream_dir = pathlib.Path(sys.argv[1])
+segments = sorted(glob.glob(str(stream_dir / "seg_*.ts")))
+seen = set()
+
+for segment in segments:
+    decoded = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", segment,
+            "-vf", "fps=10,crop=2:2:(iw-2)/2:(ih-2)/2,format=rgb24",
+            "-f", "rawvideo", "-",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if decoded.returncode != 0 or len(decoded.stdout) < 12:
+        continue
+
+    for offset in range(0, len(decoded.stdout) - 11, 12):
+        pixels = [decoded.stdout[offset + i:offset + i + 3] for i in range(0, 12, 3)]
+        red = sum(pixel[0] for pixel in pixels) / 4
+        green = sum(pixel[1] for pixel in pixels) / 4
+        blue = sum(pixel[2] for pixel in pixels) / 4
+
+        if red > green * 1.5 and red > blue * 1.5:
+            seen.add("red")
+        elif green > red * 1.5 and green > blue * 1.5:
+            seen.add("green")
+        elif blue > red * 1.5 and blue > green * 1.5:
+            seen.add("blue")
+        elif red > 120 and green > 120 and blue < 100:
+            seen.add("yellow")
+        elif red > 120 and blue > 120 and green < 100:
+            seen.add("magenta")
+
+missing = {"red", "green", "blue", "yellow", "magenta"} - seen
+if missing:
+    print(f"FAIL: missing clips in HLS output: {', '.join(sorted(missing))}")
+    sys.exit(1)
+
+print("PASS: all five playlist clips, including the one-second clip, decoded from HLS segments")
+PY
+if [ "$?" -eq 0 ]; then
+    pass "all five ordered playlist clips appear in the HLS segments"
+else
+    fail "one or more playlist clips never reached the HLS output"
+fi
+
+# ── 6. Playlist change: coordinated reload must preserve HLS continuity ────
+head_ "[6/10] playlist update continuity"
+S1_FFMPEG_BEFORE=$(cat "$STREAM_DIR/stage1.ffmpeg.pid" 2>/dev/null || echo "")
+S2_BEFORE=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
+SEQ_BEFORE=$(awk -F: '/^#EXT-X-MEDIA-SEQUENCE:/{print $2; exit}' "$STREAM_DIR/index.m3u8" 2>/dev/null)
+python3 - "$STREAM_DIR/concat.txt" <<'PY'
+import pathlib
+import sys
+
+concat = pathlib.Path(sys.argv[1])
+entries = concat.read_text().splitlines()
+swap = concat.with_name(concat.name + ".switch")
+swap.write_text("".join(f"{entry}\n" for entry in reversed(entries)))
+swap.replace(concat)
+PY
+touch "$STREAM_DIR/.reload-stage1"
+deadline=$(( $(date +%s) + 45 ))
+S1_FFMPEG_AFTER=""
+S2_AFTER=""
+SEQ_AFTER=""
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    S1_FFMPEG_AFTER=$(cat "$STREAM_DIR/stage1.ffmpeg.pid" 2>/dev/null || echo "")
+    S2_AFTER=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
+    SEQ_AFTER=$(awk -F: '/^#EXT-X-MEDIA-SEQUENCE:/{print $2; exit}' "$STREAM_DIR/index.m3u8" 2>/dev/null)
+    if [ -n "$S1_FFMPEG_AFTER" ] && [ -n "$S2_AFTER" ] \
+       && [ "$S1_FFMPEG_AFTER" != "$S1_FFMPEG_BEFORE" ] \
+       && [ "$S2_AFTER" != "$S2_BEFORE" ] \
+       && [ -n "$SEQ_BEFORE" ] && [ -n "$SEQ_AFTER" ] \
+       && [ "$SEQ_AFTER" -gt "$SEQ_BEFORE" ]; then
+        break
+    fi
+    sleep 1
+done
+if [ -n "$S1_FFMPEG_AFTER" ] && [ -n "$S2_AFTER" ] \
+   && [ "$S1_FFMPEG_AFTER" != "$S1_FFMPEG_BEFORE" ] \
+   && [ "$S2_AFTER" != "$S2_BEFORE" ] \
+   && [ -n "$SEQ_BEFORE" ] && [ -n "$SEQ_AFTER" ] \
+   && [ "$SEQ_AFTER" -gt "$SEQ_BEFORE" ] \
+   && ! grep -q '^#EXT-X-ENDLIST' "$STREAM_DIR/index.m3u8"; then
+    pass "playlist swap restarted both stages and kept HLS sequence advancing ($SEQ_BEFORE -> $SEQ_AFTER)"
+else
+    fail "playlist swap interrupted HLS or did not restart both stages"
+    tail -30 "$STREAM_DIR/ffmpeg.log" 2>/dev/null | sed 's/^/        /'
+fi
+
+# ── 7. Overlay hot-reload: rewrite the canvas, encoder must not restart ─────
+head_ "[7/10] overlay hot-reload"
 S2_BEFORE=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
 if [ -n "$S2_BEFORE" ] && [ -f "$RAM_DIR/overlay.png" ]; then
     # A visibly different canvas: 200x200 solid magenta.
@@ -199,6 +308,36 @@ if [ -n "$S2_BEFORE" ] && [ -f "$RAM_DIR/overlay.png" ]; then
         else
             fail "encoder restarted on canvas rewrite ($S2_BEFORE -> $S2_AFTER)"
         fi
+        latest=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | sort | tail -1)
+        if [ -n "$latest" ] && python3 - "$latest" <<'PY'
+import subprocess
+import sys
+
+frame = subprocess.run(
+    [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", sys.argv[1],
+        "-ss", "0.5", "-frames:v", "1",
+        "-vf", "crop=2:2:100:100,format=rgb24", "-f", "rawvideo", "-",
+    ],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL,
+    check=False,
+).stdout
+if len(frame) < 12:
+    sys.exit(1)
+
+pixels = [frame[i:i + 3] for i in range(0, 12, 3)]
+red = sum(pixel[0] for pixel in pixels) / 4
+green = sum(pixel[1] for pixel in pixels) / 4
+blue = sum(pixel[2] for pixel in pixels) / 4
+if not (red > 150 and green < 100 and blue > 150):
+    sys.exit(1)
+PY
+        then
+            pass "updated canvas is visible in the encoded HLS video"
+        else
+            fail "updated canvas did not appear in the encoded HLS video"
+        fi
         count=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | wc -l)
         sleep 8
         count2=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | wc -l)
@@ -211,8 +350,8 @@ else
     skip "no overlay.png to rewrite"
 fi
 
-# ── 7. Stage-2-only restart: Stage 1 must survive ───────────────────────────
-head_ "[6/8] stage2-only restart isolation"
+# ── 8. Stage-2-only restart: Stage 1 must survive ───────────────────────────
+head_ "[8/10] stage2-only restart isolation"
 S1_BEFORE=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
 S2_BEFORE=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
 if [ -n "$S2_BEFORE" ]; then
@@ -239,8 +378,8 @@ else
     skip "no stage2 pid"
 fi
 
-# ── 8. Delivery contract: monotonic PTS, sane clock timebase ────────────────
-head_ "[7/8] segment timeline"
+# ── 9. Delivery contract: monotonic PTS, sane clock timebase ────────────────
+head_ "[9/10] segment timeline"
 mapfile -t SEGS < <(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | sort)
 if [ "${#SEGS[@]}" -ge 2 ]; then
     monotonic=1
@@ -270,8 +409,8 @@ case "$tb" in
     *)          fail "video time_base is $tb (expected 1/90000)" ;;
 esac
 
-# ── 9. systemd resource clamping (optional) ─────────────────────────────────
-head_ "[8/8] systemd unit limits"
+# ── 10. systemd resource clamping (optional) ────────────────────────────────
+head_ "[10/10] systemd unit limits"
 UNIT="iptv-playout@$SLUG.service"
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "$UNIT" >/dev/null 2>&1 \
    && [ "$(systemctl is-enabled "$UNIT" 2>/dev/null || echo none)" != "none" ]; then

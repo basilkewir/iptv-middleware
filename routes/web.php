@@ -276,6 +276,7 @@ Route::middleware(['license.check', 'auth:web', \App\Http\Middleware\EnforceSess
         Route::get('/channels/admin/{channel}/my-channel/playlist', [AdminChannelController::class, 'getMyChannelPlaylist'])->name('channels.my-channel.playlist');
         Route::post('/channels/admin/{channel}/my-channel/playlist', [AdminChannelController::class, 'addToPlaylist'])->name('channels.my-channel.playlist.store');
         Route::put('/channels/admin/{channel}/my-channel/playlist/{playlistItem}', [AdminChannelController::class, 'updateMyChannelPlaylistItem'])->name('channels.my-channel.playlist.update');
+        Route::post('/channels/admin/{channel}/my-channel/playlist/categories', [AdminChannelController::class, 'updateMyChannelPlaylistCategories'])->name('channels.my-channel.playlist.categories');
         Route::delete('/channels/admin/{channel}/my-channel/playlist/{playlistItem}', [AdminChannelController::class, 'removeMyChannelPlaylistItem'])->name('channels.my-channel.playlist.destroy');
         Route::post('/channels/admin/{channel}/my-channel/playlist/reorder', [AdminChannelController::class, 'reorderMyChannelPlaylist'])->name('channels.my-channel.playlist.reorder');
         Route::post('/channels/admin/{channel}/my-channel/playlist/refresh', [AdminChannelController::class, 'refreshMyChannelPlaylist'])->name('channels.my-channel.playlist.refresh');

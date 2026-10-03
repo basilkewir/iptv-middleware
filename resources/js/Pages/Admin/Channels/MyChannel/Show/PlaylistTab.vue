@@ -34,7 +34,15 @@
             <span>{{ formatDuration(item.content?.duration) }}</span>
             <span v-if="item.transition_type !== 'cut'" class="text-gray-500">{{ item.transition_type }}</span>
             <span
-              v-if="item.prepared === false"
+              v-if="item.prepared === false && item.preparation_error"
+              class="inline-flex items-center text-[10px] font-semibold uppercase tracking-wide
+                     px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30"
+              :title="item.preparation_error"
+            >
+              Preparation failed
+            </span>
+            <span
+              v-else-if="item.prepared === false"
               class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide
                      px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
               title="Still being transcoded to the channel's playout format — it joins the broadcast automatically when ready."
@@ -44,6 +52,17 @@
             </span>
           </div>
         </div>
+        <label class="flex items-center gap-2 text-xs text-gray-400 shrink-0" @click.stop @mousedown.stop>
+          <span>Type</span>
+          <select
+            v-model="item.category"
+            class="rounded border border-gray-600 bg-gray-900 px-2 py-1 text-white focus:border-indigo-500 focus:outline-none"
+            :aria-label="`Category for ${item.content?.title || item.content?.file_name || 'playlist item'}`"
+          >
+            <option value="program">Program</option>
+            <option value="jingle">Jingle — hide overlays</option>
+          </select>
+        </label>
         <button
           @click="playFromItem(item)"
           :disabled="playingFromId === item.id"
@@ -58,8 +77,17 @@
         </button>
       </div>
     </div>
+    <div v-if="hasCategoryChanges" class="flex justify-end">
+      <button
+        @click="saveCategories"
+        :disabled="savingCategories"
+        class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        {{ savingCategories ? 'Updating…' : 'Save categories & update playlist' }}
+      </button>
+    </div>
 
-    <div v-else-if="!loading" class="text-center py-12 text-gray-500">
+    <div v-if="!playlist.length && !loading" class="text-center py-12 text-gray-500">
       <ListVideo class="w-12 h-12 mx-auto mb-3 opacity-50" />
       <p>No items in playlist.</p>
       <p class="text-sm mt-1">Upload content in the Content Library tab, then add it here.</p>
@@ -114,7 +142,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { route } from '@/Composables/useRoute'
 import { useApiFetch } from '@/Composables/useApiFetch'
 import { GripVertical, Play, Trash2, ListVideo, Plus, Loader2 } from 'lucide-vue-next'
@@ -129,10 +157,15 @@ const contentLibrary = ref([])
 const loading = ref(false)
 const loadingLibrary = ref(false)
 const playingFromId = ref(null)
+const savingCategories = ref(false)
+const savedCategories = ref({})
 const showAddModal = ref(false)
 const error = ref('')
 const dragIndex = ref(null)
 const dragOverIndex = ref(null)
+const hasCategoryChanges = computed(() => playlist.value.some(
+  (item) => (item.category || 'program') !== savedCategories.value[item.id]
+))
 
 const fetchPlaylist = async () => {
   loading.value = true
@@ -140,6 +173,8 @@ const fetchPlaylist = async () => {
     const res = await apiFetch(route('admin.channels.my-channel.playlist', props.channel.channel_slug))
     const json = await res.json()
     playlist.value = json.playlist || []
+    for (const item of playlist.value) item.category ||= 'program'
+    savedCategories.value = Object.fromEntries(playlist.value.map((item) => [item.id, item.category]))
   } finally {
     loading.value = false
   }
@@ -170,6 +205,30 @@ const addToPlaylist = async (item) => {
   } else {
     const json = await res.json()
     error.value = json?.message || 'Failed to add to playlist'
+  }
+}
+
+const saveCategories = async () => {
+  savingCategories.value = true
+  error.value = ''
+  try {
+    const res = await apiFetch(
+      route('admin.channels.my-channel.playlist.categories', props.channel.channel_slug),
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: playlist.value.map((item) => ({ id: item.id, category: item.category || 'program' })),
+        }),
+      }
+    )
+    const json = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(json.message || 'Failed to update playlist categories')
+    await fetchPlaylist()
+  } catch (e) {
+    error.value = e.message || 'Failed to update playlist categories'
+  } finally {
+    savingCategories.value = false
   }
 }
 

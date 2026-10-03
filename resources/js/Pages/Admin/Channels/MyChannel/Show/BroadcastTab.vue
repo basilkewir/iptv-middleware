@@ -152,7 +152,7 @@
             >
               <Loader2 v-if="refreshingPlaylist" class="w-3.5 h-3.5 animate-spin" />
               <RefreshCw v-else class="w-3.5 h-3.5" />
-              {{ refreshingPlaylist ? 'Applying…' : 'Update now' }}
+              {{ refreshingPlaylist ? 'Applying…' : (hasCategoryChanges ? 'Save categories & update' : 'Update now') }}
             </button>
           </div>
         </div>
@@ -192,7 +192,15 @@
                 </span>
                 <span class="text-gray-500 text-xs">{{ formatDuration(item.content?.duration) }}</span>
                 <span
-                  v-if="item.prepared === false"
+                  v-if="item.prepared === false && item.preparation_error"
+                  class="inline-flex items-center text-[10px] font-semibold uppercase tracking-wide
+                         px-1.5 py-0.5 rounded bg-red-500/15 text-red-300 border border-red-500/30"
+                  :title="item.preparation_error"
+                >
+                  Preparation failed
+                </span>
+                <span
+                  v-else-if="item.prepared === false"
                   class="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide
                          px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
                   title="This file is still being transcoded to the channel's playout format. It joins the broadcast automatically when ready."
@@ -202,6 +210,17 @@
                 </span>
               </div>
             </div>
+            <select
+              v-model="item.category"
+              :disabled="refreshingPlaylist"
+              @click.stop
+              @mousedown.stop
+              class="max-w-32 rounded border border-gray-600 bg-gray-900 px-1.5 py-1 text-[10px] text-white focus:border-indigo-500 focus:outline-none disabled:opacity-50"
+              :aria-label="`Category for ${item.content?.title || item.content?.file_name || 'playlist item'}`"
+            >
+              <option value="program">Program</option>
+              <option value="jingle">Jingle (no overlays)</option>
+            </select>
             <!-- Play from here -->
             <button
               @click="playFromItem(item)"
@@ -254,6 +273,7 @@ const { apiFetch } = useApiFetch()
 const broadcastError = ref('')
 const settings = ref(null)
 const playlist = ref([])
+const savedCategories = ref({})
 const refreshingPlaylist = ref(false)
 const playingFromId = ref(null)
 const playlistRefreshMessage = ref('')
@@ -265,6 +285,9 @@ const videoRef = ref(null)
 const currentTime = ref(0)
 const currentIndex = ref(0)
 const itemDuration = ref(0)
+const hasCategoryChanges = computed(() => playlist.value.some(
+  (item) => (item.category || 'program') !== savedCategories.value[item.id]
+))
 // Server-authoritative now-playing snapshot: the {content_id,index,item_elapsed,
 // item_duration} the backend reported plus the local clock when we received it,
 // so the progress bar can advance smoothly between polls.
@@ -441,6 +464,8 @@ const fetchPlaylist = async () => {
   const res = await apiFetch(route('admin.channels.my-channel.playlist', props.channel.channel_slug))
   const json = await res.json()
   playlist.value = json.playlist || []
+  for (const item of playlist.value) item.category ||= 'program'
+  savedCategories.value = Object.fromEntries(playlist.value.map((item) => [item.id, item.category]))
   // The playlist may arrive after the broadcast snapshot on first load; rematch
   // the highlighted "NOW" row once we actually have the items to look in.
   syncNowIndex()
@@ -475,9 +500,23 @@ const applyPlaylistNow = async () => {
   refreshingPlaylist.value = true
   playlistRefreshMessage.value = ''
   try {
+    const categoryChanged = hasCategoryChanges.value
     const res = await apiFetch(
-      route('admin.channels.my-channel.playlist.refresh', props.channel.channel_slug),
-      { method: 'POST' },
+      route(
+        categoryChanged
+          ? 'admin.channels.my-channel.playlist.categories'
+          : 'admin.channels.my-channel.playlist.refresh',
+        props.channel.channel_slug,
+      ),
+      categoryChanged
+        ? {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              items: playlist.value.map((item) => ({ id: item.id, category: item.category || 'program' })),
+            }),
+          }
+        : { method: 'POST' },
     )
     const json = await res.json().catch(() => ({}))
     playlistRefreshOk.value = res.ok

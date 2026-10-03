@@ -59,6 +59,7 @@ class MyChannelHlsService
      * the live encoder and got the playout killed by the stall watchdog.
      */
     public const PREPARE_GATE = 'my-channel:prepare-gate';
+    private const PREPARE_FAILURE_TTL = 900;
 
     /**
      * Overlay fields that are compiled into the Stage 2 filtergraph string
@@ -610,7 +611,7 @@ class MyChannelHlsService
         @unlink($tmp);
         exec($cmd . ' 2>&1', $outLines, $rc);
 
-        if ($rc !== 0 || ! is_file($tmp) || filesize($tmp) < 1024) {
+        if ($rc !== 0 || ! is_file($tmp) || filesize($tmp) === 0) {
             @unlink($tmp);
             if ($rc !== 0) {
                 $err = implode(' | ', array_slice($outLines, -6));
@@ -666,7 +667,7 @@ class MyChannelHlsService
             ),
             $out, $rc
         );
-        if ($rc === 0 && is_file($tmp) && filesize($tmp) > 1024) {
+        if ($rc === 0 && is_file($tmp) && filesize($tmp) > 0) {
             unlink($prepared);
             rename($tmp, $prepared);
         } elseif (is_file($tmp)) {
@@ -710,7 +711,7 @@ class MyChannelHlsService
      */
     private function verifyPrepared(string $path, int $width, int $height, int $fps): bool
     {
-        if (! is_file($path) || filesize($path) < 1024) {
+        if (! is_file($path) || filesize($path) === 0) {
             return false;
         }
 
@@ -1169,17 +1170,6 @@ class MyChannelHlsService
                 continue;
             }
 
-            $absolute = Storage::disk('public')->path($content->file_path);
-
-            if (! File::exists($absolute)) {
-                $excluded[] = ['content_id' => $content->id ?? null, 'reason' => 'source missing'];
-                Log::warning('My channel content file missing, skipping', [
-                    'content_id' => $content->id ?? null,
-                    'path'       => $absolute,
-                ]);
-                continue;
-            }
-
             if ((int) $content->id <= 0) {
                 $excluded[] = ['content_id' => $content->id ?? null, 'reason' => 'not a stored record'];
                 continue;
@@ -1197,6 +1187,8 @@ class MyChannelHlsService
                 continue;
             }
 
+            // Stage 1 consumes this prepared intermediate; the original upload
+            // is not needed once normalization has completed.
             $files[] = $prepared;
         }
 
@@ -1238,10 +1230,9 @@ class MyChannelHlsService
      * HEAD of its graph — before any overlay — so any PTS discontinuity that
      * survives Stage 1 can never reach the ticker, the clock or the encoder.
      *
-     * Playlist edits rewrite concat.txt and signal Stage 1 only; encoder
-     * trouble and graph changes are handled by Stage 2 only. Either way the
-     * segment number is recomputed from disk, so the HLS playlist continues
-     * instead of resetting.
+     * Playlist edits replace the NUT producer and coordinate a Stage 2 restart
+     * at the new NUT header; the HLS segment list is appended, never reset.
+     * Graph changes restart Stage 2 only while Stage 1 keeps feeding the FIFO.
      */
     private function writePlayoutScript(
         string $streamDir,
@@ -1269,6 +1260,8 @@ class MyChannelHlsService
         $log        = "{$streamDir}/ffmpeg.log";
         $ffmpeg     = $this->ffmpeg;
         $reloadFlag = "{$streamDir}/.reload-stage1";
+        $reloadStage2Flag = "{$streamDir}/.reload-stage2";
+        $stage2Ready = "{$streamDir}/.stage2-ready";
 
         $nice = (int) config('playout.nice', 10);
         $loadGate = (int) config('playout.load_gate', 40);
@@ -1285,6 +1278,8 @@ FIFO="{$fifo}"
 LOG="{$log}"
 LOAD_GATE={$loadGate}
 RELOAD_FLAG="{$reloadFlag}"
+RELOAD_STAGE2_FLAG="{$reloadStage2Flag}"
+STAGE2_READY="{$stage2Ready}"
 
 log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" >> "\$LOG"; }
 
@@ -1339,9 +1334,9 @@ stage1_loop() {
             "\$FIFO" >> "\$LOG" 2>&1 &
         S1FFMPEG=\$!
         echo "\$S1FFMPEG" > "\$STREAM_DIR/stage1.ffmpeg.pid"
-        # A playlist edit rewrites CONCAT and touches RELOAD_FLAG; killing this
-        # ffmpeg is the whole restart — the concat demuxer only reads the list
-        # at open, and the loop below respawns it against the fresh file.
+        # A playlist edit rewrites CONCAT and touches RELOAD_FLAG; the concat
+        # demuxer only reads the list at open, so reload this producer against
+        # the fresh file and coordinate Stage 2 at the new NUT stream header.
         # The flag is consumed on signalling, and TERM escalates to KILL:
         # an ffmpeg wedged in a FIFO write ignores a single TERM forever.
         RELOADED=0
@@ -1364,9 +1359,16 @@ stage1_loop() {
         rm -f "\$STREAM_DIR/stage1.ffmpeg.pid"
         T1=\$(date +%s)
         log "STAGE1 exit rc=\$RC after=\$((T1 - T0))s"
-        # A deliberate reload restarts at once, whatever the runtime was — the
-        # new list may even be shorter than the old uptime.
-        if [ "\$RELOADED" = "1" ]; then sleep 1; continue; fi
+        # A fresh NUT producer starts a new timestamp epoch. Restart the
+        # encoder at that header, appending to the existing HLS playlist, then
+        # wait until it has reopened the FIFO before sending the new stream.
+        if [ "\$RELOADED" = "1" ]; then
+            rm -f "\$STAGE2_READY"
+            touch "\$RELOAD_STAGE2_FLAG"
+            log "STAGE1 waiting for STAGE2 reload"
+            while [ ! -f "\$STAGE2_READY" ] || [ -f "\$RELOAD_STAGE2_FLAG" ]; do sleep 1; done
+            continue
+        fi
         # Die immediately => missing/broken input: back off so a persistent
         # failure cannot spin a crash loop. A healthy run relaunches at once.
         if [ \$((T1 - T0)) -lt 5 ]; then sleep 10; else sleep 1; fi
@@ -1376,6 +1378,8 @@ stage1_loop() {
 # ── Stage 2: encoder + overlays + HLS ───────────────────────────────────────
 stage2_loop() {
     while :; do
+        rm -f "\$STAGE2_READY"
+
         # Admission control: re-encoding while the box is saturated would
         # starve everything else, so yield instead of dropping the stream
         # into a permanently stalled state.
@@ -1386,17 +1390,38 @@ stage2_loop() {
             continue
         fi
 
+        rm -f "\$RELOAD_STAGE2_FLAG"
         N=\$(next_segment)
         T0=\$(date +%s)
         log "STAGE2 start seg=\$N"
         \$NICE \$IONICE bash "\$STAGE2" "\$N" >> "\$LOG" 2>&1 &
         S2=\$!
         echo "\$S2" > "\$STREAM_DIR/stage2.pid"
+        touch "\$STAGE2_READY"
+        RELOADED=0
+        TERM_AT=0
+        while kill -0 "\$S2" 2>/dev/null; do
+            if [ -f "\$RELOAD_STAGE2_FLAG" ] && [ "\$RELOADED" = "0" ]; then
+                log "STAGE2 reload signal"
+                rm -f "\$RELOAD_STAGE2_FLAG"
+                RELOADED=1
+                TERM_AT=\$(date +%s)
+                kill -TERM "\$S2" 2>/dev/null
+            elif [ "\$RELOADED" = "1" ] && [ \$((\$(date +%s) - TERM_AT)) -ge 3 ]; then
+                log "STAGE2 TERM ignored, escalating"
+                kill -KILL "\$S2" 2>/dev/null
+            fi
+            sleep 1
+        done
         wait "\$S2"
         RC=\$?
         rm -f "\$STREAM_DIR/stage2.pid"
         T1=\$(date +%s)
         log "STAGE2 exit rc=\$RC after=\$((T1 - T0))s"
+        if [ "\$RELOADED" = "1" ] || [ -f "\$RELOAD_STAGE2_FLAG" ]; then
+            rm -f "\$RELOAD_STAGE2_FLAG"
+            continue
+        fi
         if [ \$((T1 - T0)) -lt 5 ]; then sleep 10; else sleep 1; fi
     done
 }
@@ -1405,6 +1430,7 @@ stage2_loop() {
 [ -p "\$FIFO" ] || { rm -f "\$FIFO"; mkfifo -m 666 "\$FIFO" || exit 1; }
 exec 3<>"\$FIFO" || { log "FIFO open failed"; exit 1; }
 log "SUPERVISOR start fifo=\$FIFO"
+rm -f "\$RELOAD_STAGE2_FLAG" "\$STAGE2_READY"
 
 stage1_loop &
 S1=\$!
@@ -1439,6 +1465,9 @@ BASH;
     private function writeStage2Script(string $streamDir, AdminChannel $channel, string $canvasMode): void
     {
         $path = "{$streamDir}/stage2.sh";
+        $files = $this->readConcatFiles("{$streamDir}/concat.txt");
+        $anchor = (int) @filemtime("{$streamDir}/concat.txt") ?: time();
+        $overlayEnable = $this->overlayEnableExpression($channel, $files, $anchor);
 
         $resolution = $channel->output_resolution ?: '1280x720';
         $bitrate    = $channel->output_bitrate ?: 2200;
@@ -1448,7 +1477,7 @@ BASH;
         $gop        = $fps * 2;
 
         [$extraInputs, $filterComplex] = $this->buildFiltergraph(
-            $streamDir, $channel, $width, $height, $fps, $canvasMode
+            $streamDir, $channel, $width, $height, $fps, $canvasMode, $overlayEnable
         );
 
         $inputLines = $extraInputs !== '' ? "    {$extraInputs} \\\n" : '';
@@ -1491,6 +1520,10 @@ BASH;
 
         File::put($path, $script);
         chmod($path, 0755);
+        File::put(
+            "{$streamDir}/.overlay-schedule.sig",
+            $this->overlayScheduleSignature($channel, $files)
+        );
     }
 
     /**
@@ -1499,11 +1532,9 @@ BASH;
      * The concat demuxer only reads its list at open, so an edit can never be
      * picked up by a running Stage 1 on its own — without this, adding content
      * after "Start Broadcast" left the channel looping the stale concat list
-     * (often a single file) forever. Re-prepare first so items that failed or
-     * were never baked get a second chance, rewrite concat.txt only when the
-     * resolved list actually differs, then signal Stage 1 via the reload flag.
-     * Stage 2 is untouched, so encoding, overlays and segment numbering keep
-     * running straight through the swap.
+     * (often a single file) forever. Rewrite concat.txt only when the resolved
+     * list differs, then signal Stage 1. The supervisor restarts Stage 2 at the
+     * new NUT header and appends to the existing HLS playlist.
      *
      * @return array{changed: bool, files: int, excluded: array} refresh outcome for the caller to log
      */
@@ -1530,8 +1561,8 @@ BASH;
      *
      * Stage 1 restarts at the top of the concat list whenever it respawns, so
      * rewriting concat rotated to the chosen item and signalling the reload
-     * makes it start playing there immediately — no full broadcast restart and
-     * no loss of the running segment numbering.
+     * makes it start playing there immediately. Stage 2 is restarted at the
+     * new NUT header, appending to the existing HLS segment sequence.
      */
     public function playFrom(AdminChannel $channel, int $contentId): array
     {
@@ -1557,6 +1588,7 @@ BASH;
         }
 
         File::put($concatPath, $desired);
+        $this->writeStage2Script($streamDir, $channel, $this->resolveCanvasMode($channel));
         @touch("{$streamDir}/.reload-stage1");
 
         Log::info('My channel jumped to playlist item', [
@@ -1585,7 +1617,18 @@ BASH;
         // playlist change looked like it did nothing. Whatever is ready goes
         // on air now and the rest is folded in the moment it lands.
         $excluded = [];
-        $files    = $this->collectFiles($this->resolvePlaylist($channel), $channel, $excluded);
+        $playlist = $this->resolvePlaylist($channel);
+
+        // A changed concat list makes Stage 1 reopen from its first entry.
+        // Keep the item already on air at the head of the new order, so adding
+        // media or reordering the queue does not jump the channel back to the
+        // beginning of the playlist.
+        $nowPlaying = $this->nowPlaying($channel);
+        if ($nowPlaying) {
+            $playlist = $this->rotateToContent($playlist, (int) $nowPlaying['content_id']);
+        }
+
+        $files = $this->collectFiles($playlist, $channel, $excluded);
 
         $pending = $this->queueMissingPreparation($channel);
 
@@ -1600,8 +1643,12 @@ BASH;
         }
 
         $desired = $this->concatContent($files);
+        $scheduleSignature = $this->overlayScheduleSignature($channel, $files);
+        $signaturePath = "{$streamDir}/.overlay-schedule.sig";
+        $concatChanged = (string) @file_get_contents($concatPath) !== $desired;
+        $scheduleChanged = (string) @file_get_contents($signaturePath) !== $scheduleSignature;
 
-        if ((string) @file_get_contents($concatPath) === $desired) {
+        if (! $concatChanged && ! $scheduleChanged) {
             Log::info('My channel playlist refresh skipped (already up to date)', [
                 'channel_id' => $channel->id,
                 'files'      => count($files),
@@ -1609,8 +1656,16 @@ BASH;
             return ['changed' => false, 'files' => count($files), 'excluded' => $excluded, 'pending' => $pending];
         }
 
-        File::put($concatPath, $desired);
-        @touch("{$streamDir}/.reload-stage1");
+        if ($concatChanged) {
+            File::put($concatPath, $desired);
+            $this->writeStage2Script($streamDir, $channel, $this->resolveCanvasMode($channel));
+            @touch("{$streamDir}/.reload-stage1");
+        } else {
+            // Category-only changes affect Stage 2's overlay gate, not the
+            // concat input. Rebuild/restart only the encoder so Stage 1 and
+            // the current media keep running without a playlist jump.
+            $this->restartEncoder($channel);
+        }
 
         Log::info('My channel live playlist refreshed', [
             'channel_id' => $channel->id,
@@ -1648,6 +1703,10 @@ BASH;
                 continue;
             }
 
+            if (Cache::has($this->prepareFailureKey((int) $content->id))) {
+                continue;
+            }
+
             if (! Cache::add($this->prepareLockKey((int) $content->id), 1, 3600)) {
                 continue;
             }
@@ -1664,6 +1723,27 @@ BASH;
         }
 
         return $count;
+    }
+
+    public function preparationFailure(AdminChannel $channel, int $contentId): ?string
+    {
+        $failure = Cache::get($this->prepareFailureKey($contentId));
+
+        return is_string($failure) ? $failure : null;
+    }
+
+    public function markPreparationFailed(int $contentId, string $message): void
+    {
+        Cache::put(
+            $this->prepareFailureKey($contentId),
+            mb_substr($message, 0, 500),
+            self::PREPARE_FAILURE_TTL
+        );
+    }
+
+    private function prepareFailureKey(int $contentId): string
+    {
+        return "my-channel:prepare-failed:{$contentId}";
     }
 
     private function prepareLockKey(int $contentId): string
@@ -1916,9 +1996,9 @@ BASH;
     }
 
     /**
-     * Container duration in whole seconds via ffprobe. Returns 0 when the
-     * probe fails rather than guessing, so callers can tell "unknown" from
-     * "very short".
+     * Container duration via ffprobe, rounded to whole seconds. A positive
+     * sub-second duration still occupies one playlist second; zero is reserved
+     * for an unknown or empty input so short media is not dropped as duration 0.
      */
     private function probeDuration(string $path): int
     {
@@ -1934,7 +2014,9 @@ BASH;
             return 0;
         }
 
-        return (int) round((float) trim((string) $out[0]));
+        $seconds = (float) trim((string) $out[0]);
+
+        return $seconds > 0 ? max(1, (int) round($seconds)) : 0;
     }
 
     /**
@@ -1945,6 +2027,115 @@ BASH;
     private function concatContent(array $files): string
     {
         return implode("\n", array_map(fn ($f) => 'file ' . escapeshellarg($f), $files)) . "\n";
+    }
+
+    /**
+     * Read the current concat order from the file Stage 1 actually consumes.
+     *
+     * @return list<string>
+     */
+    private function readConcatFiles(string $concatPath): array
+    {
+        if (! is_file($concatPath)) {
+            return [];
+        }
+
+        $files = [];
+        foreach (file($concatPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+            if (preg_match("/^file\\s+'(.+)'$/", $line, $match)) {
+                $files[] = str_replace("'\\''", "'", $match[1]);
+            }
+        }
+
+        return $files;
+    }
+
+    /**
+     * Build an overlay gate synchronized to Stage 1's playlist generation.
+     * FFmpeg evaluates time(0) against the concat file's modification time, so
+     * a Stage 2-only restart does not shift jingle boundaries.
+     */
+    private function overlayEnableExpression(AdminChannel $channel, array $files, int $anchor): ?string
+    {
+        $schedule = $this->overlaySchedule($channel, $files);
+        $totalDuration = array_sum(array_column($schedule, 'duration'));
+
+        if ($totalDuration <= 0) {
+            return null;
+        }
+
+        $windows = [];
+        $offset = 0;
+        foreach ($schedule as $item) {
+            $end = $offset + $item['duration'];
+            if ($item['category'] === 'jingle') {
+                $windows[] = "between(mod(time(0)-{$anchor}\\,{$totalDuration})\\,{$offset}\\,{$end})";
+            }
+            $offset = $end;
+        }
+
+        return $windows ? 'not(' . implode('+', $windows) . ')' : null;
+    }
+
+    /**
+     * @return list<array{content_id:int,category:string,duration:int}>
+     */
+    private function overlaySchedule(AdminChannel $channel, array $files): array
+    {
+        $ids = [];
+        foreach ($files as $file) {
+            if (preg_match('/prepared_(\d+)\.mp4$/', $file, $match)) {
+                $ids[] = (int) $match[1];
+            }
+        }
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $entries = MyChannelPlaylist::where('channel_id', $channel->id)
+            ->whereIn('content_id', $ids)
+            ->with('content')
+            ->get()
+            ->keyBy('content_id');
+
+        $schedule = [];
+        foreach ($files as $file) {
+            if (! preg_match('/prepared_(\d+)\.mp4$/', $file, $match)) {
+                continue;
+            }
+
+            $contentId = (int) $match[1];
+            $entry = $entries->get($contentId);
+            $duration = $entry ? $this->effectiveDuration($entry) : 0;
+            if ($duration <= 0) {
+                $duration = $this->probeDuration($file);
+            }
+            if ($duration <= 0) {
+                Log::warning('My channel overlay schedule duration unavailable; using one second', [
+                    'channel_id' => $channel->id,
+                    'content_id' => $contentId,
+                    'path' => $file,
+                ]);
+                $duration = 1;
+            }
+
+            $schedule[] = [
+                'content_id' => $contentId,
+                'category' => $entry?->category === 'jingle' ? 'jingle' : 'program',
+                'duration' => $duration,
+            ];
+        }
+
+        return $schedule;
+    }
+
+    private function overlayScheduleSignature(AdminChannel $channel, array $files): string
+    {
+        return hash('sha256', json_encode(
+            $this->overlaySchedule($channel, $files),
+            JSON_THROW_ON_ERROR
+        ));
     }
 
     /**
@@ -1963,7 +2154,14 @@ BASH;
 
         $files = $this->collectFiles($this->resolvePlaylist($channel), $channel);
 
-        return $files !== [] && $this->concatContent($files) !== (string) @file_get_contents($concatPath);
+        if ($files === []) {
+            return false;
+        }
+
+        $signaturePath = $this->streamDir($channel) . '/.overlay-schedule.sig';
+
+        return $this->concatContent($files) !== (string) @file_get_contents($concatPath)
+            || $this->overlayScheduleSignature($channel, $files) !== (string) @file_get_contents($signaturePath);
     }
 
     /**
@@ -2046,7 +2244,8 @@ BASH;
         int $width,
         int $height,
         int $fps,
-        string $canvasMode
+        string $canvasMode,
+        ?string $overlayEnable = null
     ): array {
         $extraInputs = [];
         $filters     = [];
@@ -2078,7 +2277,8 @@ BASH;
             );
         }
 
-        $filters[] = "{$lastVideo}[{$canvasInputIndex}:v]overlay=x=0:y=0[vcanvas]";
+        $canvasEnable = $overlayEnable !== null ? ":enable='{$overlayEnable}'" : '';
+        $filters[] = "{$lastVideo}[{$canvasInputIndex}:v]overlay=x=0:y=0{$canvasEnable}[vcanvas]";
         $lastVideo = '[vcanvas]';
 
         // ── Ticker — textfile+reload=1, zero restart on text changes ─────────
@@ -2101,16 +2301,17 @@ BASH;
             $bar = $clearBg
                 ? ''
                 : sprintf(
-                    'drawbox=x=0:y=%d:w=iw:h=%d:color=%s:t=fill,',
+                    'drawbox=x=0:y=%d:w=iw:h=%d:color=%s:t=fill%s,',
                     $yPos,
                     $barH,
-                    $this->hexToFfmpegColor($channel->ticker_background ?: '#000000cc')
+                    $this->hexToFfmpegColor($channel->ticker_background ?: '#000000cc'),
+                    $canvasEnable
                 );
             $textY = $clearBg ? $height - $fontsize - 6 : $yPos + 6;
 
             $filters[] = "{$lastVideo}{$bar}" .
                          "drawtext=textfile='{$escaped}':reload=1:fontcolor=0x{$color}:fontsize={$fontsize}" .
-                         ":x='{$xExpr}':y={$textY}[vticker]";
+                         ":x='{$xExpr}':y={$textY}{$canvasEnable}[vticker]";
             $lastVideo  = '[vticker]';
         }
 
@@ -2134,7 +2335,7 @@ BASH;
                 : "box=1:boxcolor={$boxColor}:boxborderw={$pad}";
 
             $filters[] = "{$lastVideo}drawtext=expansion=strftime:text='{$timeExpr}':fontcolor={$fontColor}" .
-                         ":fontsize={$fontsize}:{$box}:x={$cX}:y={$cY}[vclock]";
+                         ":fontsize={$fontsize}:{$box}:x={$cX}:y={$cY}{$canvasEnable}[vclock]";
             $lastVideo = '[vclock]';
         }
 

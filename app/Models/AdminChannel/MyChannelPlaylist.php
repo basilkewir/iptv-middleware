@@ -14,7 +14,7 @@ class MyChannelPlaylist extends Model
         'start_offset', 'end_offset', 'custom_duration',
         'scheduled_start', 'scheduled_end', 'day_of_week', 'time_of_day',
         'transition_type', 'transition_duration', 'override_quality',
-        'is_active', 'is_featured',
+        'is_active', 'is_featured', 'category',
     ];
 
     protected $casts = [

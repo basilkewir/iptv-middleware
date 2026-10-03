@@ -11,6 +11,9 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 class PrepareMyChannelContent implements ShouldQueue
 {
@@ -27,6 +30,7 @@ class PrepareMyChannelContent implements ShouldQueue
         $content = MyChannelContent::with('channel')->find($this->contentId);
 
         if (! $content || ! $content->channel?->is_my_channel) {
+            $this->releasePreparationLocks();
             return;
         }
 
@@ -34,23 +38,43 @@ class PrepareMyChannelContent implements ShouldQueue
             ->where('channel_id', $content->channel_id)
             ->first();
 
-        try {
-            $hls->prepareFile($content->channel, $content->id, storage_path('app/public/' . $content->file_path), $entry);
+        $hls->prepareFile($content->channel, $content->id, storage_path('app/public/' . $content->file_path), $entry);
+        $content->update(['prepared_at' => now()]);
 
-            $content->update(['prepared_at' => now()]);
-        } finally {
-            // Always release both locks, including on failure, or the item
-            // could never be queued again and the box-wide gate would stay
-            // shut for good.
-            $cache = \Illuminate\Support\Facades\Cache::forget(
-                'my-channel:preparing:' . $content->id
-            );
-            \Illuminate\Support\Facades\Cache::forget(MyChannelHlsService::PREPARE_GATE);
-        }
+        $this->releasePreparationLocks();
+        Cache::forget('my-channel:prepare-failed:' . $content->id);
 
         // The item is baked now — fold it into the running playout so it joins
         // the loop without anyone pressing anything. This also queues the next
         // pending prepare, keeping the pipeline serialised.
         RefreshMyChannelPlayout::dispatch($content->channel_id);
+    }
+
+    public function failed(Throwable $exception): void
+    {
+        $this->releasePreparationLocks();
+
+        $content = MyChannelContent::with('channel')->find($this->contentId);
+        if (! $content || ! $content->channel?->is_my_channel) {
+            return;
+        }
+
+        $message = $exception->getMessage() ?: 'Media preparation failed';
+        app(MyChannelHlsService::class)->markPreparationFailed($content->id, $message);
+
+        Log::error('My channel content preparation failed; continuing playlist queue', [
+            'channel_id' => $content->channel_id,
+            'content_id' => $content->id,
+            'title'      => $content->title,
+            'error'      => $message,
+        ]);
+
+        RefreshMyChannelPlayout::dispatch($content->channel_id);
+    }
+
+    private function releasePreparationLocks(): void
+    {
+        Cache::forget('my-channel:preparing:' . $this->contentId);
+        Cache::forget(MyChannelHlsService::PREPARE_GATE);
     }
 }
