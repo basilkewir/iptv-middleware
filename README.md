@@ -152,10 +152,10 @@ Every "My Channel" runs as two supervised FFmpeg processes connected by a FIFO:
   logo, watermark, clock, ticker and rotating-canvas overlays, writing HLS
   segments to disk.
 
-Because Stage 2 reads from a pipe, editing an overlay (logo, clock, ticker
-text) is re-read from disk every frame — those changes need **no restart**.
-Only a change to the encoder graph itself (resolution, fps, filter chain)
-bumps the systemd unit.
+Because Stage 2 reads from a pipe, ticker text is re-read from disk every
+frame. Logo and watermark canvas changes restart Stage 2 so FFmpeg decodes the
+new image; Stage 1 keeps the playlist timeline running and HLS segments append
+to the existing manifest. Filtergraph changes also restart Stage 2 only.
 
 Playlist items can be categorized as **Program** or **Jingle**. Saving category
 changes updates the live overlay gate; all channel overlays are hidden while a
@@ -172,7 +172,9 @@ sudo iptv-playout-ctl {start|stop|restart|status|show} <channel-slug>
 
 The smoke test requires Linux, FFmpeg, FFprobe, PHP and Python 3. It renders
 five visually distinct clips, including a one-second item, and verifies each
-reaches HLS output while the clock and ticker overlays are enabled.
+reaches HLS output while the clock and ticker overlays are enabled. It also
+checks that a canvas update restarts only Stage 2 and respects HLS timestamp
+discontinuities during segment validation.
 
 ## UDP / Multicast
 

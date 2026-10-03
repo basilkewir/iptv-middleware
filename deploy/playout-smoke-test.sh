@@ -16,7 +16,7 @@ set -uo pipefail
 
 SLUG="${1:-smoke-$$}"
 SLUG="${SLUG//[^A-Za-z0-9_.-]/_}"
-SEGMENTS_WANTED=6
+SEGMENTS_WANTED=8
 SETTLE_SECONDS=90
 
 say()  { printf '  %s\n' "$*"; }
@@ -291,58 +291,80 @@ else
     tail -30 "$STREAM_DIR/ffmpeg.log" 2>/dev/null | sed 's/^/        /'
 fi
 
-# ── 7. Overlay hot-reload: rewrite the canvas, encoder must not restart ─────
-head_ "[7/10] overlay hot-reload"
+# ── 7. Canvas update: restart only Stage 2 to decode the replacement PNG ────
+head_ "[7/10] canvas update and Stage 2 isolation"
 S2_BEFORE=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
 if [ -n "$S2_BEFORE" ] && [ -f "$RAM_DIR/overlay.png" ]; then
+    S1_BEFORE=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
+    SEQ_BEFORE=$(awk -F: '/^#EXT-X-MEDIA-SEQUENCE:/{print $2; exit}' "$STREAM_DIR/index.m3u8" 2>/dev/null)
     # A visibly different canvas: 200x200 solid magenta.
     ffmpeg -y -hide_banner -loglevel error \
         -f lavfi -i "color=c=0xFF00FF:s=200x200" \
         -frames:v 1 -c:v png "$RAM_DIR/overlay.tmp.png" 2>/dev/null
     if [ -f "$RAM_DIR/overlay.tmp.png" ]; then
         mv -f "$RAM_DIR/overlay.tmp.png" "$RAM_DIR/overlay.png"
-        sleep 6
-        S2_AFTER=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
-        if [ "$S2_AFTER" = "$S2_BEFORE" ] && kill -0 "$S2_AFTER" 2>/dev/null; then
-            pass "canvas rewritten, encoder pid unchanged ($S2_AFTER)"
+        # image2 -loop 1 holds its decoded packet, so simulate the production
+        # update path: Stage 2 restarts, Stage 1 and its playlist stay intact.
+        kill -TERM "$S2_BEFORE" 2>/dev/null
+        deadline=$(( $(date +%s) + 45 ))
+        S2_AFTER=""
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+            S2_AFTER=$(cat "$STREAM_DIR/stage2.pid" 2>/dev/null || echo "")
+            [ -n "$S2_AFTER" ] && [ "$S2_AFTER" != "$S2_BEFORE" ] \
+                && kill -0 "$S2_AFTER" 2>/dev/null && break
+            sleep 1
+        done
+        S1_AFTER=$(cat "$STREAM_DIR/stage1.pid" 2>/dev/null || echo "")
+        if [ -n "$S2_AFTER" ] && [ "$S2_AFTER" != "$S2_BEFORE" ] && kill -0 "$S2_AFTER" 2>/dev/null; then
+            pass "encoder relaunched to read updated canvas ($S2_BEFORE -> $S2_AFTER)"
         else
-            fail "encoder restarted on canvas rewrite ($S2_BEFORE -> $S2_AFTER)"
+            fail "encoder did not relaunch for updated canvas"
         fi
-        latest=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | sort | tail -1)
-        if [ -n "$latest" ] && python3 - "$latest" <<'PY'
+        if [ -n "$S1_BEFORE" ] && [ "$S1_AFTER" = "$S1_BEFORE" ] && kill -0 "$S1_AFTER" 2>/dev/null; then
+            pass "Stage 1 and playlist input stayed alive during canvas update ($S1_AFTER)"
+        else
+            fail "Stage 1 changed during canvas update ($S1_BEFORE -> $S1_AFTER)"
+        fi
+        sleep 5
+        mapfile -t RECENT_SEGS < <(ls -1t "$STREAM_DIR"/seg_*.ts 2>/dev/null | head -5)
+        if [ "${#RECENT_SEGS[@]}" -gt 0 ] && python3 - "${RECENT_SEGS[@]}" <<'PY'
 import subprocess
 import sys
 
-frame = subprocess.run(
-    [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", sys.argv[1],
-        "-ss", "0.5", "-frames:v", "1",
-        "-vf", "crop=2:2:100:100,format=rgb24", "-f", "rawvideo", "-",
-    ],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.DEVNULL,
-    check=False,
-).stdout
-if len(frame) < 12:
-    sys.exit(1)
+for segment in sys.argv[1:]:
+    frame = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", segment,
+            "-ss", "0.5", "-frames:v", "1",
+            "-vf", "crop=2:2:100:100,format=rgb24", "-f", "rawvideo", "-",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).stdout
+    if len(frame) < 12:
+        continue
 
-pixels = [frame[i:i + 3] for i in range(0, 12, 3)]
-red = sum(pixel[0] for pixel in pixels) / 4
-green = sum(pixel[1] for pixel in pixels) / 4
-blue = sum(pixel[2] for pixel in pixels) / 4
-if not (red > 150 and green < 100 and blue > 150):
-    sys.exit(1)
+    pixels = [frame[i:i + 3] for i in range(0, 12, 3)]
+    red = sum(pixel[0] for pixel in pixels) / 4
+    green = sum(pixel[1] for pixel in pixels) / 4
+    blue = sum(pixel[2] for pixel in pixels) / 4
+    if red > 150 and green < 100 and blue > 150:
+        sys.exit(0)
+
+sys.exit(1)
 PY
         then
-            pass "updated canvas is visible in the encoded HLS video"
+            pass "updated canvas is visible in recent HLS segments"
         else
-            fail "updated canvas did not appear in the encoded HLS video"
+            fail "updated canvas did not appear in recent HLS segments"
         fi
-        count=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | wc -l)
-        sleep 8
-        count2=$(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | wc -l)
-        [ "$count2" -gt "$count" ] && pass "stream continued after rewrite ($count -> $count2 segments)" \
-                                   || fail "stream stalled after rewrite ($count -> $count2 segments)"
+        SEQ_AFTER=$(awk -F: '/^#EXT-X-MEDIA-SEQUENCE:/{print $2; exit}' "$STREAM_DIR/index.m3u8" 2>/dev/null)
+        if [ -n "$SEQ_BEFORE" ] && [ -n "$SEQ_AFTER" ] && [ "$SEQ_AFTER" -gt "$SEQ_BEFORE" ]; then
+            pass "HLS media sequence continued through canvas update ($SEQ_BEFORE -> $SEQ_AFTER)"
+        else
+            fail "HLS sequence stalled during canvas update ($SEQ_BEFORE -> $SEQ_AFTER)"
+        fi
     else
         skip "could not render a replacement canvas"
     fi
@@ -380,19 +402,53 @@ fi
 
 # ── 9. Delivery contract: monotonic PTS, sane clock timebase ────────────────
 head_ "[9/10] segment timeline"
+if python3 - "$STREAM_DIR/index.m3u8" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+manifest = pathlib.Path(sys.argv[1])
+lines = manifest.read_text().splitlines()
+segments = []
+discontinuity = False
+for line in lines:
+    if line == "#EXT-X-DISCONTINUITY":
+        discontinuity = True
+    elif line.endswith(".ts"):
+        segments.append((manifest.parent / line, discontinuity))
+        discontinuity = False
+
+for (first, _), (second, has_discontinuity) in zip(segments, segments[1:]):
+    if has_discontinuity:
+        continue
+
+    end = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(first)],
+        capture_output=True, text=True, check=False,
+    )
+    start = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(second)],
+        capture_output=True, text=True, check=False,
+    )
+    try:
+        a_end = float(end.stdout.splitlines()[-1])
+        b_start = float(start.stdout.splitlines()[0])
+    except (IndexError, ValueError):
+        continue
+    if b_start < a_end - 1.0:
+        print(f"PTS regression within continuous HLS timeline: {first.name} -> {second.name}")
+        sys.exit(1)
+PY
+then
+    pass "packet PTS never runs backwards across continuous HLS segments"
+else
+    fail "PTS regression between continuous HLS segments"
+fi
+
 mapfile -t SEGS < <(ls -1 "$STREAM_DIR"/seg_*.ts 2>/dev/null | sort)
 if [ "${#SEGS[@]}" -ge 2 ]; then
-    monotonic=1
-    for ((i = 0; i < ${#SEGS[@]} - 1 && i < 8; i++)); do
-        a_end=$(ffprobe -v error -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 "${SEGS[$i]}" 2>/dev/null | tail -1)
-        b_start=$(ffprobe -v error -select_streams v:0 -show_entries packet=pts_time -of csv=p=0 "${SEGS[$((i + 1))]}" 2>/dev/null | head -1)
-        [ -z "$a_end" ] && continue
-        [ -z "$b_start" ] && continue
-        awk -v a="$a_end" -v b="$b_start" 'BEGIN{exit !(b < a - 1.0)}' && monotonic=0
-    done
-    [ "$monotonic" = "1" ] && pass "packet PTS never runs backwards across adjacent segments" \
-                           || fail "PTS regression between adjacent segments"
-
     dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "${SEGS[0]}" 2>/dev/null | head -1)
     if [ -n "$dur" ] && awk -v d="$dur" 'BEGIN{exit !(d > 0.5 && d < 30)}'; then
         pass "segment duration sane (${dur}s)"

@@ -368,9 +368,9 @@ class MyChannelHlsService
      *
      *   • ticker text      — ticker.txt, re-read every frame (reload=1)
      *   • logo & watermark — image, position, size, opacity and on/off are all
-     *                        baked into the full-frame RGBA canvas that Stage 2
-     *                        re-reads, so a rewrite is picked up with no
-     *                        restart at all
+     *                        baked into the full-frame RGBA canvas. FFmpeg's
+     *                        image2 loop retains its decoded packet, so apply
+     *                        the rewrite by restarting Stage 2 only.
      *   • ticker styling / clock config — these are literals inside the
      *                        filtergraph, so they need a Stage-2-only restart.
      *                        Stage 1 keeps playing and the FIFO keeps the
@@ -385,9 +385,8 @@ class MyChannelHlsService
         }
 
         // Ticker text is re-read by drawtext every frame, so a rewrite is all
-        // it takes. The canvas is re-read by Stage 2 on its loop, but only
-        // re-render it when something that lives on the canvas actually moved —
-        // a colour or clock change should not pay for an ffmpeg exec.
+        // it takes. Re-render the canvas only when something that lives on it
+        // changed; that path restarts Stage 2 so it decodes the new PNG.
         $imagesChanged = ! empty(array_intersect(array_keys($changed), self::IMAGE_OVERLAY_FIELDS));
         $this->writeOverlayAssets($streamDir, $channel, $imagesChanged);
 
@@ -411,16 +410,15 @@ class MyChannelHlsService
 
         return array_intersect(array_keys($changed), self::GRAPH_FIXED_OVERLAY_FIELDS) !== []
             ? 'filtergraph field changed'
-            : 'canvas is static, so an image field changed';
+            : 'canvas image changed';
     }
 
     /**
      * Does an overlay change require restarting Stage 2?
      *
      * Public and side-effect free so the contract can be asserted directly:
-     * ticker text and (in live canvas mode) logo/watermark edits are free,
-     * while anything compiled into the filtergraph string restarts the
-     * encoder only — Stage 1 and the concat list are never touched.
+     * ticker text changes are free, while filtergraph and canvas changes
+     * restart the encoder only — Stage 1 and the concat list are never touched.
      */
     public function encoderRestartRequired(AdminChannel $channel, array $changed): bool
     {
@@ -430,10 +428,7 @@ class MyChannelHlsService
             return true;
         }
 
-        // Image fields are live on the canvas input, except in static mode
-        // where the canvas is decoded once at launch.
-        return ! $this->canvasIsLive($channel)
-            && ! empty(array_intersect($changedKeys, self::IMAGE_OVERLAY_FIELDS));
+        return ! empty(array_intersect($changedKeys, self::IMAGE_OVERLAY_FIELDS));
     }
 
     // ─── Prepare stage (normalize content) ──────────────────────────────────
@@ -794,7 +789,7 @@ class MyChannelHlsService
      *   • overlay.raw → /dev/shm, a full-frame RGBA canvas with the logo and
      *                   watermark already composited onto it. Stage 2 overlays
      *                   this one input, so image / position / size / opacity /
-     *                   enable changes are a file rewrite instead of a restart.
+     *                   enable changes rewrite the canvas before Stage 2 restarts.
      *   • logo.png / watermark.png → kept beside the stream for debugging and
      *                   as the source the canvas is composed from.
      */
@@ -832,12 +827,9 @@ class MyChannelHlsService
      * Render the overlay canvas: a transparent full-frame RGBA PNG with the
      * logo and watermark composited onto it, sitting on the RAM disk.
      *
-     * Stage 2 opens it with the image2 demuxer and `-loop 1`, which re-opens
-     * the file BY PATH for every packet it produces — so rewriting this file
-     * is all it takes to change the logo, its position, size, opacity or its
-     * enabled state on a live encoder. The rewrite is an atomic rename, so the
-     * reader either sees the old complete PNG or the new one, never a
-     * half-written image (a decode failure there would kill Stage 2).
+     * Stage 2 holds the PNG packet supplied by image2 `-loop 1`, so updating
+     * the canvas restarts Stage 2. The rewrite is atomic: the new process sees
+     * either the old complete PNG or the new one, never a partial file.
      */
     private function writeOverlayCanvas(AdminChannel $channel): void
     {
@@ -966,9 +958,8 @@ class MyChannelHlsService
     /**
      * Which canvas input style Stage 2 should open.
      *
-     *   png    — image2 `-loop 1`: the demuxer re-opens overlay.png by path for
-     *            every packet, so a rewrite is picked up by the live encoder
-     *            with no restart at all (default).
+     *   png    — image2 `-loop 1` overlay input. Updating its canvas requires
+     *            an encoder restart so the new image is decoded (default).
      *   static — classic `-i overlay.png` with no loop: the canvas is decoded
      *            once and held for the life of Stage 2, so an overlay edit
      *            needs an encoder restart (still never a Stage-1 restart).
@@ -981,16 +972,6 @@ class MyChannelHlsService
         $mode = strtolower((string) config('playout.canvas_mode', 'png'));
 
         return $mode === 'static' ? 'static' : 'png';
-    }
-
-    /**
-     * True when the configured canvas mode actually re-reads the file, so an
-     * overlay edit can be applied live. When false the edit is written anyway
-     * (so the next restart picks it up) and an encoder restart is requested.
-     */
-    private function canvasIsLive(AdminChannel $channel): bool
-    {
-        return $this->resolveCanvasMode($channel) !== 'static';
     }
 
     private function ramDir(AdminChannel $channel): string

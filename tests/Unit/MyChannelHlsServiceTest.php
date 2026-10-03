@@ -140,12 +140,12 @@ class MyChannelHlsServiceTest extends TestCase
         $this->assertStringStartsWith('[0:v]fps=25,setpts=N/(25*TB)[vnorm]', $vf);
     }
 
-    public function test_canvas_input_is_always_present_so_image_edits_need_no_restart(): void
+    public function test_canvas_input_is_always_present_for_live_overlay_control(): void
     {
         [$inputs, $vf] = $this->graph($this->plainChannel());
 
         // Even with every overlay disabled the canvas stays wired in, so
-        // enabling a logo later is a file rewrite rather than a graph change.
+        // enabling a logo does not change Stage 2's filtergraph.
         $this->assertStringContainsString('-f image2 -loop 1 -framerate', $inputs);
         $this->assertStringContainsString('[vnorm][2:v]overlay=x=0:y=0[vcanvas]', $vf);
     }
@@ -329,17 +329,17 @@ class MyChannelHlsServiceTest extends TestCase
         }
     }
 
-    public function test_image_change_is_live_in_the_default_canvas_mode(): void
+    public function test_image_change_restarts_stage2_in_the_default_canvas_mode(): void
     {
         config(['playout.canvas_mode' => 'png']);
 
-        $this->assertFalse($this->service()->encoderRestartRequired(
+        $this->assertTrue($this->service()->encoderRestartRequired(
             $this->plainChannel(),
             ['logo_url' => '/new/logo.png', 'overlay_logo_size' => 250, 'enable_watermark' => true]
         ));
     }
 
-    public function test_image_change_needs_a_restart_when_the_canvas_is_static(): void
+    public function test_image_change_restarts_stage2_in_static_canvas_mode(): void
     {
         config(['playout.canvas_mode' => 'static']);
 
